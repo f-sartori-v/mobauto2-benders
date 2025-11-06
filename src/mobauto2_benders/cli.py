@@ -38,7 +38,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=Path("configs/default.toml"),
-        help="Path to TOML config (default: configs/default.toml)",
+        help="Path to config (TOML or YAML). Default: configs/default.toml",
     )
     sub = p.add_subparsers(dest="cmd")
     sub.required = False
@@ -99,4 +99,3 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_info(args)
     parser.print_help()
     return 2
-

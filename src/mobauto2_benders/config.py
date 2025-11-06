@@ -10,6 +10,11 @@ try:  # Python 3.11+
 except Exception:  # pragma: no cover - fallback if older Python
     import tomli as _toml  # type: ignore
 
+try:
+    import yaml as _yaml  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    _yaml = None
+
 
 @dataclass(slots=True)
 class RunConfig:
@@ -42,6 +47,18 @@ def _load_toml(path: Path) -> dict[str, Any]:
         return _toml.load(f)
 
 
+def _load_yaml(path: Path) -> dict[str, Any]:
+    if _yaml is None:
+        raise RuntimeError(
+            "YAML config requested but PyYAML is not installed. Install with 'pip install pyyaml'."
+        )
+    with path.open("r", encoding="utf-8") as f:
+        data = _yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            raise ValueError("Top-level YAML document must be a mapping")
+        return data
+
+
 def load_config(path: str | Path | None) -> BendersConfig:
     """Load configuration from a TOML file or return defaults.
 
@@ -54,7 +71,10 @@ def load_config(path: str | Path | None) -> BendersConfig:
         # Return defaults but allow the CLI to keep going
         return BendersConfig()
 
-    raw = _load_toml(p)
+    if p.suffix.lower() in {".yaml", ".yml"}:
+        raw = _load_yaml(p)
+    else:
+        raw = _load_toml(p)
     run = _as_dict(raw.get("run"))
     master = _as_dict(raw.get("master"))
     sub = _as_dict(raw.get("subproblem"))
@@ -79,4 +99,3 @@ def load_config(path: str | Path | None) -> BendersConfig:
 
 
 __all__ = ["RunConfig", "ComponentConfig", "BendersConfig", "load_config"]
-

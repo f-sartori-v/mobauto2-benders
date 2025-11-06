@@ -19,6 +19,7 @@ classifiers = [
 ]
 dependencies = [
   "pyomo>=6.6",
+  "pyyaml>=6.0",
 ]
 
 [project.urls]

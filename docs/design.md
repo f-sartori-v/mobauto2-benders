@@ -54,7 +54,9 @@ Scenarios and aggregation:
 - Otherwise, one cut is generated per scenario and all are added to the master.
 - `ub_aggregation`: how to combine per-scenario UB values (`mean`|`sum`|`max`). Defaults to `mean`.
 
-Configuration (configs/default.toml):
+Configuration (TOML or YAML)
+
+TOML example (configs/default.toml):
 
 ```
 [run]
@@ -71,6 +73,40 @@ impl = "to_fill"
 [subproblem]
 impl = "to_fill"
 [subproblem.params]
+```
+
+YAML example (configs/default.yaml):
+
+```
+run:
+  max_iterations: 100
+  tolerance: 0.0001
+  time_limit_s: 600
+  log_level: INFO
+  seed: 42
+
+master:
+  impl: pyomo
+  params:
+    solver: glpk
+    Q: 2
+    T: 8
+    trip_slots: 2
+    Emax: 100.0
+    L: 10.0
+    delta_chg: 25.0
+    binit: [60.0, 80.0]
+
+subproblem:
+  impl: pyomo_lp
+  params:
+    lp_solver: glpk
+    S: 4.0
+    T: 8
+    Wmax_slots: 2
+    p: 1000.0
+    R_out: [0, 0, 0, 0, 0, 0, 0, 0]
+    R_ret: [0, 0, 0, 0, 0, 0, 0, 0]
 ```
 
 Next steps:
