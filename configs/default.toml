@@ -1,0 +1,17 @@
+# Default configuration for the Benders framework
+
+[run]
+max_iterations = 100
+tolerance = 1e-4
+time_limit_s = 600
+log_level = "INFO"
+seed = 42
+
+[master]
+impl = "to_fill"  # optional hint string
+[master.params]
+
+[subproblem]
+impl = "to_fill"  # optional hint string
+[subproblem.params]
+
