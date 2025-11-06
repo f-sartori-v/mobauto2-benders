@@ -104,7 +104,7 @@ class ProblemMaster(MasterProblem):
         self.m = m
 
     def _solver(self) -> pyo.SolverFactory:
-        name = str(self._p("solver", "glpk"))
+        name = str(self._p("solver", "cplex_direct"))
         solver = pyo.SolverFactory(name)
         opts = self._p("solver_options", {}) or {}
         for k, v in opts.items():

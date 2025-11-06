@@ -4,12 +4,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-
-try:  # Python 3.11+
-    import tomllib as _toml
-except Exception:  # pragma: no cover - fallback if older Python
-    import tomli as _toml  # type: ignore
-
 try:
     import yaml as _yaml  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
@@ -42,11 +36,6 @@ def _as_dict(m: Mapping[str, Any] | None) -> dict[str, Any]:
     return dict(m) if m else {}
 
 
-def _load_toml(path: Path) -> dict[str, Any]:
-    with path.open("rb") as f:
-        return _toml.load(f)
-
-
 def _load_yaml(path: Path) -> dict[str, Any]:
     if _yaml is None:
         raise RuntimeError(
@@ -60,9 +49,9 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_config(path: str | Path | None) -> BendersConfig:
-    """Load configuration from a TOML file or return defaults.
+    """Load configuration from a YAML file or return defaults.
 
-    The schema is minimal and forgiving; unknown keys are ignored.
+    The schema is minimal and forgiving; unknown keys are ignored. Only YAML is supported.
     """
     if path is None:
         return BendersConfig()
@@ -71,10 +60,9 @@ def load_config(path: str | Path | None) -> BendersConfig:
         # Return defaults but allow the CLI to keep going
         return BendersConfig()
 
-    if p.suffix.lower() in {".yaml", ".yml"}:
-        raw = _load_yaml(p)
-    else:
-        raw = _load_toml(p)
+    if p.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError(f"Unsupported config format '{p.suffix}'. Please provide a YAML file.")
+    raw = _load_yaml(p)
     run = _as_dict(raw.get("run"))
     master = _as_dict(raw.get("master"))
     sub = _as_dict(raw.get("subproblem"))

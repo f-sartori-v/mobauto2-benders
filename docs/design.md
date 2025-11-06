@@ -13,9 +13,11 @@ Key modules:
 - `benders/master.py` — abstract master interface
 - `benders/subproblem.py` — abstract subproblem interface
 - `benders/solver.py` — the orchestrator loop (termination: time, iterations, gap)
-- `config.py` — TOML-based configuration (uses stdlib `tomllib` on Python 3.11+)
+- `config.py` — YAML-based configuration
 - `logging_config.py` — basic structured logging setup
 - `cli.py` — `mobauto2-benders` command to run/validate/info
+  - Subcommands:
+    - `run` — main orchestrator using structured YAML (`configs/default.yaml`)
 
 Implementation hints:
 
@@ -49,31 +51,12 @@ Subproblem (assignment + waiting LP):
 
 Scenarios and aggregation:
 
-- Provide scenarios via TOML array of tables under `[subproblem.params.scenarios]` with `R_out`, `R_ret`.
+- Provide scenarios via a YAML list under `subproblem.params.scenarios` with `R_out`, `R_ret`.
 - `average_cuts_across_scenarios = true` produces one averaged cut (weighted by `scenario_weights` if provided).
 - Otherwise, one cut is generated per scenario and all are added to the master.
 - `ub_aggregation`: how to combine per-scenario UB values (`mean`|`sum`|`max`). Defaults to `mean`.
 
-Configuration (TOML or YAML)
-
-TOML example (configs/default.toml):
-
-```
-[run]
-max_iterations = 100
-tolerance = 1e-4
-time_limit_s = 600
-log_level = "INFO"
-seed = 42
-
-[master]
-impl = "to_fill"
-[master.params]
-
-[subproblem]
-impl = "to_fill"
-[subproblem.params]
-```
+Configuration (YAML)
 
 YAML example (configs/default.yaml):
 
@@ -88,7 +71,7 @@ run:
 master:
   impl: pyomo
   params:
-    solver: glpk
+    solver: cplex_direct
     Q: 2
     T: 8
     trip_slots: 2
@@ -100,13 +83,13 @@ master:
 subproblem:
   impl: pyomo_lp
   params:
-    lp_solver: glpk
+    lp_solver: cplex_direct
     S: 4.0
     T: 8
     Wmax_slots: 2
     p: 1000.0
-    R_out: [0, 0, 0, 0, 0, 0, 0, 0]
-    R_ret: [0, 0, 0, 0, 0, 0, 0, 0]
+    R_out: [0, 1, 0, 2, 0, 0, 0, 0]
+    R_ret: [0, 0, 0, 0, 0, 2, 0, 0]
 ```
 
 Next steps:
@@ -116,4 +99,4 @@ Next steps:
 2. Choose and integrate a solver stack (e.g., Pyomo + CBC/CPLEX/Gurobi), then
    implement `solve()` and `add_cut()` in the master, and `evaluate()` in the
    subproblem.
-3. Run `mobauto2-benders run --config configs/default.toml`.
+3. Run `mobauto2-benders run --config configs/default.yaml`.

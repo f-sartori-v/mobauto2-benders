@@ -43,7 +43,7 @@ class ProblemSubproblem(Subproblem):
         S = float(params.get("S", 1.0))
         Wmax = int(params.get("Wmax_slots", params.get("Wmax", 0)))
         p_pen = float(params.get("p", 0.0))
-        lp_solver = str(params.get("lp_solver", "glpk"))
+        lp_solver = str(params.get("lp_solver", "cplex_direct"))
 
         # Determine T and Q from candidate if not configured
         q_idx, t_idx = self._parse_candidate_indices(candidate)

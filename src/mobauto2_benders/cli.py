@@ -2,9 +2,19 @@ import argparse
 import sys
 from pathlib import Path
 
-from .config import load_config
-from .logging_config import setup_logging
-from .benders.solver import BendersSolver
+# Allow running as a standalone script (python path/to/cli.py)
+if __package__ in (None, ""):
+    THIS_FILE = Path(__file__).resolve()
+    SRC_ROOT = THIS_FILE.parents[1]
+    if str(SRC_ROOT) not in sys.path:
+        sys.path.insert(0, str(SRC_ROOT))
+    from mobauto2_benders.config import load_config  # type: ignore
+    from mobauto2_benders.logging_config import setup_logging  # type: ignore
+    from mobauto2_benders.benders.solver import BendersSolver  # type: ignore
+else:
+    from .config import load_config
+    from .logging_config import setup_logging
+    from .benders.solver import BendersSolver
 
 
 def _import_problem_impl():
@@ -14,8 +24,13 @@ def _import_problem_impl():
     `mobauto2_benders.problem.master_impl` and `.subproblem_impl`.
     """
     try:
-        from .problem.master_impl import ProblemMaster  # type: ignore
-        from .problem.subproblem_impl import ProblemSubproblem  # type: ignore
+        if __package__ in (None, ""):
+            # Executed as a script: import via absolute package path
+            from mobauto2_benders.problem.master_impl import ProblemMaster  # type: ignore
+            from mobauto2_benders.problem.subproblem_impl import ProblemSubproblem  # type: ignore
+        else:
+            from .problem.master_impl import ProblemMaster  # type: ignore
+            from .problem.subproblem_impl import ProblemSubproblem  # type: ignore
         return ProblemMaster, ProblemSubproblem
     except Exception as exc:  # noqa: BLE001 - provide friendly message
         raise SystemExit(
@@ -37,8 +52,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/default.toml"),
-        help="Path to config (TOML or YAML). Default: configs/default.toml",
+        default=Path("configs/default.yaml"),
+        help="Path to YAML config. Default: configs/default.yaml",
     )
     sub = p.add_subparsers(dest="cmd")
     sub.required = False
@@ -99,3 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_info(args)
     parser.print_help()
     return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

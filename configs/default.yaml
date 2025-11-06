@@ -8,7 +8,7 @@ run:
 master:
   impl: pyomo
   params:
-    solver: glpk
+    solver: cplex_direct
     Q: 2
     T: 8
     trip_slots: 2
@@ -20,18 +20,17 @@ master:
 subproblem:
   impl: pyomo_lp
   params:
-    lp_solver: glpk
+    lp_solver: cplex_direct
     S: 4.0
     T: 8
     Wmax_slots: 2
     p: 1000.0
-    # Single-demand fallback (used if scenarios not provided)
-    R_out: [0, 0, 0, 0, 0, 0, 0, 0]
-    R_ret: [0, 0, 0, 0, 0, 0, 0, 0]
+    # Single-demand parameters (initial demo demand)
+    R_out: [0, 1, 0, 2, 0, 0, 0, 0]
+    R_ret: [0, 0, 0, 0, 0, 2, 0, 0]
     # Example single-scenario (remove if not needed)
     # average_cuts_across_scenarios: true
     # ub_aggregation: mean
     # scenarios:
     #   - R_out: [0, 0, 0, 0, 0, 0, 0, 0]
     #     R_ret: [0, 0, 0, 0, 0, 0, 0, 0]
-
