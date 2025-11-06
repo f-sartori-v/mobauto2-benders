@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 
 
 class SolveStatus(str, Enum):
@@ -34,13 +34,14 @@ class Cut:
     rhs: float = 0.0
     sense: str = "<="  # one of "<=", ">=", "=="
     constant: float = 0.0
-    metadata: Mapping[str, float] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class SubproblemResult:
     is_feasible: bool
     cut: Optional[Cut] = None
+    cuts: list[Cut] = field(default_factory=list)
     upper_bound: Optional[float] = None
     violation: float | None = None
 
@@ -62,4 +63,3 @@ __all__ = [
     "SubproblemResult",
     "SolveResult",
 ]
-

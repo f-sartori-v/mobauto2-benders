@@ -78,18 +78,27 @@ class BendersSolver:
                 )
 
             sres: SubproblemResult = self.subproblem.evaluate(mres.candidate)
-            if sres.is_feasible:
-                if sres.upper_bound is not None:
-                    best_ub = sres.upper_bound if best_ub is None else min(best_ub, sres.upper_bound)
-                gap_ok = False
-                if best_lb is not None and best_ub is not None:
-                    gap = abs(best_ub - best_lb)
-                    rel_gap = gap / max(1.0, abs(best_ub))
-                    log.info("feasible: best_lb=%.6g best_ub=%.6g gap=%.6g rel=%.3g", best_lb, best_ub, gap, rel_gap)
-                    gap_ok = rel_gap <= tol
-                else:
-                    log.info("feasible but missing bounds: lb=%s ub=%s", best_lb, best_ub)
-                if gap_ok:
+            # Update UB if provided
+            if sres.upper_bound is not None:
+                best_ub = sres.upper_bound if best_ub is None else min(best_ub, sres.upper_bound)
+            # Add cut(s) if provided (optimality or feasibility)
+            added = 0
+            if sres.cut is not None:
+                self.master.add_cut(sres.cut)
+                added += 1
+                log.info("added %s cut '%s' violation=%s", sres.cut.cut_type, sres.cut.name, sres.violation)
+            for c in getattr(sres, "cuts", []) or []:
+                self.master.add_cut(c)
+                added += 1
+            if added:
+                log.info("added %d cut(s)", added)
+
+            # Check gap if we have both bounds
+            if best_lb is not None and best_ub is not None:
+                gap = abs(best_ub - best_lb)
+                rel_gap = gap / max(1.0, abs(best_ub))
+                log.info("bounds: best_lb=%.6g best_ub=%.6g gap=%.6g rel=%.3g", best_lb, best_ub, gap, rel_gap)
+                if rel_gap <= tol:
                     log.info("Optimality reached within tolerance after %d iterations", it)
                     return BendersRunResult(
                         status=SolveStatus.OPTIMAL,
@@ -97,18 +106,6 @@ class BendersSolver:
                         best_lower_bound=best_lb,
                         best_upper_bound=best_ub,
                     )
-                # Otherwise continue; master will iterate and tighten bounds
-            else:
-                if sres.cut is None:
-                    log.error("Subproblem infeasible but no cut was returned")
-                    return BendersRunResult(
-                        status=SolveStatus.UNKNOWN,
-                        iterations=it,
-                        best_lower_bound=best_lb,
-                        best_upper_bound=best_ub,
-                    )
-                self.master.add_cut(sres.cut)
-                log.info("added %s cut '%s' violation=%s", sres.cut.cut_type, sres.cut.name, sres.violation)
 
         log.warning("Max iterations reached: %d", max_it)
         return BendersRunResult(
@@ -120,4 +117,3 @@ class BendersSolver:
 
 
 __all__ = ["BendersSolver", "BendersRunResult"]
-

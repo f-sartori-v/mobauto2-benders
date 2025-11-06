@@ -25,6 +25,35 @@ Implementation hints:
   optimality cuts → repeat until gap within tolerance.
 - Use the `metadata` on `Cut` to stash any auxiliary values you need.
 
+Benders cut for this project:
+
+- Master exposes variables `yOUT[q,t]`, `yRET[q,t]`, and scalar `theta` with
+  objective `min theta`.
+- Add cuts in the form: `theta >= const + Σ coeff_yOUT[q,t]*yOUT[q,t] + Σ coeff_yRET[q,t]*yRET[q,t]`.
+- Create a `Cut` with `metadata` keys:
+  - `const`: float
+  - `coeff_yOUT`: dict[(q,t) -> float]
+  - `coeff_yRET`: dict[(q,t) -> float]
+  The master translates these to a Pyomo `Constraint` when `add_cut()` is called.
+
+Subproblem (assignment + waiting LP):
+
+- Variables: `x_OUT[t,tau]`, `x_RET[t,tau]` (served demand flows), `u_OUT[t]`, `u_RET[t]` (unserved demand) — all nonnegative.
+- Objective: minimize waiting cost `Σ (tau - t)^+ * x + p * Σ u`.
+- Constraints:
+  - Demand conservation: `Σ_{tau in [t, t+W]} x[t,tau] + u[t] = R[t]` for both directions.
+  - Departure capacity: `Σ_{t: t ≤ tau ≤ t+W} x[t,tau] ≤ C[tau]` for both directions.
+- Capacity from master: `C_out[tau] = S * Σ_q yOUT[q,tau]`, `C_ret[tau] = S * Σ_q yRET[q,tau]`.
+- Dual multipliers: `alpha_OUT[t], alpha_RET[t]` for demand constraints (free), `pi_OUT[tau], pi_RET[tau]` for capacity (≥ 0).
+- Optimality cut: `const = Σ alpha_OUT[t] R_out[t] + Σ alpha_RET[t] R_ret[t]` and coefficients `S * pi_*[tau]` spread over all `q` at each `tau`.
+
+Scenarios and aggregation:
+
+- Provide scenarios via TOML array of tables under `[subproblem.params.scenarios]` with `R_out`, `R_ret`.
+- `average_cuts_across_scenarios = true` produces one averaged cut (weighted by `scenario_weights` if provided).
+- Otherwise, one cut is generated per scenario and all are added to the master.
+- `ub_aggregation`: how to combine per-scenario UB values (`mean`|`sum`|`max`). Defaults to `mean`.
+
 Configuration (configs/default.toml):
 
 ```
@@ -52,4 +81,3 @@ Next steps:
    implement `solve()` and `add_cut()` in the master, and `evaluate()` in the
    subproblem.
 3. Run `mobauto2-benders run --config configs/default.toml`.
-

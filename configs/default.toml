@@ -8,10 +8,38 @@ log_level = "INFO"
 seed = 42
 
 [master]
-impl = "to_fill"  # optional hint string
+impl = "pyomo"
 [master.params]
+solver = "glpk" # or "cbc", "gurobi", "cplex"
+Q = 2
+T = 8
+trip_slots = 2
+Emax = 100.0
+L = 10.0
+delta_chg = 25.0
+binit = [60.0, 80.0]
 
 [subproblem]
-impl = "to_fill"  # optional hint string
+impl = "pyomo_lp"
 [subproblem.params]
+lp_solver = "glpk"
+S = 4.0
+T = 8
+Wmax_slots = 2
+p = 1000.0
+# Single-demand fallback (used if scenarios not provided)
+R_out = [0, 0, 0, 0, 0, 0, 0, 0]
+R_ret = [0, 0, 0, 0, 0, 0, 0, 0]
 
+# Optional multi-scenario support
+average_cuts_across_scenarios = true   # true = one averaged cut, false = add one cut per scenario
+ub_aggregation = "mean"               # mean | sum | max
+# scenario_weights = [0.25, 0.25, 0.25, 0.25]
+
+[[subproblem.params.scenarios]]
+R_out = [0, 0, 0, 0, 0, 0, 0, 0]
+R_ret = [0, 0, 0, 0, 0, 0, 0, 0]
+
+[[subproblem.params.scenarios]]
+R_out = [0, 0, 0, 0, 0, 0, 0, 0]
+R_ret = [0, 0, 0, 0, 0, 0, 0, 0]
