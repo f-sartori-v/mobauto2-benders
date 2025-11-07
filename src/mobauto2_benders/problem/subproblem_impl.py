@@ -202,23 +202,29 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
     R_out = list(R_out)
     R_ret = list(R_ret)
 
-    # Variables
-    m.x_OUT = pyo.Var(Tset, Tset, within=pyo.NonNegativeReals)
-    m.x_RET = pyo.Var(Tset, Tset, within=pyo.NonNegativeReals)
+    W = P.Wmax_slots
+
+    # Define only valid arcs (t <= tau <= min(T-1, t+W)) to avoid unused variables
+    Arcs_list = [(t, tau) for t in Tset for tau in Tset if t <= tau <= min(P.T - 1, t + W)]
+    m.Arcs = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
+
+    # Variables defined on valid arcs only
+    m.x_OUT = pyo.Var(m.Arcs, within=pyo.NonNegativeReals)
+    m.x_RET = pyo.Var(m.Arcs, within=pyo.NonNegativeReals)
     m.u_OUT = pyo.Var(Tset, within=pyo.NonNegativeReals)
     m.u_RET = pyo.Var(Tset, within=pyo.NonNegativeReals)
 
     def wait_cost(t: int, tau: int) -> float:
         return float(max(0, tau - t))
 
+    # Objective sums over valid arcs only
     m.obj = pyo.Objective(
-        expr=sum(wait_cost(t, tau) * m.x_OUT[t, tau] for t in Tset for tau in Tset)
-        + sum(wait_cost(t, tau) * m.x_RET[t, tau] for t in Tset for tau in Tset)
-        + P.p * (sum(m.u_OUT[t] for t in Tset) + sum(m.u_RET[t] for t in Tset)),
+        expr=
+            sum(wait_cost(t, tau) * m.x_OUT[t, tau] for (t, tau) in m.Arcs)
+            + sum(wait_cost(t, tau) * m.x_RET[t, tau] for (t, tau) in m.Arcs)
+            + P.p * (sum(m.u_OUT[t] for t in Tset) + sum(m.u_RET[t] for t in Tset)),
         sense=pyo.minimize,
     )
-
-    W = P.Wmax_slots
 
     def cons_dem_OUT(m, t):
         taus = [tau for tau in Tset if t <= tau <= min(P.T - 1, t + W)]

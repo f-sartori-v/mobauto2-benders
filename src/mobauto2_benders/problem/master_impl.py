@@ -153,23 +153,26 @@ class ProblemMaster(MasterProblem):
         coeff_yOUT = cut.metadata.get("coeff_yOUT") if hasattr(cut, "metadata") else None
         coeff_yRET = cut.metadata.get("coeff_yRET") if hasattr(cut, "metadata") else None
 
-        expr = m.theta >= const
+        # Build RHS of the cut as a linear expression, then form inequality
+        rhs = const
 
         if isinstance(coeff_yOUT, dict):
-            expr = expr + sum(float(coeff_yOUT[q, t]) * m.yOUT[q, t] for (q, t) in coeff_yOUT)
+            rhs = rhs + sum(float(coeff_yOUT[q, t]) * m.yOUT[q, t] for (q, t) in coeff_yOUT)
         if isinstance(coeff_yRET, dict):
-            expr = expr + sum(float(coeff_yRET[q, t]) * m.yRET[q, t] for (q, t) in coeff_yRET)
+            rhs = rhs + sum(float(coeff_yRET[q, t]) * m.yRET[q, t] for (q, t) in coeff_yRET)
 
         if (not isinstance(coeff_yOUT, dict)) and (not isinstance(coeff_yRET, dict)) and cut.coeffs:
             for name, coef in cut.coeffs.items():
                 if isinstance(name, str) and name.startswith("yOUT["):
                     parts = name[name.find("[") + 1 : name.find("]")].split(",")
                     q, t = int(parts[0]), int(parts[1])
-                    expr = expr + float(coef) * m.yOUT[q, t]
+                    rhs = rhs + float(coef) * m.yOUT[q, t]
                 elif isinstance(name, str) and name.startswith("yRET["):
                     parts = name[name.find("[") + 1 : name.find("]")].split(",")
                     q, t = int(parts[0]), int(parts[1])
-                    expr = expr + float(coef) * m.yRET[q, t]
+                    rhs = rhs + float(coef) * m.yRET[q, t]
+
+        expr = m.theta >= rhs
 
         cname = f"benders_{self._cut_idx}"
         self._cut_idx += 1
