@@ -2,32 +2,56 @@ run:
   max_iterations: 100
   tolerance: 0.0001
   time_limit_s: 600
+  # log_level controls the verbosity of Python's logging output.
+  # Options (most verbose to least): DEBUG, INFO, WARNING, ERROR, CRITICAL
+  # - DEBUG: detailed internal iteration logs
+  # - INFO: concise iteration summaries (default)
+  # - WARNING/ERROR/CRITICAL: only problems
   log_level: INFO
   seed: 42
 
 master:
   impl: pyomo
   params:
+    # MILP solver used by the master (Pyomo name)
     solver: cplex_direct
+    # Q: number of vehicles modeled in the master
     Q: 2
+    # T: number of discrete time slots in the planning horizon
     T: 8
-    trip_slots: 2
-    Emax: 100.0
-    L: 10.0
-    delta_chg: 25.0
-    binit: [60.0, 80.0]
+    # trip_slots: trip duration in slots (NOT energy). Example: 2 means a trip
+    #   started at time t updates location at t+2 and blocks new starts while "in trip".
+    #   Keep 1 <= trip_slots < T.
+    trip_slots: 1
+    # Emax: battery capacity (energy units)
+    Emax: 10.0
+    # L: energy consumed when starting a trip (units consistent with Emax). This is
+    #   NOT the number of slots; it is used in the battery balance and a guard
+    #   constraint requiring b[q,t] >= 2*L to start an OUT trip.
+    L: 2.0
+    # delta_chg: maximum charge added per slot when c[q,t] = 1
+    delta_chg: 1.0
+    # binit: initial battery levels per vehicle (length Q)
+    binit: [10.0, 10.0]
 
 subproblem:
   impl: pyomo_lp
   params:
+    # LP solver used by the subproblem (Pyomo name)
     lp_solver: cplex_direct
+    # S: capacity units contributed by one vehicle starting at time tau.
+    #   Master yOUT[q,tau] adds S to C_out[tau] (similarly for yRET/C_ret).
     S: 4.0
+    # T should match the master horizon
     T: 8
+    # Wmax_slots: maximum waiting allowed for demand (in slots). Demand at time t
+    #   may be served by departures tau in [t, min(t+Wmax_slots, T-1)].
     Wmax_slots: 2
-    p: 1000.0
+    # p: penalty per unit of unserved demand (drives MP to create capacity)
+    p: 50.0
     # Single-demand parameters (initial demo demand)
-    R_out: [0, 1, 0, 2, 0, 0, 0, 0]
-    R_ret: [0, 0, 0, 0, 0, 2, 0, 0]
+    R_out: [4, 2, 0, 0, 4, 0, 4, 0]
+    R_ret: [0, 0, 4, 0, 0, 2, 0, 0]
     # Example single-scenario (remove if not needed)
     # average_cuts_across_scenarios: true
     # ub_aggregation: mean

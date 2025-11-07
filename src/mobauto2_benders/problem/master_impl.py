@@ -51,8 +51,14 @@ class ProblemMaster(MasterProblem):
         m.C1a = pyo.Constraint(m.Q, m.T, rule=exclusivity_rule)
 
         def intrip_rule(m, q, tau):
+            # Count trips that started before current time and are still ongoing
+            # Exclude potential starts at the current time index (tau) so that
+            # starting a trip at tau is allowed when not already in trip.
+            if tau == 0:
+                return m.inTrip[q, tau] == 0
+            t_prev = tau - 1
             return m.inTrip[q, tau] == sum(
-                m.yOUT[q, t] + m.yRET[q, t] for t in m.T if t <= tau < t + trip_slots
+                m.yOUT[q, t] + m.yRET[q, t] for t in m.T if t <= t_prev < t + trip_slots
             )
 
         m.C1b = pyo.Constraint(m.Q, m.T, rule=intrip_rule)
@@ -62,7 +68,10 @@ class ProblemMaster(MasterProblem):
 
         m.C1c = pyo.Constraint(m.Q, m.T, rule=block_rule)
 
-        for t in range(T - trip_slots + 1, T):
+        # Disallow starting trips that cannot finish within the horizon
+        # Allowed starts must satisfy t + trip_slots <= T - 1 -> t <= T - trip_slots - 1
+        # Therefore, fix starts at t in [T - trip_slots, T-1] to 0
+        for t in range(T - trip_slots, T):
             for q in m.Q:
                 m.yOUT[q, t].fix(0)
                 m.yRET[q, t].fix(0)
@@ -84,6 +93,8 @@ class ProblemMaster(MasterProblem):
         for q in m.Q:
             m.s[q, 0].fix(0)
             m.s[q, T - 1].fix(0)
+            # Ensure no trip is ongoing at the end of horizon
+            m.inTrip[q, T - 1].fix(0)
 
         for q in m.Q:
             m.b[q, 0].fix(float(binit[q]))
@@ -100,6 +111,10 @@ class ProblemMaster(MasterProblem):
                 )
 
         m.C5 = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.b[q, t] >= 2 * L * m.yOUT[q, t])
+
+        # Avoid uninitialized gchg at the last time period (not used in constraints)
+        for q in m.Q:
+            m.gchg[q, T - 1].fix(0)
 
         self.m = m
 
@@ -145,6 +160,71 @@ class ProblemMaster(MasterProblem):
         self._lb = objective
         candidate = self._collect_candidate()
         return SolveResult(status=status, objective=objective, candidate=candidate, lower_bound=self._lb)
+
+    # Pretty-print the current master solution (if solved)
+    def format_solution(self) -> str:
+        assert self.m is not None
+        m = self.m
+        Q = list(m.Q)
+        T = list(m.T)
+        lines: list[str] = []
+        lines.append(f"Q={len(Q)} T={len(T)}")
+        # Theta
+        try:
+            lines.append(f"theta = {pyo.value(m.theta):.6g}")
+        except Exception:
+            lines.append("theta = (unavailable)")
+        # Binary schedules
+        def row(var, q):
+            vals = []
+            for t in T:
+                v = var[q, t].value
+                if v is None:
+                    vals.append("-")
+                else:
+                    vals.append(str(int(round(float(v)))))
+            return " ".join(vals)
+
+        # Compact per-shuttle timeline with labels: OUT, INT, RET, CHR, IDL
+        def lbl(q: int, t: int) -> str:
+            yout = m.yOUT[q, t].value or 0.0
+            yret = m.yRET[q, t].value or 0.0
+            intr = m.inTrip[q, t].value or 0.0
+            chg = m.c[q, t].value or 0.0
+            if yout >= 0.5:
+                return "OUT"
+            if yret >= 0.5:
+                return "RET"
+            if intr >= 0.5:
+                return "INT"
+            if chg >= 0.5:
+                return "CHR"
+            return "IDL"
+
+        lines.append("Timeline (per shuttle):")
+        header = "       " + " ".join(f"{t:>3d}" for t in T)
+        lines.append(header)
+        for q in Q:
+            seq = " ".join(f"{lbl(q, t):>3s}" for t in T)
+            lines.append(f"  q={q}: {seq}")
+
+        # Also show battery levels over time
+        def rowf(var, q):
+            vals = []
+            for t in T:
+                v = var[q, t].value
+                if v is None:
+                    vals.append("  -")
+                else:
+                    vals.append(f"{float(v):>3.0f}")
+            return " ".join(vals)
+
+        lines.append("Battery (per shuttle):")
+        lines.append(header)
+        for q in Q:
+            lines.append(f"  q={q}: {rowf(m.b, q)}")
+
+        return "\n".join(lines)
 
     def add_cut(self, cut: Cut) -> None:
         assert self.m is not None

@@ -73,11 +73,39 @@ def cmd_run(args) -> int:
     sub = ProblemSubproblem(cfg.subproblem.params)
 
     solver = BendersSolver(master, sub, cfg)
-    result = solver.run()
-
-    # Print concise summary
+    # Friendly header with initial parameters
+    print("Run configuration:")
     print(
-        f"status={result.status} iterations={result.iterations} "
+        f"  run: iterations={cfg.run.max_iterations} tol={cfg.run.tolerance} "
+        f"time_limit_s={cfg.run.time_limit_s} seed={cfg.run.seed}"
+    )
+    mp = cfg.master.params or {}
+    sp = cfg.subproblem.params or {}
+    print(
+        "  master: solver=%s Q=%s T=%s trip_slots=%s Emax=%s L=%s delta_chg=%s" % (
+            mp.get("solver", "-"), mp.get("Q", "-"), mp.get("T", "-"), mp.get("trip_slots", "-"), mp.get("Emax", "-"), mp.get("L", "-"), mp.get("delta_chg", "-"),
+        )
+    )
+    try:
+        _T = int(mp.get("T"))
+        _ts = int(mp.get("trip_slots"))
+        if _ts >= _T:
+            print("  NOTE: trip_slots >= T restricts starts to t=0 and may prevent trips from serving demand. Consider trip_slots < T.")
+    except Exception:
+        pass
+    print(
+        "  subproblem: solver=%s S=%s T=%s Wmax_slots=%s p=%s" % (
+            sp.get("lp_solver", "-"), sp.get("S", "-"), sp.get("T", "-"), sp.get("Wmax_slots", sp.get("Wmax", "-")), sp.get("p", "-"),
+        )
+    )
+    if "R_out" in sp:
+        print(f"  R_out: {sp.get('R_out')}")
+    if "R_ret" in sp:
+        print(f"  R_ret: {sp.get('R_ret')}")
+    result = solver.run()
+    # Final summary
+    print(
+        f"\nResult: status={result.status} iterations={result.iterations} "
         f"best_lb={result.best_lower_bound} best_ub={result.best_upper_bound}"
     )
     return 0

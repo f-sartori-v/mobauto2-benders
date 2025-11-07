@@ -14,11 +14,13 @@ class ProblemSubproblem(Subproblem):
 
     Builds a time-expanded assignment LP for both directions (OUT, RET) with
     waiting costs and unmet-demand penalties. Extracts dual multipliers to
-    form the Benders optimality cut:
+    form the Benders optimality cut for a minimization master:
 
-        theta >= const + S * sum_{q,tau} [pi_OUT[tau]*yOUT[q,tau] + pi_RET[tau]*yRET[q,tau]]
+        theta >= const - S * sum_{q,tau} [pi_OUT[tau]*yOUT[q,tau] + pi_RET[tau]*yRET[q,tau]]
 
-    where const = sum_t alpha_OUT[t]*R_out[t] + sum_t alpha_RET[t]*R_ret[t].
+    where const = sum_t alpha_OUT[t]*R_out[t] + sum_t alpha_RET[t]*R_ret[t], and
+    pi_* are duals on capacity constraints (>= 0). Increasing capacity (y) reduces
+    the subproblem cost, hence the negative sign.
     """
 
     def __init__(self, params: dict[str, Any] | None = None):
@@ -75,10 +77,36 @@ class ProblemSubproblem(Subproblem):
         ub_aggregation: str = str(params.get("ub_aggregation", "mean"))
         weights: list[float] | None = params.get("scenario_weights")
 
-        # Helper to build coeff maps for a given pi_*
-        def coeffs_from_pi(pi_OUT: Dict[int, float], pi_RET: Dict[int, float]) -> tuple[Dict[tuple[int, int], float], Dict[tuple[int, int], float]]:
-            c_out: Dict[tuple[int, int], float] = {}
-            c_ret: Dict[tuple[int, int], float] = {}
+        # Finite-difference coefficient builder: for each tau, solve with +S capacity
+        def coeffs_by_fdiff(
+            ub_base: float,
+            C_out_base: list[float],
+            C_ret_base: list[float],
+            R_out_vec: list[float],
+            R_ret_vec: list[float],
+        ) -> tuple[Dict[tuple[int, int], float], Dict[tuple[int, int], float], Dict[int, float], Dict[int, float]]:
+            coeff_y_out: Dict[tuple[int, int], float] = {}
+            coeff_y_ret: Dict[tuple[int, int], float] = {}
+            # Marginal effects by time (per one vehicle start at tau)
+            dm_out: Dict[int, float] = {}
+            dm_ret: Dict[int, float] = {}
+
+            for tau in range(T):
+                # OUT marginal
+                C_out_tau = C_out_base.copy()
+                C_out_tau[tau] = C_out_tau[tau] + S
+                _, ub_plus = solve_subproblem(SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver), C_out_tau, C_ret_base, R_out_vec, R_ret_vec)
+                dm = float(ub_plus - ub_base)
+                dm_out[tau] = dm
+
+                # RET marginal
+                C_ret_tau = C_ret_base.copy()
+                C_ret_tau[tau] = C_ret_tau[tau] + S
+                _, ub_plus_r = solve_subproblem(SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver), C_out_base, C_ret_tau, R_out_vec, R_ret_vec)
+                dm_r = float(ub_plus_r - ub_base)
+                dm_ret[tau] = dm_r
+
+            # Expand to per-(q,tau) using candidate indices
             for name in candidate.keys():
                 if not isinstance(name, str):
                     continue
@@ -88,15 +116,16 @@ class ProblemSubproblem(Subproblem):
                     q = int(q_str.strip())
                     tau = int(tau_str.strip())
                     if 0 <= tau < T:
-                        c_out[(q, tau)] = S * pi_OUT.get(tau, 0.0)
+                        coeff_y_out[(q, tau)] = dm_out.get(tau, 0.0)
                 elif name.startswith("yRET["):
                     inside = name[name.find("[") + 1 : name.find("]")]
                     q_str, tau_str = inside.split(",")
                     q = int(q_str.strip())
                     tau = int(tau_str.strip())
                     if 0 <= tau < T:
-                        c_ret[(q, tau)] = S * pi_RET.get(tau, 0.0)
-            return c_out, c_ret
+                        coeff_y_ret[(q, tau)] = dm_ret.get(tau, 0.0)
+
+            return coeff_y_out, coeff_y_ret, dm_out, dm_ret
 
         # If scenarios provided, iterate; else use single-demand params
         if scenarios:
@@ -120,18 +149,18 @@ class ProblemSubproblem(Subproblem):
                 sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver)
                 duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
                 ub_vals.append(ub_val)
-                alpha_OUT, alpha_RET, pi_OUT, pi_RET = (
-                    duals["alpha_OUT"],
-                    duals["alpha_RET"],
-                    duals["pi_OUT"],
-                    duals["pi_RET"],
-                )
-                const = sum(alpha_OUT[t] * float(R_out[t]) for t in range(T)) + sum(alpha_RET[t] * float(R_ret[t]) for t in range(T))
+
+                # Finite-difference coefficients and constant per scenario
+                c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, R_out, R_ret)
+                sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
+                sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
+                const = float(ub_val)
+                const -= sum(dm_out[tau] * sum_y_out[tau] for tau in range(T))
+                const -= sum(dm_ret[tau] * sum_y_ret[tau] for tau in range(T))
                 consts.append(const)
-                c_out, c_ret = coeffs_from_pi(pi_OUT, pi_RET)
-                coeffs_out_list.append(c_out)
-                coeffs_ret_list.append(c_ret)
-                cuts.append(Cut(name="opt_cut_s", cut_type=CutType.OPTIMALITY, metadata={"const": const, "coeff_yOUT": c_out, "coeff_yRET": c_ret}))
+                coeffs_out_list.append(c_out_map)
+                coeffs_ret_list.append(c_ret_map)
+                cuts.append(Cut(name="opt_cut_s", cut_type=CutType.OPTIMALITY, metadata={"const": const, "coeff_yOUT": c_out_map, "coeff_yRET": c_ret_map}))
 
             # Aggregate UB
             if ub_aggregation == "mean":
@@ -169,15 +198,20 @@ class ProblemSubproblem(Subproblem):
 
             sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver)
             duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
-            alpha_OUT, alpha_RET, pi_OUT, pi_RET = (
-                duals["alpha_OUT"],
-                duals["alpha_RET"],
-                duals["pi_OUT"],
-                duals["pi_RET"],
-            )
-            const = sum(alpha_OUT[t] * float(R_out[t]) for t in range(T)) + sum(alpha_RET[t] * float(R_ret[t]) for t in range(T))
-            c_out, c_ret = coeffs_from_pi(pi_OUT, pi_RET)
-            cut = Cut(name="opt_cut", cut_type=CutType.OPTIMALITY, metadata={"const": const, "coeff_yOUT": c_out, "coeff_yRET": c_ret})
+
+            # Build coefficients via finite differences around current capacity
+            c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, R_out, R_ret)
+
+            # Compute sum_y per tau (number of vehicles starting at tau) from current capacity
+            sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
+            sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
+
+            # Constant so that cut passes through (y, Q(y))
+            const = float(ub_val)
+            const -= sum(dm_out[tau] * sum_y_out[tau] for tau in range(T))
+            const -= sum(dm_ret[tau] * sum_y_ret[tau] for tau in range(T))
+
+            cut = Cut(name="opt_cut", cut_type=CutType.OPTIMALITY, metadata={"const": const, "coeff_yOUT": c_out_map, "coeff_yRET": c_ret_map})
             return SubproblemResult(is_feasible=True, cut=cut, upper_bound=ub_val)
 
 
