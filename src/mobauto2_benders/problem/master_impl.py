@@ -75,7 +75,7 @@ class ProblemMaster(MasterProblem):
         m.C2a = pyo.Constraint(m.Q, m.T, rule=loc_flip)
 
         def admissible(m, q, t):
-            return pyo.inequality(0, m.yOUT[q, t], 1 - m.s[q, t])
+            return m.yOUT[q, t] + m.s[q, t] <= 1
 
         m.C2b = pyo.Constraint(m.Q, m.T, rule=admissible)
         m.C2c = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yRET[q, t] <= m.s[q, t])
