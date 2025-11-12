@@ -58,9 +58,11 @@ class ProblemMaster(MasterProblem):
 
         m.yOUT = pyo.Var(m.Q, m.T, within=pyo.Binary)
         m.yRET = pyo.Var(m.Q, m.T, within=pyo.Binary)
-        # Aggregated starts per time (to keep cuts sparse): Yout[t] = sum_q yOUT[q,t], Yret[t] likewise
+        # Aggregated starts per time (to keep cuts sparse): Yout[t], Yret[t]
         m.Yout = pyo.Var(m.T, within=pyo.NonNegativeReals)
         m.Yret = pyo.Var(m.T, within=pyo.NonNegativeReals)
+        # Time-bucket total starts z[t] = sum_q (yOUT+ yRET) -- used in cuts to reduce nnz
+        m.Z = pyo.Var(m.T, within=pyo.NonNegativeReals)
         # Keep auxiliaries continuous in [0,1] to reduce binaries
         m.c = pyo.Var(m.Q, m.T, bounds=(0.0, 1.0))
         m.s = pyo.Var(m.Q, m.T, bounds=(0.0, 1.0))
@@ -90,6 +92,8 @@ class ProblemMaster(MasterProblem):
         # Define aggregation equalities for Yout/Yret
         m.Cagg_out = pyo.Constraint(m.T, rule=lambda m, t: m.Yout[t] == sum(m.yOUT[q, t] for q in m.Q))
         m.Cagg_ret = pyo.Constraint(m.T, rule=lambda m, t: m.Yret[t] == sum(m.yRET[q, t] for q in m.Q))
+        # Time-bucket link: Z[t] = sum_q (yOUT+yRET)
+        m.Cagg_z = pyo.Constraint(m.T, rule=lambda m, t: m.Z[t] == sum(m.yOUT[q, t] + m.yRET[q, t] for q in m.Q))
 
         # inTrip implications (lighter than equality linking):
         # Lower bounds: inTrip[q,t] >= yOUT[q,u], inTrip[q,t] >= yRET[q,u] for u in (t-trip_slots+1..t-1)
@@ -341,21 +345,19 @@ class ProblemMaster(MasterProblem):
                 coeff_yOUT = cut.metadata.get("coeff_yOUT") if hasattr(cut, "metadata") else None
                 coeff_yRET = cut.metadata.get("coeff_yRET") if hasattr(cut, "metadata") else None
 
-                # Aggregate coefficients by time to use Yout/Yret variables (sparser) and convert to betas
-                agg_out: dict[int, float] = {}
-                agg_ret: dict[int, float] = {}
+                # Aggregate per time coefficients (raw dm) for Yout/Yret
+                coeff_out_t: dict[int, float] = {}
+                coeff_ret_t: dict[int, float] = {}
                 if isinstance(coeff_yOUT, dict):
                     for (q, t), v in coeff_yOUT.items():
-                        beta = max(0.0, -float(v))
-                        if t not in agg_out:
-                            agg_out[t] = beta
+                        if t not in coeff_out_t:
+                            coeff_out_t[t] = float(v)
                 if isinstance(coeff_yRET, dict):
                     for (q, t), v in coeff_yRET.items():
-                        beta = max(0.0, -float(v))
-                        if t not in agg_ret:
-                            agg_ret[t] = beta
+                        if t not in coeff_ret_t:
+                            coeff_ret_t[t] = float(v)
 
-                # Re-anchor constant to pass through incumbent
+                # Re-anchor constant to pass through incumbent in Y-space
                 # ub_est = const_dm + sum(dm*y_curr) using raw dm from metadata
                 ub_est = float(const)
                 if isinstance(coeff_yOUT, dict):
@@ -364,39 +366,38 @@ class ProblemMaster(MasterProblem):
                 if isinstance(coeff_yRET, dict):
                     for (q, t), v in coeff_yRET.items():
                         ub_est += float(v) * float(self.get_values(yret_index[(q, t)]))
-                # const_beta = ub_est - sum(beta*y_curr)
-                const = ub_est
-                for t, beta in agg_out.items():
-                    const -= float(beta) * float(self.get_values(Yout_index[t]))
-                for t, beta in agg_ret.items():
-                    const -= float(beta) * float(self.get_values(Yret_index[t]))
+                # Keep const as provided (already passes through incumbent)
+                const = float(const)
 
-                # Build LHS: theta + sum_t (beta_out[t]*Yout[t] + beta_ret[t]*Yret[t]) >= const
+                # Build LHS: theta - sum_t (dm_out[t]*Yout[t] + dm_ret[t]*Yret[t]) >= const
                 inds: list[int] = [idx_theta]
                 vals: list[float] = [1.0]
-                for t, a in agg_out.items():
+                for t, a in coeff_out_t.items():
                     if t in Yout_index:
                         inds.append(Yout_index[t])
-                        vals.append(float(a))
-                for t, a in agg_ret.items():
+                        vals.append(-float(a))
+                for t, a in coeff_ret_t.items():
                     if t in Yret_index:
                         inds.append(Yret_index[t])
-                        vals.append(float(a))
+                        vals.append(-float(a))
 
-                # Check violation at current solution
+                # Check violation at current solution using Option A: viol = RHS - LHS
                 lhs_val = 0.0
                 try:
                     lhs_val += float(self.get_values(idx_theta))
                 except Exception:
                     pass
-                for ind, coef in zip(inds[1:], vals[1:]):
+                for idx, coef in zip(inds[1:], vals[1:]):
                     try:
-                        lhs_val += coef * float(self.get_values(ind))
+                        lhs_val += coef * float(self.get_values(idx))
                     except Exception:
                         pass
-
-                tol = 1e-6
-                if lhs_val >= const - tol:
+                rhs_val = float(const)
+                abs_tol = 1e-6
+                rel_tol = 1e-6
+                viol = rhs_val - lhs_val
+                thr = abs_tol + rel_tol * abs(rhs_val)
+                if not (viol > thr):
                     return
 
                 # Add lazy constraint
@@ -429,11 +430,12 @@ class ProblemMaster(MasterProblem):
         assert self.m is not None, "Call initialize() before solve()"
         m = self.m
         solver = self._get_solver()
+        tee_flag = bool(self._p("solver_tee", self._p("mp_solve_tee", False)))
         if getattr(self, "_is_persistent", False):
             # Persistent: do not pass model
-            res = solver.solve(tee=False)
+            res = solver.solve(tee=tee_flag)
         else:
-            res = solver.solve(m, tee=False)
+            res = solver.solve(m, tee=tee_flag)
 
         term = getattr(res.solver, "termination_condition", None)
         st = getattr(res.solver, "status", None)
@@ -519,7 +521,7 @@ class ProblemMaster(MasterProblem):
 
         return "\n".join(lines)
 
-    def add_cut(self, cut: Cut) -> None:
+    def _add_cut(self, cut: Cut, force: bool = False) -> bool:
         assert self.m is not None
         m = self.m
         const = float(cut.metadata.get("const", 0.0)) if hasattr(cut, "metadata") else 0.0
@@ -532,53 +534,54 @@ class ProblemMaster(MasterProblem):
         # Optionally aggregate coefficients by time to use Yout/Yret and reduce density
         aggregate = bool(self._p("aggregate_cuts_by_tau", True))
         coeff_tol = float(self._p("cut_coeff_threshold", 0.0) or 0.0)
-        # Convert raw slopes (finite differences dm) into nonnegative betas: beta = max(0, -dm)
-        # This matches theta >= const + sum(beta*y) with beta >= 0.
+        # Aggregate raw dm slopes per time for OUT/RET to use Yout/Yret
+        # We keep raw dm (can be negative), using one coefficient per time bucket.
         agg_out: dict[int | tuple[int, int], float] = {}
         agg_ret: dict[int | tuple[int, int], float] = {}
         raw_pos_dm = 0
         if isinstance(coeff_yOUT, dict):
             if aggregate:
+                used = set()
                 for (q, t), v in coeff_yOUT.items():
                     vraw = float(v)
                     if vraw > coeff_tol:
                         raw_pos_dm += 1
-                    beta = max(0.0, -vraw)
-                    if beta <= coeff_tol or (t in agg_out):
+                    if t in used or abs(vraw) <= coeff_tol:
                         continue
-                    agg_out[t] = beta
+                    used.add(t)
+                    agg_out[t] = vraw
             else:
                 for (q, t), v in coeff_yOUT.items():
                     vraw = float(v)
                     if vraw > coeff_tol:
                         raw_pos_dm += 1
-                    beta = max(0.0, -vraw)
-                    if beta <= coeff_tol:
+                    if abs(vraw) <= coeff_tol:
                         continue
-                    agg_out[(q, t)] = beta
+                    agg_out[(q, t)] = vraw
         if isinstance(coeff_yRET, dict):
             if aggregate:
+                used = set()
                 for (q, t), v in coeff_yRET.items():
                     vraw = float(v)
                     if vraw > coeff_tol:
                         raw_pos_dm += 1
-                    beta = max(0.0, -vraw)
-                    if beta <= coeff_tol or (t in agg_ret):
+                    if t in used or abs(vraw) <= coeff_tol:
                         continue
-                    agg_ret[t] = beta
+                    used.add(t)
+                    agg_ret[t] = vraw
             else:
                 for (q, t), v in coeff_yRET.items():
                     vraw = float(v)
                     if vraw > coeff_tol:
                         raw_pos_dm += 1
-                    beta = max(0.0, -vraw)
-                    if beta <= coeff_tol:
+                    if abs(vraw) <= coeff_tol:
                         continue
-                    agg_ret[(q, t)] = beta
+                    agg_ret[(q, t)] = vraw
 
         # Re-anchor the constant so that the cut passes through the incumbent (y = current MP solution)
-        # ub_est = const_dm + sum(dm * y_curr)
-        # With final form theta >= const_cut - sum(beta * y), we need const_cut = ub_est + sum(beta * y_curr)
+        # Using raw dm and Yout/Yret:
+        # RHS = const_dm + sum_t dm_out[t]*Yout[t] + sum_t dm_ret[t]*Yret[t]
+        # This passes through incumbent since const_dm came from SP with dm and sums.
         ub_est = float(const)
         # Sum over raw dm maps using current y values
         if isinstance(coeff_yOUT, dict):
@@ -589,34 +592,22 @@ class ProblemMaster(MasterProblem):
             for (q, t), v in coeff_yRET.items():
                 yv = float(m.yRET[q, t].value or 0.0)
                 ub_est += float(v) * yv
-        sum_beta_y = 0.0
-        if aggregate:
-            for t, beta in agg_out.items():
-                sum_beta_y += float(beta) * float(m.Yout[int(t)].value or 0.0)
-            for t, beta in agg_ret.items():
-                sum_beta_y += float(beta) * float(m.Yret[int(t)].value or 0.0)
-        else:
-            for key, beta in agg_out.items():
-                q, t = key  # type: ignore[misc]
-                sum_beta_y += float(beta) * float(m.yOUT[int(q), int(t)].value or 0.0)
-            for key, beta in agg_ret.items():
-                q, t = key  # type: ignore[misc]
-                sum_beta_y += float(beta) * float(m.yRET[int(q), int(t)].value or 0.0)
-        const = ub_est + sum_beta_y
+        # With Yout/Yret form, const stays as provided; ub_est is only used for diagnostics.
+        # Keep const unchanged to preserve pass-through at incumbent.
 
-        # Assemble RHS with final coefficients
+        # Assemble RHS with aggregated Yout/Yret and raw dm
         if aggregate:
             for t, v in agg_out.items():
-                rhs = rhs - v * m.Yout[int(t)]
+                rhs = rhs + float(v) * m.Yout[int(t)]
             for t, v in agg_ret.items():
-                rhs = rhs - v * m.Yret[int(t)]
+                rhs = rhs + float(v) * m.Yret[int(t)]
         else:
             for key, v in agg_out.items():
                 q, t = key  # type: ignore[misc]
-                rhs = rhs - v * m.yOUT[int(q), int(t)]
+                rhs = rhs + float(v) * m.yOUT[int(q), int(t)]
             for key, v in agg_ret.items():
                 q, t = key  # type: ignore[misc]
-                rhs = rhs - v * m.yRET[int(q), int(t)]
+                rhs = rhs + float(v) * m.yRET[int(q), int(t)]
 
         if (not isinstance(coeff_yOUT, dict)) and (not isinstance(coeff_yRET, dict)) and cut.coeffs:
             for name, coef in cut.coeffs.items():
@@ -632,22 +623,36 @@ class ProblemMaster(MasterProblem):
                     q, t = int(parts[0]), int(parts[1])
                     rhs = rhs - v2 * m.yRET[q, t]
 
-        expr = m.theta >= rhs
+        # Scale both sides to normalize coefficient magnitudes (theta and RHS)
+        max_beta = 0.0
+        if agg_out:
+            max_beta = max(max_beta, max(abs(float(v)) for v in agg_out.values()))
+        if agg_ret:
+            max_beta = max(max_beta, max(abs(float(v)) for v in agg_ret.values()))
+        max_term = max(float(abs(const)), float(max_beta), 1.0)
+        scale = 1.0 / max_term
+        lhs = scale * m.theta
+        rhs_scaled = scale * rhs
 
-        # Evaluate violation and skip weak cuts
-        add_tol = float(self._p("cut_add_tolerance", 1e-8))
-        theta_val = float(pyo.value(m.theta))
-        rhs_val = float(pyo.value(rhs))
-        violation = rhs_val - theta_val
-        if violation <= add_tol:
-            print(f"[BENDERS] Skipped non-violated cut: viol={violation:.3g} (tol={add_tol})")
-            return
+        # Evaluate violation using Option A: viol = RHS - theta
+        add_abs_tol = float(self._p("cut_add_tolerance", 1e-6))
+        add_rel_tol = float(self._p("cut_add_rel_tolerance", 1e-6))
+        lhs_val = float(pyo.value(lhs))
+        rhs_val = float(pyo.value(rhs_scaled))
+        violation = rhs_val - lhs_val
+        threshold = add_abs_tol + add_rel_tol * abs(rhs_val)
+        if not force and not (violation > threshold):
+            print(
+                f"[BENDERS] Eval cut: lhs={lhs_val:.6g} rhs={rhs_val:.6g} viol={violation:.3g} thr={threshold:.3g} added=False"
+            )
+            return False
 
         # Fingerprint to avoid adding duplicates
         def _round6(x: float) -> float:
             return float(f"{x:.6g}")
         fp_out = []
         fp_ret = []
+        # Fingerprint on Yout/Yret aggregated slopes (bypass if force=True)
         if aggregate:
             fp_out = sorted((int(t), _round6(float(v))) for t, v in agg_out.items())
             fp_ret = sorted((int(t), _round6(float(v))) for t, v in agg_ret.items())
@@ -655,33 +660,70 @@ class ProblemMaster(MasterProblem):
             fp_out = sorted(((int(q), int(t), _round6(float(v))) for (q, t), v in agg_out.items()))  # type: ignore[misc]
             fp_ret = sorted(((int(q), int(t), _round6(float(v))) for (q, t), v in agg_ret.items()))  # type: ignore[misc]
         fp = ("opt", _round6(const), tuple(fp_out), tuple(fp_ret))
-        if fp in self._cut_fps:
-            print("[BENDERS] Skipped duplicate cut")
-            return
-        self._cut_fps.add(fp)
+        if not force:
+            if fp in self._cut_fps:
+                print("[BENDERS] Skipped duplicate cut")
+                return False
+            self._cut_fps.add(fp)
 
         # Create explicit constraint and register with persistent solver if used
         cname = f"benders_cut_{self._cut_idx}"
-        con = pyo.Constraint(expr=expr)
+        con = pyo.Constraint(expr=(lhs >= rhs_scaled))
         setattr(m.BendersCuts, cname, con)
         if getattr(self, "_is_persistent", False):
             self._solver.add_constraint(con)
+        # Maintain pool for optional pruning
+        if not hasattr(self, "_cut_cons"):
+            self._cut_cons = []
+            self._cut_names = []
+        self._cut_cons.append(con)
+        self._cut_names.append(cname)
+
+        # Cut pool management: cap number of active cuts
+        max_cuts = int(self._p("max_cuts_active", 0) or 0)
+        if max_cuts > 0 and len(self._cut_cons) > max_cuts:
+            # Remove the oldest cuts until within limit
+            to_remove = len(self._cut_cons) - max_cuts
+            for _ in range(to_remove):
+                con_old = self._cut_cons.pop(0)
+                name_old = self._cut_names.pop(0)
+                if getattr(self, "_is_persistent", False):
+                    self._solver.remove_constraint(con_old)
+                # Remove from Pyomo block
+                try:
+                    delattr(m.BendersCuts, name_old)
+                except Exception:
+                    pass
 
         # Simple logging: constant and nonzeros
-        nnz = len(agg_out) + len(agg_ret)
-        # Log slope range (betas are nonnegative after transform)
+        nnz = (len(agg_out) if aggregate else len(agg_out)) + (len(agg_ret) if aggregate else len(agg_ret))
+        # Log slope range
         all_betas = list(agg_out.values()) + list(agg_ret.values())
         if all_betas:
             rng = (min(all_betas), max(all_betas))
             print(
-                f"[BENDERS] Added cut #{self._cut_idx}: const={const:.6g}, nnz={nnz}, beta_range=[{rng[0]:.3g},{rng[1]:.3g}], raw_pos_dm={raw_pos_dm}"
+                f"[BENDERS] Added cut #{self._cut_idx}: const={const:.6g}, nnz={nnz}, slope_range=[{rng[0]:.3g},{rng[1]:.3g}], raw_pos_dm={raw_pos_dm}, scale={scale:.3g}"
             )
         else:
-            print(f"[BENDERS] Added cut #{self._cut_idx}: const={const:.6g}, nnz={nnz}, raw_pos_dm={raw_pos_dm}")
+            print(f"[BENDERS] Added cut #{self._cut_idx}: const={const:.6g}, nnz={nnz}, raw_pos_dm={raw_pos_dm}, scale={scale:.3g}")
+        # Sanity log with LHS and RHS values (scaled)
+        print(
+            f"[BENDERS] Eval cut: lhs={lhs_val:.6g} rhs={rhs_val:.6g} viol={violation:.3g} thr={threshold:.3g} added=True"
+        )
         self._cut_idx += 1
         # Track last cut info for cross-iteration checks
         self._last_cut_const = const
         self._last_cut_nnz = nnz
+        return True
+
+    def add_cut(self, cut: Cut) -> None:
+        # Normal filtered path
+        self._add_cut(cut, force=False)
+
+    def add_cut_force(self, cut: Cut) -> bool:
+        # Force-accept path for the first violated cut of an iteration.
+        # Returns True if a cut was added.
+        return self._add_cut(cut, force=True)
 
     def best_lower_bound(self) -> Optional[float]:
         return self._lb

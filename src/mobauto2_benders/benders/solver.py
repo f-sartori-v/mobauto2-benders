@@ -139,13 +139,41 @@ class BendersSolver:
                     cuts_before = getattr(self.master, "cuts_count", lambda: 0)()
                 except Exception:
                     cuts_before = 0
-                if sres.cut is not None:
+
+                # Force-accept the first violated cut at this incumbent
+                forced_added = False
+                if sres.cut is not None and hasattr(self.master, "add_cut_force"):
+                    try:
+                        forced_added = bool(getattr(self.master, "add_cut_force")(sres.cut))
+                    except Exception:
+                        forced_added = False
+                    if forced_added:
+                        cut_names.append(sres.cut.name)
+                        log.info("force-added %s cut '%s'", sres.cut.cut_type, sres.cut.name)
+
+                # If nothing forced yet, try forcing the first in sres.cuts
+                if (not forced_added) and getattr(sres, "cuts", None) and hasattr(self.master, "add_cut_force"):
+                    for c in sres.cuts or []:
+                        try:
+                            forced_added = bool(getattr(self.master, "add_cut_force")(c))
+                        except Exception:
+                            forced_added = False
+                        if forced_added:
+                            cut_names.append(c.name)
+                            log.info("force-added %s cut '%s'", c.cut_type, c.name)
+                            break
+
+                # Add remaining cuts through the normal filtered path
+                if sres.cut is not None and not forced_added:
                     self.master.add_cut(sres.cut)
                     cut_names.append(sres.cut.name)
-                    log.info("added %s cut '%s' violation=%s", sres.cut.cut_type, sres.cut.name, sres.violation)
                 for c in getattr(sres, "cuts", []) or []:
+                    # Avoid re-adding the same cut if it was force-added above
+                    if forced_added and cut_names and c.name == cut_names[-1]:
+                        continue
                     self.master.add_cut(c)
                     cut_names.append(c.name)
+
                 # Compute how many were actually added
                 try:
                     cuts_after = getattr(self.master, "cuts_count", lambda: 0)()
