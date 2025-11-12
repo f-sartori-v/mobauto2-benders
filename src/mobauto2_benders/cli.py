@@ -81,27 +81,49 @@ def cmd_run(args) -> int:
     )
     mp = cfg.master.params or {}
     sp = cfg.subproblem.params or {}
+    # Derive slots from minutes + resolution if provided
+    T_minutes = mp.get("T_minutes")
+    slot_res = mp.get("slot_resolution", 1)
+    trip_dur_min = mp.get("trip_duration_minutes", mp.get("trip_duration"))
+    if T_minutes is not None:
+        try:
+            T_slots = int(int(T_minutes) // int(slot_res or 1))
+        except Exception:
+            T_slots = mp.get("T", "-")
+    else:
+        T_slots = mp.get("T", "-")
+    trip_slots = mp.get("trip_slots")
     print(
-        "  master: solver=%s Q=%s T=%s trip_slots=%s Emax=%s L=%s delta_chg=%s" % (
-            mp.get("solver", "-"), mp.get("Q", "-"), mp.get("T", "-"), mp.get("trip_slots", "-"), mp.get("Emax", "-"), mp.get("L", "-"), mp.get("delta_chg", "-"),
+        "  master: solver=%s Q=%s T_minutes=%s slot_res=%s (slots=%s) trip_dur_min=%s Emax=%s L=%s delta_chg=%s" % (
+            mp.get("solver", "-"), mp.get("Q", "-"), T_minutes if T_minutes is not None else mp.get("T", "-"), slot_res, T_slots, trip_dur_min if trip_dur_min is not None else trip_slots, mp.get("Emax", "-"), mp.get("L", "-"), mp.get("delta_chg", "-"),
         )
     )
+    # Inform when trip duration exceeds horizon after discretization
     try:
-        _T = int(mp.get("T"))
-        _ts = int(mp.get("trip_slots"))
+        _T = int(T_slots) if isinstance(T_slots, int) else int(mp.get("T"))
+        import math
+        if trip_dur_min is not None:
+            _res = int(slot_res or 1)
+            _ts = int(math.ceil(float(trip_dur_min) / max(1, _res)))
+        else:
+            _ts = int(mp.get("trip_slots"))
         if _ts >= _T:
-            print("  NOTE: trip_slots >= T restricts starts to t=0 and may prevent trips from serving demand. Consider trip_slots < T.")
+            print("  NOTE: trip duration (in slots) >= horizon; starts limited to t=0 and may prevent serving demand.")
     except Exception:
         pass
     print(
-        "  subproblem: solver=%s S=%s T=%s Wmax_slots=%s p=%s" % (
-            sp.get("lp_solver", "-"), sp.get("S", "-"), sp.get("T", "-"), sp.get("Wmax_slots", sp.get("Wmax", "-")), sp.get("p", "-"),
+        "  subproblem: solver=%s S=%s Wmax=%s p=%s (slot_res=%s)" % (
+            sp.get("lp_solver", "-"), sp.get("S", "-"), sp.get("Wmax_minutes", sp.get("Wmax_slots", sp.get("Wmax", "-"))), sp.get("p", "-"), sp.get("slot_resolution", mp.get("slot_resolution", "-")),
         )
     )
+    if "demand_file" in sp:
+        print(f"  demand_file: {sp.get('demand_file')}")
+    if "scenario_files" in sp:
+        print(f"  scenario_files: {sp.get('scenario_files')}")
     if "R_out" in sp:
-        print(f"  R_out: {sp.get('R_out')}")
+        print(f"  R_out: {sp.get('R_out')} (inline)")
     if "R_ret" in sp:
-        print(f"  R_ret: {sp.get('R_ret')}")
+        print(f"  R_ret: {sp.get('R_ret')} (inline)")
     result = solver.run()
     # Final summary
     print(

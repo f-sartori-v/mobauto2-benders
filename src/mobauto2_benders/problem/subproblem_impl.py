@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Tuple, Iterable
+from pathlib import Path
+import json
+try:
+    import yaml as _yaml  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    _yaml = None
 
 import pyomo.environ as pyo
 from dataclasses import dataclass
@@ -43,7 +49,14 @@ class ProblemSubproblem(Subproblem):
         params = self.params or {}
         # Parameters (with safe defaults)
         S = float(params.get("S", 1.0))
-        Wmax = int(params.get("Wmax_slots", params.get("Wmax", 0)))
+        # Resolution in minutes per slot (copied from master params via config or set here)
+        slot_res = int(params.get("slot_resolution", params.get("resolution", 1)))
+        # Allow Wmax to be specified in minutes
+        import math
+        if "Wmax_minutes" in params:
+            Wmax = int(math.ceil(float(params.get("Wmax_minutes", 0)) / max(1, slot_res)))
+        else:
+            Wmax = int(params.get("Wmax_slots", params.get("Wmax", 0)))
         p_pen = float(params.get("p", 0.0))
         lp_solver = str(params.get("lp_solver", "cplex_direct"))
 
@@ -51,6 +64,102 @@ class ProblemSubproblem(Subproblem):
         q_idx, t_idx = self._parse_candidate_indices(candidate)
         T_cand = (max(t_idx) + 1) if t_idx else int(params.get("T", 0))
         T = int(params.get("T", T_cand))
+
+        # Helpers to read demand from files or inline and aggregate into R vectors
+        def _load_doc(path: Path) -> Any:
+            if not path.exists():
+                raise FileNotFoundError(f"Demand file not found: {path}")
+            ext = path.suffix.lower()
+            if ext == ".json":
+                with path.open("r", encoding="utf-8") as f:
+                    return json.load(f)
+            if ext in {".yaml", ".yml"}:
+                if _yaml is None:
+                    raise RuntimeError("PyYAML is required to read YAML demand files. Install with 'pip install pyyaml'.")
+                with path.open("r", encoding="utf-8") as f:
+                    return _yaml.safe_load(f)
+            # Fallback: try JSON
+            with path.open("r", encoding="utf-8") as f:
+                return json.load(f)
+
+        def _aggregate_requests(container: Any, Tlen: int) -> tuple[list[float], list[float]]:
+            R_out = [0.0 for _ in range(Tlen)]
+            R_ret = [0.0 for _ in range(Tlen)]
+            if container is None:
+                return R_out, R_ret
+            # Direct arrays
+            if isinstance(container, dict) and ("R_out" in container or "R_ret" in container):
+                rout = list(container.get("R_out", [0.0] * Tlen))
+                rret = list(container.get("R_ret", [0.0] * Tlen))
+                if len(rout) != Tlen:
+                    rout = (rout + [0.0] * Tlen)[:Tlen]
+                if len(rret) != Tlen:
+                    rret = (rret + [0.0] * Tlen)[:Tlen]
+                return [float(x) for x in rout], [float(x) for x in rret]
+            # Pull list from mapping under 'requests' or 'req_matrix'
+            if isinstance(container, dict):
+                container = container.get("requests") or container.get("req_matrix") or []
+            # List of dicts [{dir,time}, ...]
+            if isinstance(container, list) and container and isinstance(container[0], dict):
+                for r in container:
+                    d = r.get("dir")
+                    try:
+                        tmin = float(r.get("time", -1))
+                    except Exception:
+                        continue
+                    if tmin < 0:
+                        continue
+                    # Map minutes to slot index
+                    t = int(tmin // max(1, slot_res))
+                    if not (0 <= t < Tlen):
+                        continue
+                    if isinstance(d, str):
+                        dd = d.upper()
+                        if dd == "OUT":
+                            R_out[t] += 1.0
+                        elif dd == "RET":
+                            R_ret[t] += 1.0
+                    else:
+                        if int(d) == 0:
+                            R_out[t] += 1.0
+                        else:
+                            R_ret[t] += 1.0
+                return R_out, R_ret
+            # Matrix [[dir,time], ...]
+            if isinstance(container, list):
+                for row in container:
+                    if not isinstance(row, (list, tuple)) or len(row) < 2:
+                        continue
+                    d, tt = row[0], row[1]
+                    try:
+                        tmin = float(tt)
+                    except Exception:
+                        continue
+                    if tmin < 0:
+                        continue
+                    t = int(tmin // max(1, slot_res))
+                    if not (0 <= t < Tlen):
+                        continue
+                    if isinstance(d, str):
+                        dd = d.upper()
+                        if dd == "OUT":
+                            R_out[t] += 1.0
+                        elif dd == "RET":
+                            R_ret[t] += 1.0
+                    else:
+                        if int(d) == 0:
+                            R_out[t] += 1.0
+                        else:
+                            R_ret[t] += 1.0
+                return R_out, R_ret
+            return R_out, R_ret
+
+        def _load_demand_from_file(path_like: Any, Tlen: int) -> tuple[list[float], list[float]]:
+            p = Path(str(path_like))
+            doc = _load_doc(p)
+            return _aggregate_requests(doc, Tlen)
+
+        # (legacy) aggregate_requests_to_R removed; using _aggregate_requests instead
 
         # Capacities induced by master decisions: C_*[tau] = S * sum_q y*_{q,tau}
         C_out = [0.0 for _ in range(T)]
@@ -73,6 +182,9 @@ class ProblemSubproblem(Subproblem):
 
         # Multi-scenario support
         scenarios: list[dict] = list(params.get("scenarios", []))
+        # Allow specifying scenarios as file paths
+        if not scenarios and isinstance(params.get("scenario_files"), list):
+            scenarios = list(params.get("scenario_files"))
         average_cuts: bool = bool(params.get("average_cuts_across_scenarios", False))
         ub_aggregation: str = str(params.get("ub_aggregation", "mean"))
         weights: list[float] | None = params.get("scenario_weights")
@@ -141,8 +253,14 @@ class ProblemSubproblem(Subproblem):
             coeffs_ret_list: list[Dict[tuple[int, int], float]] = []
 
             for s in scenarios:
-                R_out = list(s.get("R_out", [0.0] * T))
-                R_ret = list(s.get("R_ret", [0.0] * T))
+                if isinstance(s, (str, Path)):
+                    R_out, R_ret = _load_demand_from_file(s, T)
+                elif isinstance(s, dict) and ("requests" in s or "req_matrix" in s or "R_out" in s or "R_ret" in s):
+                    R_out, R_ret = _aggregate_requests(s, T)
+                else:
+                    # Best effort
+                    R_out = list(getattr(s, "R_out", [0.0] * T))
+                    R_ret = list(getattr(s, "R_ret", [0.0] * T))
                 R_out = (R_out + [0.0] * T)[:T]
                 R_ret = (R_ret + [0.0] * T)[:T]
 
@@ -188,9 +306,14 @@ class ProblemSubproblem(Subproblem):
             else:
                 return SubproblemResult(is_feasible=True, cuts=cuts, upper_bound=ub_val_agg)
         else:
-            # Single-demand case from params
-            R_out = list(params.get("R_out", [0.0] * T))
-            R_ret = list(params.get("R_ret", [0.0] * T))
+            # Single-demand case from params (prefer external file if given)
+            if params.get("demand_file"):
+                R_out, R_ret = _load_demand_from_file(params.get("demand_file"), T)
+            elif ("requests" in params) or ("req_matrix" in params) or ("R_out" in params) or ("R_ret" in params):
+                R_out, R_ret = _aggregate_requests(params, T)
+            else:
+                R_out = [0.0] * T
+                R_ret = [0.0] * T
             if len(R_out) != T:
                 R_out = (R_out + [0.0] * T)[:T]
             if len(R_ret) != T:

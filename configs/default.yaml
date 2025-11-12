@@ -1,7 +1,7 @@
 run:
   max_iterations: 100
   tolerance: 0.0001
-  time_limit_s: 600
+  time_limit_s: 1800
   # log_level controls the verbosity of Python's logging output.
   # Options (most verbose to least): DEBUG, INFO, WARNING, ERROR, CRITICAL
   # - DEBUG: detailed internal iteration logs
@@ -17,22 +17,23 @@ master:
     solver: cplex_direct
     # Q: number of vehicles modeled in the master
     Q: 2
-    # T: number of discrete time slots in the planning horizon
-    T: 8
-    # trip_slots: trip duration in slots (NOT energy). Example: 2 means a trip
-    #   started at time t updates location at t+2 and blocks new starts while "in trip".
-    #   Keep 1 <= trip_slots < T.
-    trip_slots: 1
+    # Time discretization is defined in minutes; slots are implicit via slot_resolution.
+    # T_minutes: total horizon length in minutes (e.g., 600)
+    T_minutes: 600
+    # slot_resolution: minutes per slot (e.g., 5 -> discrete time grid every 5 minutes)
+    slot_resolution: 30
+    # trip_duration_minutes: physical trip duration in minutes. Internally converted to slots as ceil(trip_duration_minutes / slot_resolution).
+    trip_duration_minutes: 30
     # Emax: battery capacity (energy units)
-    Emax: 10.0
+    Emax: 150
     # L: energy consumed when starting a trip (units consistent with Emax). This is
     #   NOT the number of slots; it is used in the battery balance and a guard
     #   constraint requiring b[q,t] >= 2*L to start an OUT trip.
-    L: 2.0
+    L: 30
     # delta_chg: maximum charge added per slot when c[q,t] = 1
-    delta_chg: 1.0
+    delta_chg: 30
     # binit: initial battery levels per vehicle (length Q)
-    binit: [10.0, 10.0]
+    binit: [150.0, 150.0]
 
 subproblem:
   impl: pyomo_lp
@@ -41,20 +42,19 @@ subproblem:
     lp_solver: cplex_direct
     # S: capacity units contributed by one vehicle starting at time tau.
     #   Master yOUT[q,tau] adds S to C_out[tau] (similarly for yRET/C_ret).
-    S: 4.0
-    # T should match the master horizon
-    T: 8
-    # Wmax_slots: maximum waiting allowed for demand (in slots). Demand at time t
-    #   may be served by departures tau in [t, min(t+Wmax_slots, T-1)].
-    Wmax_slots: 2
+    S: 15.0
+    # Wmax can be given in slots or minutes. If Wmax_minutes is provided, it is converted to slots using slot_resolution
+    # of the master params.
+    Wmax_minutes: 30
     # p: penalty per unit of unserved demand (drives MP to create capacity)
     p: 50.0
-    # Single-demand parameters (initial demo demand)
-    R_out: [4, 2, 0, 0, 4, 0, 4, 0]
-    R_ret: [0, 0, 4, 0, 0, 2, 0, 0]
-    # Example single-scenario (remove if not needed)
-    # average_cuts_across_scenarios: true
-    # ub_aggregation: mean
-    # scenarios:
-    #   - R_out: [0, 0, 0, 0, 0, 0, 0, 0]
-    #     R_ret: [0, 0, 0, 0, 0, 0, 0, 0]
+    # Demand source (prefer external files). Provide either:
+    #  - demand_file: path to YAML/JSON with one of:
+    #       { requests: [{dir: OUT|RET|0|1, time: int}, ...] }
+    #       { req_matrix: [[OUT|RET|0|1, time], ...] }
+    #       { R_out: [...], R_ret: [...] }
+    #  - scenario_files: list of files (each as above) for multi-scenario runs
+    demand_file: setups/demo_demand.yaml
+    # scenario_files:
+    #   - setups/scenario_1.yaml
+    #   - setups/scenario_2.yaml

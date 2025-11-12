@@ -79,9 +79,14 @@ def load_config(path: str | Path | None) -> BendersConfig:
         impl=str(master.get("impl", "to_fill")),
         params=_as_dict(master.get("params")),
     )
+    sub_params = _as_dict(sub.get("params"))
+    # Propagate time discretization keys from master to subproblem if missing
+    for key in ("slot_resolution", "resolution", "T_minutes", "trip_duration", "trip_duration_minutes"):
+        if key in master_cfg.params and key not in sub_params:
+            sub_params[key] = master_cfg.params[key]
     sub_cfg = ComponentConfig(
         impl=str(sub.get("impl", "to_fill")),
-        params=_as_dict(sub.get("params")),
+        params=sub_params,
     )
     return BendersConfig(run=run_cfg, master=master_cfg, subproblem=sub_cfg)
 

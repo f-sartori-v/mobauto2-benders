@@ -22,8 +22,19 @@ class ProblemMaster(MasterProblem):
 
     def initialize(self) -> None:
         Q = int(self._p("Q"))
-        T = int(self._p("T"))
-        trip_slots = int(self._p("trip_slots"))
+        # Time discretization: prefer minutes + slot_resolution + trip_duration_minutes
+        import math
+        slot_res = int(self._p("slot_resolution", 1))
+        T_minutes = self._p("T_minutes")
+        trip_dur_min = self._p("trip_duration_minutes", self._p("trip_duration"))
+        if T_minutes is not None:
+            T = int(int(T_minutes) // max(1, slot_res))
+        else:
+            T = int(self._p("T"))
+        if trip_dur_min is not None:
+            trip_slots = int(math.ceil(float(trip_dur_min) / max(1, slot_res)))
+        else:
+            trip_slots = int(self._p("trip_slots"))
         Emax = float(self._p("Emax"))
         L = float(self._p("L"))
         delta_chg = float(self._p("delta_chg"))
@@ -43,30 +54,71 @@ class ProblemMaster(MasterProblem):
         # Theta models recourse cost; keep nonnegative to avoid initial unboundedness
         m.theta = pyo.Var(within=pyo.NonNegativeReals)
 
-        m.obj = pyo.Objective(expr=m.theta, sense=pyo.minimize)
+        # Add a tiny start cost epsilon to help branching and discourage gratuitous starts
+        eps_start = float(self._p("start_cost_epsilon", 0.0))
+        if eps_start and eps_start > 0:
+            m.obj = pyo.Objective(
+                expr=m.theta
+                + eps_start
+                * sum(m.yOUT[q, t] + m.yRET[q, t] for q in m.Q for t in m.T),
+                sense=pyo.minimize,
+            )
+        else:
+            m.obj = pyo.Objective(expr=m.theta, sense=pyo.minimize)
 
         def exclusivity_rule(m, q, t):
             return m.yOUT[q, t] + m.yRET[q, t] + m.c[q, t] <= 1
 
         m.C1a = pyo.Constraint(m.Q, m.T, rule=exclusivity_rule)
 
-        def intrip_rule(m, q, tau):
-            # Count trips that started before current time and are still ongoing
-            # Exclude potential starts at the current time index (tau) so that
-            # starting a trip at tau is allowed when not already in trip.
-            if tau == 0:
-                return m.inTrip[q, tau] == 0
-            t_prev = tau - 1
-            return m.inTrip[q, tau] == sum(
-                m.yOUT[q, t] + m.yRET[q, t] for t in m.T if t <= t_prev < t + trip_slots
-            )
+        # inTrip implications (lighter than equality linking):
+        # Lower bounds: inTrip[q,t] >= yOUT[q,u], inTrip[q,t] >= yRET[q,u] for u in (t-trip_slots+1..t-1)
+        # Upper bound:  inTrip[q,t] <= sum_{u in (t-trip_slots+1..t-1)} (yOUT[q,u]+yRET[q,u])
+        for q in m.Q:
+            for t in m.T:
+                lo = max(0, t - trip_slots + 1)
+                hi = t - 1
+                if lo <= hi:
+                    # Upper bound
+                    m.add_component(
+                        f"C1b_intrip_ub_{q}_{t}",
+                        pyo.Constraint(
+                            expr=m.inTrip[q, t]
+                            <= sum(m.yOUT[q, u] + m.yRET[q, u] for u in range(lo, hi + 1))
+                        ),
+                    )
+                    # Lower bounds
+                    for u in range(lo, hi + 1):
+                        m.add_component(
+                            f"C1b_intrip_lb_out_{q}_{t}_{u}",
+                            pyo.Constraint(expr=m.inTrip[q, t] >= m.yOUT[q, u]),
+                        )
+                        m.add_component(
+                            f"C1b_intrip_lb_ret_{q}_{t}_{u}",
+                            pyo.Constraint(expr=m.inTrip[q, t] >= m.yRET[q, u]),
+                        )
+                else:
+                    # No prior starts to account for
+                    m.add_component(
+                        f"C1b_intrip_zero_{q}_{t}", pyo.Constraint(expr=m.inTrip[q, t] == 0)
+                    )
 
-        m.C1b = pyo.Constraint(m.Q, m.T, rule=intrip_rule)
-
+        # Block actions when in trip (keeps starts and charging off while busy)
         def block_rule(m, q, t):
             return m.yOUT[q, t] + m.yRET[q, t] + m.c[q, t] <= 1 - m.inTrip[q, t]
 
         m.C1c = pyo.Constraint(m.Q, m.T, rule=block_rule)
+
+        # No two starts inside any trip-duration window (avoid overlapping trips)
+        for q in m.Q:
+            for w in range(T):
+                w_end = min(T - 1, w + trip_slots - 1)
+                m.add_component(
+                    f"C1d_window_atmost1_{q}_{w}",
+                    pyo.Constraint(
+                        expr=sum(m.yOUT[q, u] + m.yRET[q, u] for u in range(w, w_end + 1)) <= 1
+                    ),
+                )
 
         # Disallow starting trips that cannot finish within the horizon
         # Allowed starts must satisfy t + trip_slots <= T - 1 -> t <= T - trip_slots - 1
@@ -96,6 +148,20 @@ class ProblemMaster(MasterProblem):
             # Ensure no trip is ongoing at the end of horizon
             m.inTrip[q, T - 1].fix(0)
 
+        # FIFO symmetry-breaking across vehicles: cumulative starts for k
+        # cannot exceed those for k-1 over any time prefix
+        if Q >= 2:
+            for k in range(1, Q):
+                for t in range(T):
+                    m.add_component(
+                        f"C3_fifo_{k}_{t}",
+                        pyo.Constraint(
+                            expr=
+                            sum(m.yOUT[k, tau] + m.yRET[k, tau] for tau in range(0, t + 1))
+                            <= sum(m.yOUT[k - 1, tau] + m.yRET[k - 1, tau] for tau in range(0, t + 1))
+                        ),
+                    )
+
         for q in m.Q:
             m.b[q, 0].fix(float(binit[q]))
             for t in range(T - 1):
@@ -116,15 +182,37 @@ class ProblemMaster(MasterProblem):
         for q in m.Q:
             m.gchg[q, T - 1].fix(0)
 
+        # Prepare a constraint list to store Benders cuts incrementally
+        m.BendersCuts = pyo.ConstraintList()
+
         self.m = m
 
-    def _solver(self) -> pyo.SolverFactory:
-        name = str(self._p("solver", "cplex_direct"))
-        solver = pyo.SolverFactory(name)
+        # Create and retain a persistent solver; set instance once
+        # Prefer cplex_persistent for incremental cut addition
+        solver_name = str(self._p("solver", "cplex_persistent"))
+        self._solver = pyo.SolverFactory(solver_name)
+        try:
+            # For persistent solvers, set the instance now
+            if hasattr(self._solver, "set_instance"):
+                self._solver.set_instance(self.m, symbolic_solver_labels=True)
+        except Exception:
+            # Fallback: keep non-persistent behavior if not supported
+            pass
+
+    def _get_solver(self) -> pyo.SolverFactory:
+        assert self.m is not None
+        # Initialize solver if needed (covers non-persistent or failed init)
+        if getattr(self, "_solver", None) is None:
+            solver_name = str(self._p("solver", "cplex_persistent"))
+            self._solver = pyo.SolverFactory(solver_name)
+        # Apply options each time (cheap)
         opts = self._p("solver_options", {}) or {}
         for k, v in opts.items():
-            solver.options[k] = v
-        return solver
+            try:
+                self._solver.options[k] = v
+            except Exception:
+                pass
+        return self._solver
 
     def _collect_candidate(self) -> Candidate:
         assert self.m is not None
@@ -140,7 +228,13 @@ class ProblemMaster(MasterProblem):
     def solve(self) -> SolveResult:
         assert self.m is not None, "Call initialize() before solve()"
         m = self.m
-        res = self._solver().solve(m, tee=False)
+        solver = self._get_solver()
+        # Prefer calling with model (works for direct solvers). If the solver is
+        # persistent and does not accept a model arg, fall back gracefully.
+        try:
+            res = solver.solve(m, tee=False)
+        except (TypeError, IndexError):
+            res = solver.solve(tee=False)
 
         term = getattr(res.solver, "termination_condition", None)
         st = getattr(res.solver, "status", None)
@@ -254,9 +348,31 @@ class ProblemMaster(MasterProblem):
 
         expr = m.theta >= rhs
 
-        cname = f"benders_{self._cut_idx}"
+        # Add to a ConstraintList for uniqueness and persistence
+        idx = m.BendersCuts.add(expr)
+
+        # If using a persistent solver, inform it about the new constraint
+        try:
+            solver = self._get_solver()
+            if hasattr(solver, "add_constraint"):
+                solver.add_constraint(m.BendersCuts[idx])
+        except Exception:
+            pass
+
+        # Simple logging: constant and nonzeros
+        nnz = 0
+        if isinstance(coeff_yOUT, dict):
+            nnz += len([1 for v in coeff_yOUT.values() if abs(float(v)) > 1e-12])
+        if isinstance(coeff_yRET, dict):
+            nnz += len([1 for v in coeff_yRET.values() if abs(float(v)) > 1e-12])
+        # For cuts built from generic name/coef pairs
+        if (not isinstance(coeff_yOUT, dict)) and (not isinstance(coeff_yRET, dict)) and cut.coeffs:
+            nnz += len([1 for (name, coef) in cut.coeffs.items() if abs(float(coef)) > 1e-12])
+        try:
+            print(f"[BENDERS] Added cut #{self._cut_idx}: const={const:.6g}, nnz={nnz}")
+        except Exception:
+            pass
         self._cut_idx += 1
-        setattr(m, cname, pyo.Constraint(expr=expr))
 
     def best_lower_bound(self) -> Optional[float]:
         return self._lb
