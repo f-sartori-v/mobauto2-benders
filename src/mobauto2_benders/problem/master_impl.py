@@ -5,6 +5,15 @@ from typing import Any, Optional
 import pyomo.environ as pyo
 
 from ..benders.master import MasterProblem
+from ..benders.subproblem import Subproblem
+from ..benders.types import SubproblemResult
+
+try:  # Optional import for CPLEX lazy callbacks
+    import cplex  # type: ignore
+    from cplex.callbacks import LazyConstraintCallback  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    cplex = None
+    LazyConstraintCallback = object  # type: ignore
 from ..benders.types import Candidate, Cut, SolveResult, SolveStatus
 
 
@@ -14,6 +23,9 @@ class ProblemMaster(MasterProblem):
         self.m: pyo.ConcreteModel | None = None
         self._cut_idx = 0
         self._lb: Optional[float] = None
+        # Fingerprints of cuts to avoid duplicates
+        self._cut_fps: set[tuple] = set()
+        self._lazy_installed: bool = False
 
     def _p(self, key: str, default: Any | None = None) -> Any:
         if self.params is None:
@@ -46,9 +58,13 @@ class ProblemMaster(MasterProblem):
 
         m.yOUT = pyo.Var(m.Q, m.T, within=pyo.Binary)
         m.yRET = pyo.Var(m.Q, m.T, within=pyo.Binary)
-        m.c = pyo.Var(m.Q, m.T, within=pyo.Binary)
-        m.s = pyo.Var(m.Q, m.T, within=pyo.Binary)
-        m.inTrip = pyo.Var(m.Q, m.T, within=pyo.Binary)
+        # Aggregated starts per time (to keep cuts sparse): Yout[t] = sum_q yOUT[q,t], Yret[t] likewise
+        m.Yout = pyo.Var(m.T, within=pyo.NonNegativeReals)
+        m.Yret = pyo.Var(m.T, within=pyo.NonNegativeReals)
+        # Keep auxiliaries continuous in [0,1] to reduce binaries
+        m.c = pyo.Var(m.Q, m.T, bounds=(0.0, 1.0))
+        m.s = pyo.Var(m.Q, m.T, bounds=(0.0, 1.0))
+        m.inTrip = pyo.Var(m.Q, m.T, bounds=(0.0, 1.0))
         m.b = pyo.Var(m.Q, m.T, bounds=(0, Emax))
         m.gchg = pyo.Var(m.Q, m.T, within=pyo.NonNegativeReals)
         # Theta models recourse cost; keep nonnegative to avoid initial unboundedness
@@ -70,6 +86,10 @@ class ProblemMaster(MasterProblem):
             return m.yOUT[q, t] + m.yRET[q, t] + m.c[q, t] <= 1
 
         m.C1a = pyo.Constraint(m.Q, m.T, rule=exclusivity_rule)
+
+        # Define aggregation equalities for Yout/Yret
+        m.Cagg_out = pyo.Constraint(m.T, rule=lambda m, t: m.Yout[t] == sum(m.yOUT[q, t] for q in m.Q))
+        m.Cagg_ret = pyo.Constraint(m.T, rule=lambda m, t: m.Yret[t] == sum(m.yRET[q, t] for q in m.Q))
 
         # inTrip implications (lighter than equality linking):
         # Lower bounds: inTrip[q,t] >= yOUT[q,u], inTrip[q,t] >= yRET[q,u] for u in (t-trip_slots+1..t-1)
@@ -182,37 +202,217 @@ class ProblemMaster(MasterProblem):
         for q in m.Q:
             m.gchg[q, T - 1].fix(0)
 
-        # Prepare a constraint list to store Benders cuts incrementally
-        m.BendersCuts = pyo.ConstraintList()
+        # Container block to store explicit Benders cuts incrementally
+        m.BendersCuts = pyo.Block(concrete=True)
 
         self.m = m
 
-        # Create and retain a persistent solver; set instance once
-        # Prefer cplex_persistent for incremental cut addition
+        # Create and retain a solver; if persistent CPLEX, set instance once
         solver_name = str(self._p("solver", "cplex_persistent"))
         self._solver = pyo.SolverFactory(solver_name)
-        try:
-            # For persistent solvers, set the instance now
-            if hasattr(self._solver, "set_instance"):
-                self._solver.set_instance(self.m, symbolic_solver_labels=True)
-        except Exception:
-            # Fallback: keep non-persistent behavior if not supported
-            pass
+        self._is_persistent = solver_name.lower() == "cplex_persistent"
+        if self._is_persistent:
+            # If using lazy cuts, we need symbolic labels to resolve indices by name
+            use_lazy = bool(self._p("use_lazy_cuts", False))
+            self._solver.set_instance(self.m, symbolic_solver_labels=use_lazy)
+            # Set solver options once here
+            opts = self._p("solver_options", {}) or {}
+            for k, v in opts.items():
+                self._solver.options[k] = v
 
     def _get_solver(self) -> pyo.SolverFactory:
         assert self.m is not None
-        # Initialize solver if needed (covers non-persistent or failed init)
-        if getattr(self, "_solver", None) is None:
-            solver_name = str(self._p("solver", "cplex_persistent"))
-            self._solver = pyo.SolverFactory(solver_name)
-        # Apply options each time (cheap)
-        opts = self._p("solver_options", {}) or {}
-        for k, v in opts.items():
+        return self._solver
+
+    # Optional: install a CPLEX lazy-constraint callback that generates Benders cuts
+    # on-the-fly from the provided Subproblem implementation. Requires persistent CPLEX.
+    def install_lazy_callback(self, subproblem: Subproblem) -> None:
+        assert self.m is not None
+        if str(self._p("solver", "")).lower() != "cplex_persistent":
             try:
-                self._solver.options[k] = v
+                print("[BENDERS] Lazy cuts require solver=cplex_persistent; skipping callback install.")
             except Exception:
                 pass
-        return self._solver
+            return
+        solver = self._get_solver()
+        # Access underlying CPLEX model
+        cpx = getattr(solver, "_solver_model", None)
+        if (cplex is None) or (cpx is None):
+            try:
+                print("[BENDERS] CPLEX Python API not available; skipping lazy cuts.")
+            except Exception:
+                pass
+            return
+
+        m = self.m
+        T = list(m.T)
+        Q = list(m.Q)
+
+        # Prepare variable names and indices in CPLEX
+        theta_name = "theta"
+        yout_names = [f"yOUT[{q},{t}]" for q in Q for t in T]
+        yret_names = [f"yRET[{q},{t}]" for q in Q for t in T]
+        Yout_names = [f"Yout[{t}]" for t in T]
+        Yret_names = [f"Yret[{t}]" for t in T]
+
+        try:
+            idx_theta = cpx.variables.get_indices(theta_name)
+            idx_yout = cpx.variables.get_indices(yout_names)
+            idx_yret = cpx.variables.get_indices(yret_names)
+            idx_Yout = cpx.variables.get_indices(Yout_names)
+            idx_Yret = cpx.variables.get_indices(Yret_names)
+        except Exception:
+            # Ensure symbolic labels were used
+            try:
+                print("[BENDERS] Could not resolve variable indices by name; ensure symbolic_solver_labels=True.")
+            except Exception:
+                pass
+            return
+
+        # Build mappings from (q,t) and t to indices for fast lookup
+        yout_index: dict[tuple[int, int], int] = {}
+        yret_index: dict[tuple[int, int], int] = {}
+        for i, q in enumerate(Q):
+            for j, t in enumerate(T):
+                pos = i * len(T) + j
+                yout_index[(q, t)] = idx_yout[pos]
+                yret_index[(q, t)] = idx_yret[pos]
+        Yout_index: dict[int, int] = {t: idx_Yout[i] for i, t in enumerate(T)}
+        Yret_index: dict[int, int] = {t: idx_Yret[i] for i, t in enumerate(T)}
+
+        # Allow overriding the LP solver used by the subproblem inside the callback
+        lp_override = str(self._p("lazy_cb_lp_solver", "")).strip() or None
+
+        # Register callback
+        class _BendersLazyCB(LazyConstraintCallback):  # type: ignore
+            def __call__(self):  # noqa: D401
+                # Build candidate from current integer solution
+                cand: dict[str, float] = {}
+                # yOUT
+                for q in Q:
+                    for t in T:
+                        idx = yout_index[(q, t)]
+                        try:
+                            val = float(self.get_values(idx))
+                        except Exception:
+                            val = 0.0
+                        cand[f"yOUT[{q},{t}]"] = val
+                # yRET
+                for q in Q:
+                    for t in T:
+                        idx = yret_index[(q, t)]
+                        try:
+                            val = float(self.get_values(idx))
+                        except Exception:
+                            val = 0.0
+                        cand[f"yRET[{q},{t}]"] = val
+
+                # Evaluate subproblem to get a cut at this candidate
+                # Optionally override LP solver inside callback to avoid nested CPLEX
+                old_lp = None
+                try:
+                    if lp_override is not None:
+                        old_lp = subproblem.params.get("lp_solver")
+                        subproblem.params["lp_solver"] = lp_override
+                except Exception:
+                    pass
+                try:
+                    sres: SubproblemResult = subproblem.evaluate(cand)
+                except Exception:
+                    # If SP fails, skip adding lazy cut
+                    return
+                finally:
+                    try:
+                        if lp_override is not None and old_lp is not None:
+                            subproblem.params["lp_solver"] = old_lp
+                    except Exception:
+                        pass
+                cuts = []
+                if sres.cut is not None:
+                    cuts.append(sres.cut)
+                if getattr(sres, "cuts", None):
+                    cuts.extend(sres.cuts)
+                if not cuts:
+                    return
+
+                # We only add the first violated cut (can be extended to add multiple)
+                cut = cuts[0]
+                const = float(cut.metadata.get("const", 0.0)) if hasattr(cut, "metadata") else 0.0
+                coeff_yOUT = cut.metadata.get("coeff_yOUT") if hasattr(cut, "metadata") else None
+                coeff_yRET = cut.metadata.get("coeff_yRET") if hasattr(cut, "metadata") else None
+
+                # Aggregate coefficients by time to use Yout/Yret variables (sparser) and convert to betas
+                agg_out: dict[int, float] = {}
+                agg_ret: dict[int, float] = {}
+                if isinstance(coeff_yOUT, dict):
+                    for (q, t), v in coeff_yOUT.items():
+                        beta = max(0.0, -float(v))
+                        if t not in agg_out:
+                            agg_out[t] = beta
+                if isinstance(coeff_yRET, dict):
+                    for (q, t), v in coeff_yRET.items():
+                        beta = max(0.0, -float(v))
+                        if t not in agg_ret:
+                            agg_ret[t] = beta
+
+                # Re-anchor constant to pass through incumbent
+                # ub_est = const_dm + sum(dm*y_curr) using raw dm from metadata
+                ub_est = float(const)
+                if isinstance(coeff_yOUT, dict):
+                    for (q, t), v in coeff_yOUT.items():
+                        ub_est += float(v) * float(self.get_values(yout_index[(q, t)]))
+                if isinstance(coeff_yRET, dict):
+                    for (q, t), v in coeff_yRET.items():
+                        ub_est += float(v) * float(self.get_values(yret_index[(q, t)]))
+                # const_beta = ub_est - sum(beta*y_curr)
+                const = ub_est
+                for t, beta in agg_out.items():
+                    const -= float(beta) * float(self.get_values(Yout_index[t]))
+                for t, beta in agg_ret.items():
+                    const -= float(beta) * float(self.get_values(Yret_index[t]))
+
+                # Build LHS: theta + sum_t (beta_out[t]*Yout[t] + beta_ret[t]*Yret[t]) >= const
+                inds: list[int] = [idx_theta]
+                vals: list[float] = [1.0]
+                for t, a in agg_out.items():
+                    if t in Yout_index:
+                        inds.append(Yout_index[t])
+                        vals.append(float(a))
+                for t, a in agg_ret.items():
+                    if t in Yret_index:
+                        inds.append(Yret_index[t])
+                        vals.append(float(a))
+
+                # Check violation at current solution
+                lhs_val = 0.0
+                try:
+                    lhs_val += float(self.get_values(idx_theta))
+                except Exception:
+                    pass
+                for ind, coef in zip(inds[1:], vals[1:]):
+                    try:
+                        lhs_val += coef * float(self.get_values(ind))
+                    except Exception:
+                        pass
+
+                tol = 1e-6
+                if lhs_val >= const - tol:
+                    return
+
+                # Add lazy constraint
+                try:
+                    spair = cplex.SparsePair(ind=inds, val=vals)
+                    self.add(spair, "G", const)
+                except Exception:
+                    # Alternate signature fallback
+                    try:
+                        self.add(inds, vals, "G", const)
+                    except Exception:
+                        pass
+
+        cb = cpx.register_callback(_BendersLazyCB)  # noqa: F841
+        self._lazy_installed = True
+        print("[BENDERS] Installed CPLEX lazy constraint callback for Benders cuts.")
 
     def _collect_candidate(self) -> Candidate:
         assert self.m is not None
@@ -229,12 +429,11 @@ class ProblemMaster(MasterProblem):
         assert self.m is not None, "Call initialize() before solve()"
         m = self.m
         solver = self._get_solver()
-        # Prefer calling with model (works for direct solvers). If the solver is
-        # persistent and does not accept a model arg, fall back gracefully.
-        try:
-            res = solver.solve(m, tee=False)
-        except (TypeError, IndexError):
+        if getattr(self, "_is_persistent", False):
+            # Persistent: do not pass model
             res = solver.solve(tee=False)
+        else:
+            res = solver.solve(m, tee=False)
 
         term = getattr(res.solver, "termination_condition", None)
         st = getattr(res.solver, "status", None)
@@ -327,52 +526,172 @@ class ProblemMaster(MasterProblem):
         coeff_yOUT = cut.metadata.get("coeff_yOUT") if hasattr(cut, "metadata") else None
         coeff_yRET = cut.metadata.get("coeff_yRET") if hasattr(cut, "metadata") else None
 
-        # Build RHS of the cut as a linear expression, then form inequality
+        # Build RHS: theta >= const + sum(beta_out*yOUT) + sum(beta_ret*yRET)
         rhs = const
 
+        # Optionally aggregate coefficients by time to use Yout/Yret and reduce density
+        aggregate = bool(self._p("aggregate_cuts_by_tau", True))
+        coeff_tol = float(self._p("cut_coeff_threshold", 0.0) or 0.0)
+        # Convert raw slopes (finite differences dm) into nonnegative betas: beta = max(0, -dm)
+        # This matches theta >= const + sum(beta*y) with beta >= 0.
+        agg_out: dict[int | tuple[int, int], float] = {}
+        agg_ret: dict[int | tuple[int, int], float] = {}
+        raw_pos_dm = 0
         if isinstance(coeff_yOUT, dict):
-            rhs = rhs + sum(float(coeff_yOUT[q, t]) * m.yOUT[q, t] for (q, t) in coeff_yOUT)
+            if aggregate:
+                for (q, t), v in coeff_yOUT.items():
+                    vraw = float(v)
+                    if vraw > coeff_tol:
+                        raw_pos_dm += 1
+                    beta = max(0.0, -vraw)
+                    if beta <= coeff_tol or (t in agg_out):
+                        continue
+                    agg_out[t] = beta
+            else:
+                for (q, t), v in coeff_yOUT.items():
+                    vraw = float(v)
+                    if vraw > coeff_tol:
+                        raw_pos_dm += 1
+                    beta = max(0.0, -vraw)
+                    if beta <= coeff_tol:
+                        continue
+                    agg_out[(q, t)] = beta
         if isinstance(coeff_yRET, dict):
-            rhs = rhs + sum(float(coeff_yRET[q, t]) * m.yRET[q, t] for (q, t) in coeff_yRET)
+            if aggregate:
+                for (q, t), v in coeff_yRET.items():
+                    vraw = float(v)
+                    if vraw > coeff_tol:
+                        raw_pos_dm += 1
+                    beta = max(0.0, -vraw)
+                    if beta <= coeff_tol or (t in agg_ret):
+                        continue
+                    agg_ret[t] = beta
+            else:
+                for (q, t), v in coeff_yRET.items():
+                    vraw = float(v)
+                    if vraw > coeff_tol:
+                        raw_pos_dm += 1
+                    beta = max(0.0, -vraw)
+                    if beta <= coeff_tol:
+                        continue
+                    agg_ret[(q, t)] = beta
+
+        # Re-anchor the constant so that the cut passes through the incumbent (y = current MP solution)
+        # ub_est = const_dm + sum(dm * y_curr)
+        # With final form theta >= const_cut - sum(beta * y), we need const_cut = ub_est + sum(beta * y_curr)
+        ub_est = float(const)
+        # Sum over raw dm maps using current y values
+        if isinstance(coeff_yOUT, dict):
+            for (q, t), v in coeff_yOUT.items():
+                yv = float(m.yOUT[q, t].value or 0.0)
+                ub_est += float(v) * yv
+        if isinstance(coeff_yRET, dict):
+            for (q, t), v in coeff_yRET.items():
+                yv = float(m.yRET[q, t].value or 0.0)
+                ub_est += float(v) * yv
+        sum_beta_y = 0.0
+        if aggregate:
+            for t, beta in agg_out.items():
+                sum_beta_y += float(beta) * float(m.Yout[int(t)].value or 0.0)
+            for t, beta in agg_ret.items():
+                sum_beta_y += float(beta) * float(m.Yret[int(t)].value or 0.0)
+        else:
+            for key, beta in agg_out.items():
+                q, t = key  # type: ignore[misc]
+                sum_beta_y += float(beta) * float(m.yOUT[int(q), int(t)].value or 0.0)
+            for key, beta in agg_ret.items():
+                q, t = key  # type: ignore[misc]
+                sum_beta_y += float(beta) * float(m.yRET[int(q), int(t)].value or 0.0)
+        const = ub_est + sum_beta_y
+
+        # Assemble RHS with final coefficients
+        if aggregate:
+            for t, v in agg_out.items():
+                rhs = rhs - v * m.Yout[int(t)]
+            for t, v in agg_ret.items():
+                rhs = rhs - v * m.Yret[int(t)]
+        else:
+            for key, v in agg_out.items():
+                q, t = key  # type: ignore[misc]
+                rhs = rhs - v * m.yOUT[int(q), int(t)]
+            for key, v in agg_ret.items():
+                q, t = key  # type: ignore[misc]
+                rhs = rhs - v * m.yRET[int(q), int(t)]
 
         if (not isinstance(coeff_yOUT, dict)) and (not isinstance(coeff_yRET, dict)) and cut.coeffs:
             for name, coef in cut.coeffs.items():
+                v2 = float(coef)
+                if abs(v2) <= coeff_tol:
+                    continue
                 if isinstance(name, str) and name.startswith("yOUT["):
                     parts = name[name.find("[") + 1 : name.find("]")].split(",")
                     q, t = int(parts[0]), int(parts[1])
-                    rhs = rhs + float(coef) * m.yOUT[q, t]
+                    rhs = rhs - v2 * m.yOUT[q, t]
                 elif isinstance(name, str) and name.startswith("yRET["):
                     parts = name[name.find("[") + 1 : name.find("]")].split(",")
                     q, t = int(parts[0]), int(parts[1])
-                    rhs = rhs + float(coef) * m.yRET[q, t]
+                    rhs = rhs - v2 * m.yRET[q, t]
 
         expr = m.theta >= rhs
 
-        # Add to a ConstraintList for uniqueness and persistence
-        idx = m.BendersCuts.add(expr)
+        # Evaluate violation and skip weak cuts
+        add_tol = float(self._p("cut_add_tolerance", 1e-8))
+        theta_val = float(pyo.value(m.theta))
+        rhs_val = float(pyo.value(rhs))
+        violation = rhs_val - theta_val
+        if violation <= add_tol:
+            print(f"[BENDERS] Skipped non-violated cut: viol={violation:.3g} (tol={add_tol})")
+            return
 
-        # If using a persistent solver, inform it about the new constraint
-        try:
-            solver = self._get_solver()
-            if hasattr(solver, "add_constraint"):
-                solver.add_constraint(m.BendersCuts[idx])
-        except Exception:
-            pass
+        # Fingerprint to avoid adding duplicates
+        def _round6(x: float) -> float:
+            return float(f"{x:.6g}")
+        fp_out = []
+        fp_ret = []
+        if aggregate:
+            fp_out = sorted((int(t), _round6(float(v))) for t, v in agg_out.items())
+            fp_ret = sorted((int(t), _round6(float(v))) for t, v in agg_ret.items())
+        else:
+            fp_out = sorted(((int(q), int(t), _round6(float(v))) for (q, t), v in agg_out.items()))  # type: ignore[misc]
+            fp_ret = sorted(((int(q), int(t), _round6(float(v))) for (q, t), v in agg_ret.items()))  # type: ignore[misc]
+        fp = ("opt", _round6(const), tuple(fp_out), tuple(fp_ret))
+        if fp in self._cut_fps:
+            print("[BENDERS] Skipped duplicate cut")
+            return
+        self._cut_fps.add(fp)
+
+        # Create explicit constraint and register with persistent solver if used
+        cname = f"benders_cut_{self._cut_idx}"
+        con = pyo.Constraint(expr=expr)
+        setattr(m.BendersCuts, cname, con)
+        if getattr(self, "_is_persistent", False):
+            self._solver.add_constraint(con)
 
         # Simple logging: constant and nonzeros
-        nnz = 0
-        if isinstance(coeff_yOUT, dict):
-            nnz += len([1 for v in coeff_yOUT.values() if abs(float(v)) > 1e-12])
-        if isinstance(coeff_yRET, dict):
-            nnz += len([1 for v in coeff_yRET.values() if abs(float(v)) > 1e-12])
-        # For cuts built from generic name/coef pairs
-        if (not isinstance(coeff_yOUT, dict)) and (not isinstance(coeff_yRET, dict)) and cut.coeffs:
-            nnz += len([1 for (name, coef) in cut.coeffs.items() if abs(float(coef)) > 1e-12])
-        try:
-            print(f"[BENDERS] Added cut #{self._cut_idx}: const={const:.6g}, nnz={nnz}")
-        except Exception:
-            pass
+        nnz = len(agg_out) + len(agg_ret)
+        # Log slope range (betas are nonnegative after transform)
+        all_betas = list(agg_out.values()) + list(agg_ret.values())
+        if all_betas:
+            rng = (min(all_betas), max(all_betas))
+            print(
+                f"[BENDERS] Added cut #{self._cut_idx}: const={const:.6g}, nnz={nnz}, beta_range=[{rng[0]:.3g},{rng[1]:.3g}], raw_pos_dm={raw_pos_dm}"
+            )
+        else:
+            print(f"[BENDERS] Added cut #{self._cut_idx}: const={const:.6g}, nnz={nnz}, raw_pos_dm={raw_pos_dm}")
         self._cut_idx += 1
+        # Track last cut info for cross-iteration checks
+        self._last_cut_const = const
+        self._last_cut_nnz = nnz
 
     def best_lower_bound(self) -> Optional[float]:
         return self._lb
+
+    # Introspection helpers
+    def cuts_count(self) -> int:
+        return int(self._cut_idx)
+
+    def last_cut_info(self) -> tuple[float | None, int | None]:
+        return getattr(self, "_last_cut_const", None), getattr(self, "_last_cut_nnz", None)
+
+    def lazy_installed(self) -> bool:
+        return bool(self._lazy_installed)

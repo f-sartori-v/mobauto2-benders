@@ -1,5 +1,5 @@
 run:
-  max_iterations: 100
+  max_iterations: 1000
   tolerance: 0.0001
   time_limit_s: 1800
   # log_level controls the verbosity of Python's logging output.
@@ -14,14 +14,14 @@ master:
   impl: pyomo
   params:
     # MILP solver used by the master (Pyomo name)
-    solver: cplex_direct
+    solver: cplex_persistent
     # Q: number of vehicles modeled in the master
     Q: 2
     # Time discretization is defined in minutes; slots are implicit via slot_resolution.
     # T_minutes: total horizon length in minutes (e.g., 600)
     T_minutes: 600
     # slot_resolution: minutes per slot (e.g., 5 -> discrete time grid every 5 minutes)
-    slot_resolution: 30
+    slot_resolution: 15
     # trip_duration_minutes: physical trip duration in minutes. Internally converted to slots as ceil(trip_duration_minutes / slot_resolution).
     trip_duration_minutes: 30
     # Emax: battery capacity (energy units)

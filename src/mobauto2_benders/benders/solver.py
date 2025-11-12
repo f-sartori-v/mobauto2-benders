@@ -34,6 +34,18 @@ class BendersSolver:
         self.master.initialize()
         print("Initialized master problem.")
 
+        # Optionally install lazy constraints callback if supported
+        use_lazy = bool(self.cfg.master.params.get("use_lazy_cuts", False))
+        if use_lazy and hasattr(self.master, "install_lazy_callback"):
+            # Pass the subproblem instance so the callback can generate cuts
+            getattr(self.master, "install_lazy_callback")(self.subproblem)
+            # If install failed (no callback), fallback to non-lazy
+            try:
+                if not getattr(self.master, "lazy_installed", lambda: False)():
+                    use_lazy = False
+            except Exception:
+                use_lazy = False
+
         best_lb: Optional[float] = None
         best_ub: Optional[float] = None
 
@@ -65,6 +77,24 @@ class BendersSolver:
                     (f"{mres.lower_bound:.6g}" if mres.lower_bound is not None else "-"),
                 )
             )
+
+            # Instrumentation: per-iteration summary
+            try:
+                cuts_in_model = getattr(self.master, "cuts_count", lambda: None)()
+            except Exception:
+                cuts_in_model = None
+            last_const, last_nnz = (None, None)
+            try:
+                last_const, last_nnz = getattr(self.master, "last_cut_info", lambda: (None, None))()
+            except Exception:
+                pass
+            if mres.objective is not None:
+                print(
+                    f"[MP] iter={it} cuts={cuts_in_model if cuts_in_model is not None else '-'} theta={mres.objective:.3f}"
+                    + (f" last_const={last_const:.3f} last_nnz={last_nnz}" if last_const is not None else "")
+                )
+
+            # (Diagnostic only) We no longer assert binding; the MP is free to change y
 
             if mres.status == SolveStatus.INFEASIBLE:
                 log.error("Master problem infeasible")
@@ -100,22 +130,35 @@ class BendersSolver:
                     sres.is_feasible,
                 )
             )
-            # Add cut(s) if provided (optimality or feasibility)
+            # Add cut(s) if provided (optimality or feasibility) unless using lazy cuts
             added = 0
             cut_names: list[str] = []
-            if sres.cut is not None:
-                self.master.add_cut(sres.cut)
-                added += 1
-                cut_names.append(sres.cut.name)
-                log.info("added %s cut '%s' violation=%s", sres.cut.cut_type, sres.cut.name, sres.violation)
-            for c in getattr(sres, "cuts", []) or []:
-                self.master.add_cut(c)
-                added += 1
-                cut_names.append(c.name)
-            if added:
-                log.info("added %d cut(s)", added)
-                names_str = ", ".join(cut_names) if cut_names else "(unnamed)"
-                print(f"Master updated: added {added} cut(s): {names_str}")
+            if not use_lazy:
+                # Capture current number of cuts before adding
+                try:
+                    cuts_before = getattr(self.master, "cuts_count", lambda: 0)()
+                except Exception:
+                    cuts_before = 0
+                if sres.cut is not None:
+                    self.master.add_cut(sres.cut)
+                    cut_names.append(sres.cut.name)
+                    log.info("added %s cut '%s' violation=%s", sres.cut.cut_type, sres.cut.name, sres.violation)
+                for c in getattr(sres, "cuts", []) or []:
+                    self.master.add_cut(c)
+                    cut_names.append(c.name)
+                # Compute how many were actually added
+                try:
+                    cuts_after = getattr(self.master, "cuts_count", lambda: 0)()
+                except Exception:
+                    cuts_after = cuts_before
+                added = int(cuts_after) - int(cuts_before)
+                if added > 0:
+                    log.info("added %d cut(s)", added)
+                    names_str = ", ".join(cut_names) if cut_names else "(unnamed)"
+                    print(f"Master updated: added {added} cut(s): {names_str}")
+                else:
+                    if cut_names:
+                        print("Master updated: no new cuts (all skipped / duplicates)")
 
             # Check gap if we have both bounds
             if best_lb is not None and best_ub is not None:
