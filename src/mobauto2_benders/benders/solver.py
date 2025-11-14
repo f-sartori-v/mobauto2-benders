@@ -136,6 +136,7 @@ class BendersSolver:
                     sres.is_feasible,
                 )
             )
+            # Suppress repetitive demand printouts; diagnostics still available at the end
             # Add cut(s) if provided (optimality or feasibility) unless using lazy cuts
             added = 0
             cut_names: list[str] = []

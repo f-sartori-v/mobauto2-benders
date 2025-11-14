@@ -21,7 +21,7 @@ master:
     Q: 2
     # Time discretization is defined in minutes; slots are implicit via slot_resolution.
     # T_minutes: total horizon length in minutes (e.g., 600)
-    T_minutes: 360
+    T_minutes: 600
     # slot_resolution: minutes per slot (e.g., 5 -> discrete time grid every 5 minutes)
     slot_resolution: 15
     # trip_duration_minutes: physical trip duration in minutes. Internally converted to slots as ceil(trip_duration_minutes / slot_resolution).
@@ -39,6 +39,8 @@ master:
     #   Applied to max(0, Yout[t]-1) + max(0, Yret[t]-1) and helps break ties when two trips
     #   at the same time/direction could be consolidated into one.
     # concurrency_penalty: 0.0
+    # Optional: enable FIFO symmetry-breaking across vehicles (off by default)
+    use_fifo_symmetry: true
     # delta_chg: maximum charge added per slot when c[q,t] = 1
     delta_chg: 30 / (30 / slot_resolution)
     # binit: initial battery levels per vehicle (length Q)

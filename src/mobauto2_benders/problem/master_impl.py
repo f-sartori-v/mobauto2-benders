@@ -67,6 +67,9 @@ class ProblemMaster(MasterProblem):
             elif len(binit) > Q:
                 binit = binit[:Q]
 
+        # Vehicle location encoding: 0 = Longvilliers (depot), 1 = Massy
+        # All shuttles start at Longvilliers and must end at Longvilliers.
+
         m = pyo.ConcreteModel()
         m.Q = range(Q)
         m.T = range(T)
@@ -78,10 +81,13 @@ class ProblemMaster(MasterProblem):
         m.Yret = pyo.Var(m.T, within=pyo.NonNegativeReals)
         # Time-bucket total starts z[t] = sum_q (yOUT+ yRET) -- used in cuts to reduce nnz
         m.Z = pyo.Var(m.T, within=pyo.NonNegativeReals)
-        # Keep auxiliaries in relaxed domains except s which encodes location (discrete)
+        # State and action variables
         m.c = pyo.Var(m.Q, m.T, bounds=(0.0, 1.0))
-        m.s = pyo.Var(m.Q, m.T, within=pyo.Binary)
-        m.inTrip = pyo.Var(m.Q, m.T, bounds=(0.0, 1.0))
+        # Discrete occupancy at locations: 0=Longvilliers (atL=1), 1=Massy (atM=1)
+        m.atL = pyo.Var(m.Q, m.T, within=pyo.Binary)
+        m.atM = pyo.Var(m.Q, m.T, within=pyo.Binary)
+        # Traveling indicator per slot; make it binary to encode exclusivity windows exactly
+        m.inTrip = pyo.Var(m.Q, m.T, within=pyo.Binary)
         m.b = pyo.Var(m.Q, m.T, bounds=(0, Emax))
         m.gchg = pyo.Var(m.Q, m.T, within=pyo.NonNegativeReals)
         # Theta models recourse cost; keep nonnegative to avoid initial unboundedness
@@ -117,54 +123,27 @@ class ProblemMaster(MasterProblem):
         # Time-bucket link: Z[t] = sum_q (yOUT+yRET)
         m.Cagg_z = pyo.Constraint(m.T, rule=lambda m, t: m.Z[t] == sum(m.yOUT[q, t] + m.yRET[q, t] for q in m.Q))
 
-        # inTrip implications (lighter than equality linking):
-        # Lower bounds: inTrip[q,t] >= yOUT[q,u], inTrip[q,t] >= yRET[q,u] for u in (t-trip_slots+1..t-1)
-        # Upper bound:  inTrip[q,t] <= sum_{u in (t-trip_slots+1..t-1)} (yOUT[q,u]+yRET[q,u])
+        # inTrip equality: 1 during travel slots strictly after a start until arrival
+        # For a start at time u, travel occupies slots t in {u+1, ..., u+trip_slots-1}
         for q in m.Q:
             for t in m.T:
                 lo = max(0, t - trip_slots + 1)
                 hi = t - 1
                 if lo <= hi:
-                    # Upper bound
                     m.add_component(
-                        f"C1b_intrip_ub_{q}_{t}",
-                        pyo.Constraint(
-                            expr=m.inTrip[q, t]
-                            <= sum(m.yOUT[q, u] + m.yRET[q, u] for u in range(lo, hi + 1))
-                        ),
+                        f"C1b_intrip_eq_{q}_{t}",
+                        pyo.Constraint(expr=m.inTrip[q, t] == sum(m.yOUT[q, u] + m.yRET[q, u] for u in range(lo, hi + 1))),
                     )
-                    # Lower bounds
-                    for u in range(lo, hi + 1):
-                        m.add_component(
-                            f"C1b_intrip_lb_out_{q}_{t}_{u}",
-                            pyo.Constraint(expr=m.inTrip[q, t] >= m.yOUT[q, u]),
-                        )
-                        m.add_component(
-                            f"C1b_intrip_lb_ret_{q}_{t}_{u}",
-                            pyo.Constraint(expr=m.inTrip[q, t] >= m.yRET[q, u]),
-                        )
                 else:
-                    # No prior starts to account for
                     m.add_component(
                         f"C1b_intrip_zero_{q}_{t}", pyo.Constraint(expr=m.inTrip[q, t] == 0)
                     )
 
         # Block actions when in trip (keeps starts and charging off while busy)
-        def block_rule(m, q, t):
-            return m.yOUT[q, t] + m.yRET[q, t] + m.c[q, t] <= 1 - m.inTrip[q, t]
+        m.C1c = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yOUT[q, t] + m.yRET[q, t] + m.c[q, t] <= 1 - m.inTrip[q, t])
 
-        m.C1c = pyo.Constraint(m.Q, m.T, rule=block_rule)
-
-        # No two starts inside any trip-duration window (avoid overlapping trips)
-        for q in m.Q:
-            for w in range(T):
-                w_end = min(T - 1, w + trip_slots - 1)
-                m.add_component(
-                    f"C1d_window_atmost1_{q}_{w}",
-                    pyo.Constraint(
-                        expr=sum(m.yOUT[q, u] + m.yRET[q, u] for u in range(w, w_end + 1)) <= 1
-                    ),
-                )
+        # Occupancy conservation: atL + atM + inTrip == 1 each slot
+        m.Cocc = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.atL[q, t] + m.atM[q, t] + m.inTrip[q, t] == 1)
 
         # Disallow starting trips that cannot finish within the horizon
         # Allowed starts must satisfy t + trip_slots <= T - 1 -> t <= T - trip_slots - 1
@@ -174,38 +153,40 @@ class ProblemMaster(MasterProblem):
                 m.yOUT[q, t].fix(0)
                 m.yRET[q, t].fix(0)
 
-        # Location dynamics via arrival equality:
-        def loc_flip(m, q, t):
-            if t + trip_slots <= T - 1:
-                return m.s[q, t + trip_slots] == m.s[q, t] + m.yOUT[q, t] - m.yRET[q, t]
-            return pyo.Constraint.Skip
-
-        m.C2a = pyo.Constraint(m.Q, m.T, rule=loc_flip)
-
-        # Until the first possible arrival, the vehicle must remain at Longvilliers (s=0)
+        # Occupancy recursions: leave Longvilliers when starting OUT; arrive to Longvilliers after RET duration
         for q in m.Q:
-            for t in range(min(trip_slots, T)):
-                m.s[q, t].fix(0)
+            for t in range(1, T):
+                # Arrivals from RET into Longvilliers at t from starts at (t - trip_slots)
+                arr_ret = m.yRET[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
+                m.add_component(
+                    f"C2a_locL_{q}_{t}",
+                    pyo.Constraint(expr=m.atL[q, t] == m.atL[q, t - 1] - m.yOUT[q, t - 1] + arr_ret),
+                )
+                # Arrivals from OUT into Massy at t from starts at (t - trip_slots)
+                arr_out = m.yOUT[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
+                m.add_component(
+                    f"C2a_locM_{q}_{t}",
+                    pyo.Constraint(expr=m.atM[q, t] == m.atM[q, t - 1] - m.yRET[q, t - 1] + arr_out),
+                )
 
-        def admissible(m, q, t):
-            return m.yOUT[q, t] + m.s[q, t] <= 1
-
-        m.C2b = pyo.Constraint(m.Q, m.T, rule=admissible)
-        m.C2c = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yRET[q, t] <= m.s[q, t])
-        m.C2d = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.c[q, t] <= 1 - m.s[q, t])
+        # Gating by occupancy
+        m.C2b = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yOUT[q, t] <= m.atL[q, t])
+        m.C2c = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yRET[q, t] <= m.atM[q, t])
+        m.C2d = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.c[q, t] <= m.atL[q, t])
 
         # Note: We no longer enforce "first non-idle must be OUT".
         # Charging at Longvilliers (s=0) is allowed even before the first OUT.
 
         for q in m.Q:
-            m.s[q, 0].fix(0)
-            m.s[q, T - 1].fix(0)
-            # Ensure no trip is ongoing at the end of horizon
+            # Start at Longvilliers and end at Longvilliers (no ongoing trip at the end)
+            m.atL[q, 0].fix(1)
+            m.atM[q, 0].fix(0)
+            m.atL[q, T - 1].fix(1)
+            m.atM[q, T - 1].fix(0)
             m.inTrip[q, T - 1].fix(0)
 
-        # FIFO symmetry-breaking across vehicles: cumulative starts for k
-        # cannot exceed those for k-1 over any time prefix
-        if Q >= 2:
+        # Optional FIFO symmetry-breaking across vehicles (can restrict starts unintentionally)
+        if bool(self._p("use_fifo_symmetry", False)) and Q >= 2:
             for k in range(1, Q):
                 for t in range(T):
                     m.add_component(
