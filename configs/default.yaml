@@ -1,6 +1,6 @@
 run:
-  max_iterations: 1000
-  tolerance: 0.0001
+  max_iterations: 100
+  tolerance: 0.001
   time_limit_s: 1800
   # log_level controls the verbosity of Python's logging output.
   # Options (most verbose to least): DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -21,7 +21,7 @@ master:
     Q: 2
     # Time discretization is defined in minutes; slots are implicit via slot_resolution.
     # T_minutes: total horizon length in minutes (e.g., 600)
-    T_minutes: 600
+    T_minutes: 360
     # slot_resolution: minutes per slot (e.g., 5 -> discrete time grid every 5 minutes)
     slot_resolution: 15
     # trip_duration_minutes: physical trip duration in minutes. Internally converted to slots as ceil(trip_duration_minutes / slot_resolution).
@@ -32,8 +32,15 @@ master:
     #   NOT the number of slots; it is used in the battery balance and a guard
     #   constraint requiring b[q,t] >= 2*L to start an OUT trip.
     L: 30
+    # start_cost_epsilon: tiny penalty on starting trips to discourage gratuitous starts
+    #   Applied to sum_q,t (yOUT[q,t] + yRET[q,t]) in the master objective.
+    start_cost_epsilon: 0.1
+    # concurrency_penalty: optional small penalty per extra concurrent departure beyond 1 per slot
+    #   Applied to max(0, Yout[t]-1) + max(0, Yret[t]-1) and helps break ties when two trips
+    #   at the same time/direction could be consolidated into one.
+    # concurrency_penalty: 0.0
     # delta_chg: maximum charge added per slot when c[q,t] = 1
-    delta_chg: 30
+    delta_chg: 30 / (30 / slot_resolution)
     # binit: initial battery levels per vehicle (length Q)
     binit: [150.0, 150.0]
 
@@ -44,12 +51,22 @@ subproblem:
     lp_solver: cplex_direct
     # S: capacity units contributed by one vehicle starting at time tau.
     #   Master yOUT[q,tau] adds S to C_out[tau] (similarly for yRET/C_ret).
-    S: 15.0
+    S: 10.0
     # Wmax can be given in slots or minutes. If Wmax_minutes is provided, it is converted to slots using slot_resolution
     # of the master params.
     Wmax_minutes: 30
     # p: penalty per unit of unserved demand (drives MP to create capacity)
     p: 50.0
+    # fill_first_epsilon: tiny tie-breaker cost that encourages packing demand
+    #   into the first vehicle at a departure time before using the next.
+    #   Keeps the subproblem linear and pushes solutions to avoid splitting
+    #   demand across multiple simultaneous vehicles unless necessary.
+    fill_first_epsilon: 1.0e-6
+    # unused_capacity_penalty: optional small penalty per unit of unused seat-capacity
+    #   in the LP subproblem. This discourages releasing empty shuttles by charging a
+    #   cost for capacity that is not used to serve demand at each slot/direction.
+    #   Units: cost per passenger-seat per slot (e.g., 0.01).
+    # unused_capacity_penalty: 0.0
     # Demand source (prefer external files). Provide either:
     #  - demand_file: path to YAML/JSON with one of:
     #       { requests: [{dir: OUT|RET|0|1, time: int}, ...] }

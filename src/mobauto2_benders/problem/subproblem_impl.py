@@ -59,6 +59,8 @@ class ProblemSubproblem(Subproblem):
             Wmax = int(params.get("Wmax_slots", params.get("Wmax", 0)))
         p_pen = float(params.get("p", 0.0))
         lp_solver = str(params.get("lp_solver", "cplex_direct"))
+        # Prefer packing demand into the first vehicle layer, then the next (LP tie-breaker)
+        fill_eps = float(params.get("fill_first_epsilon", 1e-6) or 0.0)
 
         # Determine T and Q from candidate if not configured
         q_idx, t_idx = self._parse_candidate_indices(candidate)
@@ -101,6 +103,10 @@ class ProblemSubproblem(Subproblem):
                 container = container.get("requests") or container.get("req_matrix") or []
             # List of dicts [{dir,time}, ...]
             if isinstance(container, list) and container and isinstance(container[0], dict):
+                import math as _math
+                def _slot_idx_from_minutes(tmin: float) -> int:
+                    res = max(1, slot_res)
+                    return max(0, int(_math.ceil(float(tmin) / res) - 1))
                 for r in container:
                     d = r.get("dir")
                     try:
@@ -109,8 +115,8 @@ class ProblemSubproblem(Subproblem):
                         continue
                     if tmin < 0:
                         continue
-                    # Map minutes to slot index
-                    t = int(tmin // max(1, slot_res))
+                    # Map minutes to slot index using ceil scheme: (1..res)->0, (res+1..2res)->1, ...
+                    t = _slot_idx_from_minutes(tmin)
                     if not (0 <= t < Tlen):
                         continue
                     if isinstance(d, str):
@@ -127,6 +133,10 @@ class ProblemSubproblem(Subproblem):
                 return R_out, R_ret
             # Matrix [[dir,time], ...]
             if isinstance(container, list):
+                import math as _math
+                def _slot_idx_from_minutes(tmin: float) -> int:
+                    res = max(1, slot_res)
+                    return max(0, int(_math.ceil(float(tmin) / res) - 1))
                 for row in container:
                     if not isinstance(row, (list, tuple)) or len(row) < 2:
                         continue
@@ -137,7 +147,7 @@ class ProblemSubproblem(Subproblem):
                         continue
                     if tmin < 0:
                         continue
-                    t = int(tmin // max(1, slot_res))
+                    t = _slot_idx_from_minutes(tmin)
                     if not (0 <= t < Tlen):
                         continue
                     if isinstance(d, str):
@@ -164,6 +174,9 @@ class ProblemSubproblem(Subproblem):
         # Capacities induced by master decisions: C_*[tau] = S * sum_q y*_{q,tau}
         C_out = [0.0 for _ in range(T)]
         C_ret = [0.0 for _ in range(T)]
+        # Vehicle counts per departure slot (per direction)
+        K_out = [0 for _ in range(T)]
+        K_ret = [0 for _ in range(T)]
         for name, val in candidate.items():
             if not isinstance(name, str):
                 continue
@@ -173,12 +186,22 @@ class ProblemSubproblem(Subproblem):
                 tau = int(tau_str.strip())
                 if 0 <= tau < T:
                     C_out[tau] += float(val) * S
+                    try:
+                        if float(val) >= 0.5:
+                            K_out[tau] += 1
+                    except Exception:
+                        pass
             elif name.startswith("yRET["):
                 inside = name[name.find("[") + 1 : name.find("]")]
                 _, tau_str = inside.split(",")
                 tau = int(tau_str.strip())
                 if 0 <= tau < T:
                     C_ret[tau] += float(val) * S
+                    try:
+                        if float(val) >= 0.5:
+                            K_ret[tau] += 1
+                    except Exception:
+                        pass
 
         # Multi-scenario support
         scenarios: list[dict] = list(params.get("scenarios", []))
@@ -194,6 +217,8 @@ class ProblemSubproblem(Subproblem):
             ub_base: float,
             C_out_base: list[float],
             C_ret_base: list[float],
+            K_out_base: list[int],
+            K_ret_base: list[int],
             R_out_vec: list[float],
             R_ret_vec: list[float],
         ) -> tuple[Dict[tuple[int, int], float], Dict[tuple[int, int], float], Dict[int, float], Dict[int, float]]:
@@ -207,14 +232,30 @@ class ProblemSubproblem(Subproblem):
                 # OUT marginal
                 C_out_tau = C_out_base.copy()
                 C_out_tau[tau] = C_out_tau[tau] + S
-                _, ub_plus = solve_subproblem(SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver), C_out_tau, C_ret_base, R_out_vec, R_ret_vec)
+                K_out_tau = K_out_base.copy()
+                K_out_tau[tau] = K_out_tau[tau] + 1
+                _, ub_plus = solve_subproblem(
+                    SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_tau, K_ret=K_ret_base, fill_eps=fill_eps),
+                    C_out_tau,
+                    C_ret_base,
+                    R_out_vec,
+                    R_ret_vec,
+                )
                 dm = float(ub_plus - ub_base)
                 dm_out[tau] = dm
 
                 # RET marginal
                 C_ret_tau = C_ret_base.copy()
                 C_ret_tau[tau] = C_ret_tau[tau] + S
-                _, ub_plus_r = solve_subproblem(SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver), C_out_base, C_ret_tau, R_out_vec, R_ret_vec)
+                K_ret_tau = K_ret_base.copy()
+                K_ret_tau[tau] = K_ret_tau[tau] + 1
+                _, ub_plus_r = solve_subproblem(
+                    SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_base, K_ret=K_ret_tau, fill_eps=fill_eps),
+                    C_out_base,
+                    C_ret_tau,
+                    R_out_vec,
+                    R_ret_vec,
+                )
                 dm_r = float(ub_plus_r - ub_base)
                 dm_ret[tau] = dm_r
 
@@ -264,12 +305,12 @@ class ProblemSubproblem(Subproblem):
                 R_out = (R_out + [0.0] * T)[:T]
                 R_ret = (R_ret + [0.0] * T)[:T]
 
-                sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver)
+                sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out, K_ret=K_ret, fill_eps=fill_eps)
                 duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
                 ub_vals.append(ub_val)
 
                 # Finite-difference coefficients and constant per scenario
-                c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, R_out, R_ret)
+                c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
                 sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
                 sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
                 const = float(ub_val)
@@ -319,11 +360,11 @@ class ProblemSubproblem(Subproblem):
             if len(R_ret) != T:
                 R_ret = (R_ret + [0.0] * T)[:T]
 
-            sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver)
+            sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out, K_ret=K_ret, fill_eps=fill_eps)
             duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
 
             # Build coefficients via finite differences around current capacity
-            c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, R_out, R_ret)
+            c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
 
             # Compute sum_y per tau (number of vehicles starting at tau) from current capacity
             sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
@@ -335,7 +376,15 @@ class ProblemSubproblem(Subproblem):
             const -= sum(dm_ret[tau] * sum_y_ret[tau] for tau in range(T))
 
             cut = Cut(name="opt_cut", cut_type=CutType.OPTIMALITY, metadata={"const": const, "coeff_yOUT": c_out_map, "coeff_yRET": c_ret_map})
-            return SubproblemResult(is_feasible=True, cut=cut, upper_bound=ub_val)
+            # Diagnostics: demand per slot split by direction and served pax per departure slot (OUT/RET)
+            diagnostics = {
+                "T": T,
+                "R_out": [float(R_out[t]) for t in range(T)],
+                "R_ret": [float(R_ret[t]) for t in range(T)],
+                "pax_out_by_tau": list(duals.get("served_out_by_tau", [0.0] * T)),
+                "pax_ret_by_tau": list(duals.get("served_ret_by_tau", [0.0] * T)),
+            }
+            return SubproblemResult(is_feasible=True, cut=cut, upper_bound=ub_val, diagnostics=diagnostics)
 
 
 @dataclass
@@ -344,6 +393,10 @@ class SPParams:
     Wmax_slots: int
     p: float
     lp_solver: str
+    S: float
+    K_out: list[int]
+    K_ret: list[int]
+    fill_eps: float = 0.0
 
 
 def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float], R_out: Iterable[float], R_ret: Iterable[float]):
@@ -361,51 +414,73 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
 
     W = P.Wmax_slots
 
-    # Define only valid arcs (t <= tau <= min(T-1, t+W)) to avoid unused variables
-    Arcs_list = [(t, tau) for t in Tset for tau in Tset if t <= tau <= min(P.T - 1, t + W)]
+    # Define only valid arcs with causality and max-wait: (t+1) <= tau <= min(T-1, t+W)
+    # Rationale: demand aggregated in slot t arrives within (t*res+1 ... (t+1)*res),
+    # and cannot be served by a departure at the very start of slot t.
+    Arcs_list = [(t, tau) for t in Tset for tau in Tset if (t + 1) <= tau <= min(P.T - 1, t + W)]
     m.Arcs = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
 
-    # Variables defined on valid arcs only
-    m.x_OUT = pyo.Var(m.Arcs, within=pyo.NonNegativeReals)
-    m.x_RET = pyo.Var(m.Arcs, within=pyo.NonNegativeReals)
+    # Layered arcs per departure time based on number of vehicles at tau
+    OutLayers = [(tau, k) for tau in Tset for k in range(int(P.K_out[tau]) if tau < len(P.K_out) else 0)]
+    RetLayers = [(tau, k) for tau in Tset for k in range(int(P.K_ret[tau]) if tau < len(P.K_ret) else 0)]
+    m.OutLayers = pyo.Set(initialize=OutLayers, dimen=2, ordered=False)
+    m.RetLayers = pyo.Set(initialize=RetLayers, dimen=2, ordered=False)
+
+    ArcsOut = [(t, tau, k) for (t, tau) in Arcs_list for (tau2, k) in OutLayers if tau2 == tau]
+    ArcsRet = [(t, tau, k) for (t, tau) in Arcs_list for (tau2, k) in RetLayers if tau2 == tau]
+    m.ArcsOut = pyo.Set(initialize=ArcsOut, dimen=3, ordered=False)
+    m.ArcsRet = pyo.Set(initialize=ArcsRet, dimen=3, ordered=False)
+
+    # Variables defined on layered arcs only
+    m.x_OUT = pyo.Var(m.ArcsOut, within=pyo.NonNegativeReals)
+    m.x_RET = pyo.Var(m.ArcsRet, within=pyo.NonNegativeReals)
     m.u_OUT = pyo.Var(Tset, within=pyo.NonNegativeReals)
     m.u_RET = pyo.Var(Tset, within=pyo.NonNegativeReals)
 
     def wait_cost(t: int, tau: int) -> float:
         return float(max(0, tau - t))
 
-    # Objective sums over valid arcs only
+    # Objective sums over layered arcs; small per-layer epsilon encourages packing into lower k first
+    def layer_cost(t: int, tau: int, k: int) -> float:
+        return float(max(0, tau - t)) + max(0.0, float(P.fill_eps)) * float(k)
+
     m.obj = pyo.Objective(
         expr=
-            sum(wait_cost(t, tau) * m.x_OUT[t, tau] for (t, tau) in m.Arcs)
-            + sum(wait_cost(t, tau) * m.x_RET[t, tau] for (t, tau) in m.Arcs)
+            sum(layer_cost(t, tau, k) * m.x_OUT[t, tau, k] for (t, tau, k) in m.ArcsOut)
+            + sum(layer_cost(t, tau, k) * m.x_RET[t, tau, k] for (t, tau, k) in m.ArcsRet)
             + P.p * (sum(m.u_OUT[t] for t in Tset) + sum(m.u_RET[t] for t in Tset)),
         sense=pyo.minimize,
     )
 
     def cons_dem_OUT(m, t):
         taus = [tau for tau in Tset if t <= tau <= min(P.T - 1, t + W)]
-        return sum(m.x_OUT[t, tau] for tau in taus) + m.u_OUT[t] == R_out[t]
+        return sum(m.x_OUT[t, tau, k] for tau in taus for k in range(int(P.K_out[tau]) if tau < len(P.K_out) else 0) if (t, tau, k) in m.ArcsOut) + m.u_OUT[t] == R_out[t]
 
     m.D_out = pyo.Constraint(Tset, rule=cons_dem_OUT)
 
     def cons_dem_RET(m, t):
         taus = [tau for tau in Tset if t <= tau <= min(P.T - 1, t + W)]
-        return sum(m.x_RET[t, tau] for tau in taus) + m.u_RET[t] == R_ret[t]
+        return sum(m.x_RET[t, tau, k] for tau in taus for k in range(int(P.K_ret[tau]) if tau < len(P.K_ret) else 0) if (t, tau, k) in m.ArcsRet) + m.u_RET[t] == R_ret[t]
 
     m.D_ret = pyo.Constraint(Tset, rule=cons_dem_RET)
 
-    def cap_out(m, tau):
+    # Per-layer capacities: each vehicle layer is one shuttle => up to S seats
+    def cap_out_layer(m, tau, k):
         ts = [t for t in Tset if t <= tau <= min(P.T - 1, t + W)]
-        return sum(m.x_OUT[t, tau] for t in ts) <= C_out[tau]
+        # If no valid arcs exist for this layer, skip the constraint
+        if not any((t, tau, k) in m.ArcsOut for t in ts):
+            return pyo.Constraint.Skip
+        return sum(m.x_OUT[t, tau, k] for t in ts if (t, tau, k) in m.ArcsOut) <= min(float(P.S), float(C_out[tau]))
 
-    m.Cap_out = pyo.Constraint(Tset, rule=cap_out)
+    m.Cap_out = pyo.Constraint(m.OutLayers, rule=cap_out_layer)
 
-    def cap_ret(m, tau):
+    def cap_ret_layer(m, tau, k):
         ts = [t for t in Tset if t <= tau <= min(P.T - 1, t + W)]
-        return sum(m.x_RET[t, tau] for t in ts) <= C_ret[tau]
+        if not any((t, tau, k) in m.ArcsRet for t in ts):
+            return pyo.Constraint.Skip
+        return sum(m.x_RET[t, tau, k] for t in ts if (t, tau, k) in m.ArcsRet) <= min(float(P.S), float(C_ret[tau]))
 
-    m.Cap_ret = pyo.Constraint(Tset, rule=cap_ret)
+    m.Cap_ret = pyo.Constraint(m.RetLayers, rule=cap_ret_layer)
 
     # Dual suffix required to read duals
     m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
@@ -415,11 +490,40 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
 
     alpha_OUT = {t: float(m.dual.get(m.D_out[t], 0.0)) for t in Tset}
     alpha_RET = {t: float(m.dual.get(m.D_ret[t], 0.0)) for t in Tset}
-    pi_OUT = {tau: float(m.dual.get(m.Cap_out[tau], 0.0)) for tau in Tset}
-    pi_RET = {tau: float(m.dual.get(m.Cap_ret[tau], 0.0)) for tau in Tset}
+    pi_OUT = {}
+    for tau in Tset:
+        total = 0.0
+        kmax = int(P.K_out[tau]) if tau < len(P.K_out) else 0
+        for k in range(kmax):
+            if (tau, k) in m.Cap_out:
+                total += float(m.dual.get(m.Cap_out[tau, k], 0.0))
+        pi_OUT[tau] = total
+    pi_RET = {}
+    for tau in Tset:
+        total = 0.0
+        kmax = int(P.K_ret[tau]) if tau < len(P.K_ret) else 0
+        for k in range(kmax):
+            if (tau, k) in m.Cap_ret:
+                total += float(m.dual.get(m.Cap_ret[tau, k], 0.0))
+        pi_RET[tau] = total
+
+    # Gather simple primal summaries
+    served_out_by_tau = [0.0 for _ in Tset]
+    served_ret_by_tau = [0.0 for _ in Tset]
+    for tau in Tset:
+        served_out_by_tau[tau] = sum(float(pyo.value(m.x_OUT[t, tau, k])) for t in Tset for k in range(int(P.K_out[tau]) if tau < len(P.K_out) else 0) if (t, tau, k) in m.ArcsOut)
+        served_ret_by_tau[tau] = sum(float(pyo.value(m.x_RET[t, tau, k])) for t in Tset for k in range(int(P.K_ret[tau]) if tau < len(P.K_ret) else 0) if (t, tau, k) in m.ArcsRet)
 
     obj_val = float(pyo.value(m.obj))
     return (
-        {"alpha_OUT": alpha_OUT, "alpha_RET": alpha_RET, "pi_OUT": pi_OUT, "pi_RET": pi_RET},
+        {
+            "alpha_OUT": alpha_OUT,
+            "alpha_RET": alpha_RET,
+            "pi_OUT": pi_OUT,
+            "pi_RET": pi_RET,
+            # diagnostics
+            "served_out_by_tau": served_out_by_tau,
+            "served_ret_by_tau": served_ret_by_tau,
+        },
         obj_val,
     )

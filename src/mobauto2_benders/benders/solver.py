@@ -49,6 +49,7 @@ class BendersSolver:
         best_lb: Optional[float] = None
         best_ub: Optional[float] = None
 
+        last_diag: dict | None = None
         for it in range(1, max_it + 1):
             if time.time() - t0 > self.cfg.run.time_limit_s:
                 log.warning("Time limit reached after %d iterations", it - 1)
@@ -123,6 +124,11 @@ class BendersSolver:
             # Update UB if provided
             if sres.upper_bound is not None:
                 best_ub = sres.upper_bound if best_ub is None else min(best_ub, sres.upper_bound)
+            # Keep last diagnostics for end-of-run reporting
+            try:
+                last_diag = dict(getattr(sres, "diagnostics", {}) or {})
+            except Exception:
+                last_diag = None
             print(
                 "SP result: ub=%s feasible=%s"
                 % (
@@ -203,6 +209,53 @@ class BendersSolver:
                         if callable(fmt):
                             print("\nBest Master Solution:")
                             print(fmt())
+                    except Exception:
+                        pass
+                    # Additional matrices from subproblem diagnostics (if available)
+                    try:
+                        if last_diag:
+                            T = int(last_diag.get("T")) if "T" in last_diag else None
+                            R_out = last_diag.get("R_out")
+                            R_ret = last_diag.get("R_ret")
+                            pax_out = last_diag.get("pax_out_by_tau")
+                            pax_ret = last_diag.get("pax_ret_by_tau")
+                            if isinstance(pax_out, list) and isinstance(pax_ret, list):
+                                n = len(pax_out)
+                                if T is None:
+                                    T = n
+                                # Header aligned as in master formatter
+                                header = "       " + " ".join(f"{t:>3d}" for t in range(T))
+                                def fmt_row_floats(vals: list[float]) -> str:
+                                    return " ".join(f"{float(v):>3.0f}" for v in (vals + [0.0] * T)[:T])
+                                # Demand by direction
+                                if isinstance(R_out, list) and isinstance(R_ret, list):
+                                    print("\nDemand per slot (OUT/RET):")
+                                    print(header)
+                                    print(f"  OUT: {fmt_row_floats(R_out)}")
+                                    print(f"  RET: {fmt_row_floats(R_ret)}")
+                                # Pax per shuttle and slot (total), evenly allocate across starting shuttles at that slot
+                                try:
+                                    m = getattr(self.master, "m", None)
+                                    if m is not None:
+                                        Q = list(m.Q)
+                                        served_qt = [[0.0 for _ in range(T)] for _ in Q]
+                                        for tau in range(T):
+                                            out_qs = [q for q in Q if float(m.yOUT[q, tau].value or 0.0) >= 0.5]
+                                            ret_qs = [q for q in Q if float(m.yRET[q, tau].value or 0.0) >= 0.5]
+                                            k_out = len(out_qs)
+                                            k_ret = len(ret_qs)
+                                            share_out = (float(pax_out[tau]) / k_out) if k_out > 0 else 0.0
+                                            share_ret = (float(pax_ret[tau]) / k_ret) if k_ret > 0 else 0.0
+                                            for q in out_qs:
+                                                served_qt[q][tau] += share_out
+                                            for q in ret_qs:
+                                                served_qt[q][tau] += share_ret
+                                        print("\nPax per shuttle and slot (total):")
+                                        print(header)
+                                        for q in Q:
+                                            print(f"  q={q}: {fmt_row_floats(served_qt[q])}")
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
                     return BendersRunResult(

@@ -44,6 +44,8 @@ class SubproblemResult:
     cuts: list[Cut] = field(default_factory=list)
     upper_bound: Optional[float] = None
     violation: float | None = None
+    # Optional diagnostics payload for reporting/formatting
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

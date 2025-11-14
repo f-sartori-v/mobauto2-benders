@@ -50,7 +50,22 @@ class ProblemMaster(MasterProblem):
         Emax = float(self._p("Emax"))
         L = float(self._p("L"))
         delta_chg = float(self._p("delta_chg"))
-        binit = self._p("binit") or [0.0] * Q
+        # Normalize initial battery vector to length Q
+        _binit_raw = self._p("binit")
+        if _binit_raw is None:
+            binit = [0.0] * Q
+        elif isinstance(_binit_raw, (int, float)):
+            binit = [float(_binit_raw)] * Q
+        else:
+            try:
+                binit = [float(x) for x in list(_binit_raw)]  # type: ignore[arg-type]
+            except Exception:
+                binit = [0.0] * Q
+            if len(binit) < Q:
+                fill = binit[-1] if binit else 0.0
+                binit = binit + [fill] * (Q - len(binit))
+            elif len(binit) > Q:
+                binit = binit[:Q]
 
         m = pyo.ConcreteModel()
         m.Q = range(Q)
@@ -63,26 +78,33 @@ class ProblemMaster(MasterProblem):
         m.Yret = pyo.Var(m.T, within=pyo.NonNegativeReals)
         # Time-bucket total starts z[t] = sum_q (yOUT+ yRET) -- used in cuts to reduce nnz
         m.Z = pyo.Var(m.T, within=pyo.NonNegativeReals)
-        # Keep auxiliaries continuous in [0,1] to reduce binaries
+        # Keep auxiliaries in relaxed domains except s which encodes location (discrete)
         m.c = pyo.Var(m.Q, m.T, bounds=(0.0, 1.0))
-        m.s = pyo.Var(m.Q, m.T, bounds=(0.0, 1.0))
+        m.s = pyo.Var(m.Q, m.T, within=pyo.Binary)
         m.inTrip = pyo.Var(m.Q, m.T, bounds=(0.0, 1.0))
         m.b = pyo.Var(m.Q, m.T, bounds=(0, Emax))
         m.gchg = pyo.Var(m.Q, m.T, within=pyo.NonNegativeReals)
         # Theta models recourse cost; keep nonnegative to avoid initial unboundedness
         m.theta = pyo.Var(within=pyo.NonNegativeReals)
 
-        # Add a tiny start cost epsilon to help branching and discourage gratuitous starts
-        eps_start = float(self._p("start_cost_epsilon", 0.0))
-        if eps_start and eps_start > 0:
-            m.obj = pyo.Objective(
-                expr=m.theta
-                + eps_start
-                * sum(m.yOUT[q, t] + m.yRET[q, t] for q in m.Q for t in m.T),
-                sense=pyo.minimize,
-            )
-        else:
-            m.obj = pyo.Objective(expr=m.theta, sense=pyo.minimize)
+        # Objective composition: theta + optional small start penalty + optional concurrency penalty
+        eps_start = float(self._p("start_cost_epsilon", 0.0) or 0.0)
+        conc_pen = float(self._p("concurrency_penalty", 0.0) or 0.0)
+
+        # Optional concurrency penalty uses auxiliaries eOut[t], eRet[t] capturing excess starts beyond 1 per slot
+        if conc_pen > 0.0:
+            m.eOut = pyo.Var(m.T, within=pyo.NonNegativeReals)
+            m.eRet = pyo.Var(m.T, within=pyo.NonNegativeReals)
+            # eOut[t] >= Yout[t] - 1; eRet[t] >= Yret[t] - 1
+            m.C_ex_out = pyo.Constraint(m.T, rule=lambda m, t: m.eOut[t] >= m.Yout[t] - 1)
+            m.C_ex_ret = pyo.Constraint(m.T, rule=lambda m, t: m.eRet[t] >= m.Yret[t] - 1)
+
+        obj_expr = m.theta
+        if eps_start > 0.0:
+            obj_expr = obj_expr + eps_start * sum(m.yOUT[q, t] + m.yRET[q, t] for q in m.Q for t in m.T)
+        if conc_pen > 0.0:
+            obj_expr = obj_expr + conc_pen * (sum(m.eOut[t] for t in m.T) + sum(m.eRet[t] for t in m.T))
+        m.obj = pyo.Objective(expr=obj_expr, sense=pyo.minimize)
 
         def exclusivity_rule(m, q, t):
             return m.yOUT[q, t] + m.yRET[q, t] + m.c[q, t] <= 1
@@ -152,6 +174,7 @@ class ProblemMaster(MasterProblem):
                 m.yOUT[q, t].fix(0)
                 m.yRET[q, t].fix(0)
 
+        # Location dynamics via arrival equality:
         def loc_flip(m, q, t):
             if t + trip_slots <= T - 1:
                 return m.s[q, t + trip_slots] == m.s[q, t] + m.yOUT[q, t] - m.yRET[q, t]
@@ -159,12 +182,20 @@ class ProblemMaster(MasterProblem):
 
         m.C2a = pyo.Constraint(m.Q, m.T, rule=loc_flip)
 
+        # Until the first possible arrival, the vehicle must remain at Longvilliers (s=0)
+        for q in m.Q:
+            for t in range(min(trip_slots, T)):
+                m.s[q, t].fix(0)
+
         def admissible(m, q, t):
             return m.yOUT[q, t] + m.s[q, t] <= 1
 
         m.C2b = pyo.Constraint(m.Q, m.T, rule=admissible)
         m.C2c = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yRET[q, t] <= m.s[q, t])
         m.C2d = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.c[q, t] <= 1 - m.s[q, t])
+
+        # Note: We no longer enforce "first non-idle must be OUT".
+        # Charging at Longvilliers (s=0) is allowed even before the first OUT.
 
         for q in m.Q:
             m.s[q, 0].fix(0)
@@ -193,8 +224,14 @@ class ProblemMaster(MasterProblem):
                     f"C4_bal_{q}_{t}",
                     pyo.Constraint(expr=m.b[q, t + 1] == m.b[q, t] - L * (m.yOUT[q, t] + m.yRET[q, t]) + m.gchg[q, t]),
                 )
+                # Enforce that when charging is selected (c[q,t] = 1),
+                # the battery increases by the nominal charge increment in that slot,
+                # subject to the existing upper bound C4_chg2 (Emax - b).
                 m.add_component(
                     f"C4_chg1_{q}_{t}", pyo.Constraint(expr=m.gchg[q, t] <= delta_chg * m.c[q, t])
+                )
+                m.add_component(
+                    f"C4_chg1_lb_{q}_{t}", pyo.Constraint(expr=m.gchg[q, t] >= delta_chg * m.c[q, t])
                 )
                 m.add_component(
                     f"C4_chg2_{q}_{t}", pyo.Constraint(expr=m.gchg[q, t] <= Emax - m.b[q, t])
@@ -205,6 +242,8 @@ class ProblemMaster(MasterProblem):
         # Avoid uninitialized gchg at the last time period (not used in constraints)
         for q in m.Q:
             m.gchg[q, T - 1].fix(0)
+            # No effect from charging at the last slot (no next state), keep consistent
+            m.c[q, T - 1].fix(0)
 
         # Container block to store explicit Benders cuts incrementally
         m.BendersCuts = pyo.Block(concrete=True)

@@ -69,8 +69,13 @@ def cmd_run(args) -> int:
     setup_logging(cfg.run.log_level)
 
     ProblemMaster, ProblemSubproblem = _import_problem_impl()
-    master = ProblemMaster(cfg.master.params)
-    sub = ProblemSubproblem(cfg.subproblem.params)
+    mp = dict(cfg.master.params or {})
+    sp = dict(cfg.subproblem.params or {})
+    # Propagate slot_resolution from master to subproblem if not explicitly set
+    if "slot_resolution" not in sp and "slot_resolution" in mp:
+        sp["slot_resolution"] = mp["slot_resolution"]
+    master = ProblemMaster(mp)
+    sub = ProblemSubproblem(sp)
 
     solver = BendersSolver(master, sub, cfg)
     # Friendly header with initial parameters
@@ -79,8 +84,8 @@ def cmd_run(args) -> int:
         f"  run: iterations={cfg.run.max_iterations} tol={cfg.run.tolerance} "
         f"time_limit_s={cfg.run.time_limit_s} seed={cfg.run.seed}"
     )
-    mp = cfg.master.params or {}
-    sp = cfg.subproblem.params or {}
+    mp = mp or {}
+    sp = sp or {}
     # Derive slots from minutes + resolution if provided
     T_minutes = mp.get("T_minutes")
     slot_res = mp.get("slot_resolution", 1)
@@ -94,8 +99,8 @@ def cmd_run(args) -> int:
         T_slots = mp.get("T", "-")
     trip_slots = mp.get("trip_slots")
     print(
-        "  master: solver=%s Q=%s T_minutes=%s slot_res=%s (slots=%s) trip_dur_min=%s Emax=%s L=%s delta_chg=%s" % (
-            mp.get("solver", "-"), mp.get("Q", "-"), T_minutes if T_minutes is not None else mp.get("T", "-"), slot_res, T_slots, trip_dur_min if trip_dur_min is not None else trip_slots, mp.get("Emax", "-"), mp.get("L", "-"), mp.get("delta_chg", "-"),
+        "  master: solver=%s Q=%s T_minutes=%s slot_res=%s (slots=%s) trip_dur_min=%s Emax=%s L=%s eps=%s conc_pen=%s delta_chg=%s" % (
+            mp.get("solver", "-"), mp.get("Q", "-"), T_minutes if T_minutes is not None else mp.get("T", "-"), slot_res, T_slots, trip_dur_min if trip_dur_min is not None else trip_slots, mp.get("Emax", "-"), mp.get("L", "-"), mp.get("start_cost_epsilon", "-"), mp.get("concurrency_penalty", "-"), mp.get("delta_chg", "-"),
         )
     )
     # Inform when trip duration exceeds horizon after discretization
@@ -112,8 +117,8 @@ def cmd_run(args) -> int:
     except Exception:
         pass
     print(
-        "  subproblem: solver=%s S=%s Wmax=%s p=%s (slot_res=%s)" % (
-            sp.get("lp_solver", "-"), sp.get("S", "-"), sp.get("Wmax_minutes", sp.get("Wmax_slots", sp.get("Wmax", "-"))), sp.get("p", "-"), sp.get("slot_resolution", mp.get("slot_resolution", "-")),
+        "  subproblem: solver=%s S=%s Wmax=%s p=%s fill_eps=%s (slot_res=%s)" % (
+            sp.get("lp_solver", "-"), sp.get("S", "-"), sp.get("Wmax_minutes", sp.get("Wmax_slots", sp.get("Wmax", "-"))), sp.get("p", "-"), sp.get("fill_first_epsilon", "-"), sp.get("slot_resolution", mp.get("slot_resolution", "-")),
         )
     )
     if "demand_file" in sp:
