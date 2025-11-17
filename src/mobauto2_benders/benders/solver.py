@@ -48,11 +48,82 @@ class BendersSolver:
 
         best_lb: Optional[float] = None
         best_ub: Optional[float] = None
+        # Stall detection on gap improvement
+        stall_max = int(getattr(self.cfg.run, "stall_max_no_improve_iters", 0) or 0)
+        stall_min_abs = float(getattr(self.cfg.run, "stall_min_abs_improve", 0.0) or 0.0)
+        stall_min_rel = float(getattr(self.cfg.run, "stall_min_rel_improve", 0.0) or 0.0)
+        stall_ctr = 0
+        prev_gap: Optional[float] = None
 
         last_diag: dict | None = None
         for it in range(1, max_it + 1):
             if time.time() - t0 > self.cfg.run.time_limit_s:
                 log.warning("Time limit reached after %d iterations", it - 1)
+                # Print the best incumbent information we have so far
+                try:
+                    elapsed = time.time() - t0
+                    print(f"\nTime limit reached after {it - 1} iterations.")
+                    print(f"Total solve time: {elapsed:.3f} seconds")
+                    if best_lb is not None and best_ub is not None:
+                        gap = abs(best_ub - best_lb)
+                        rel_gap = gap / max(1.0, abs(best_ub))
+                        print(
+                            f"Best bounds: LB={best_lb:.6g} UB={best_ub:.6g} gap={gap:.6g} rel={rel_gap:.3g}"
+                        )
+                    # If the master has a formatter for the current solution, print it
+                    try:
+                        fmt = getattr(self.master, "format_solution", None)
+                        if callable(fmt):
+                            print("\nBest Master Solution:")
+                            print(fmt())
+                    except Exception:
+                        pass
+                    # Optional diagnostics from last evaluated subproblem (if available)
+                    try:
+                        if last_diag:
+                            T = int(last_diag.get("T")) if "T" in last_diag else None
+                            R_out = last_diag.get("R_out")
+                            R_ret = last_diag.get("R_ret")
+                            pax_out = last_diag.get("pax_out_by_tau")
+                            pax_ret = last_diag.get("pax_ret_by_tau")
+                            if isinstance(pax_out, list) and isinstance(pax_ret, list):
+                                n = len(pax_out)
+                                if T is None:
+                                    T = n
+                                header = "       " + " ".join(f"{t:>3d}" for t in range(T))
+                                def fmt_row_floats(vals: list[float]) -> str:
+                                    return " ".join(f"{float(v):>3.0f}" for v in (vals + [0.0] * T)[:T])
+                                if isinstance(R_out, list) and isinstance(R_ret, list):
+                                    print("\nDemand per slot (OUT/RET):")
+                                    print(header)
+                                    print(f"  OUT: {fmt_row_floats(R_out)}")
+                                    print(f"  RET: {fmt_row_floats(R_ret)}")
+                                try:
+                                    m = getattr(self.master, "m", None)
+                                    if m is not None:
+                                        Q = list(m.Q)
+                                        served_qt = [[0.0 for _ in range(T)] for _ in Q]
+                                        for tau in range(T):
+                                            out_qs = [q for q in Q if float(m.yOUT[q, tau].value or 0.0) >= 0.5]
+                                            ret_qs = [q for q in Q if float(m.yRET[q, tau].value or 0.0) >= 0.5]
+                                            k_out = len(out_qs)
+                                            k_ret = len(ret_qs)
+                                            share_out = (float(pax_out[tau]) / k_out) if k_out > 0 else 0.0
+                                            share_ret = (float(pax_ret[tau]) / k_ret) if k_ret > 0 else 0.0
+                                            for q in out_qs:
+                                                served_qt[q][tau] += share_out
+                                            for q in ret_qs:
+                                                served_qt[q][tau] += share_ret
+                                        print("\nPax per shuttle and slot (total):")
+                                        print(header)
+                                        for q in Q:
+                                            print(f"  q={q}: {fmt_row_floats(served_qt[q])}")
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
                 return BendersRunResult(
                     status=SolveStatus.UNKNOWN,
                     iterations=it - 1,
@@ -203,7 +274,9 @@ class BendersSolver:
                 print(f"Bounds: LB={best_lb:.6g} UB={best_ub:.6g} gap={gap:.6g} rel={rel_gap:.3g}")
                 if rel_gap <= tol:
                     log.info("Optimality reached within tolerance after %d iterations", it)
+                    elapsed = time.time() - t0
                     print(f"\nOptimality reached within tolerance after {it} iterations.")
+                    print(f"Total solve time: {elapsed:.3f} seconds")
                     # If the master has a formatter for the current solution, print it
                     try:
                         fmt = getattr(self.master, "format_solution", None)
@@ -265,6 +338,35 @@ class BendersSolver:
                         best_lower_bound=best_lb,
                         best_upper_bound=best_ub,
                     )
+                # Stall stopping: if gap does not improve sufficiently for several iterations
+                if stall_max > 0:
+                    improved = False
+                    if prev_gap is None:
+                        improved = True
+                    else:
+                        abs_impr = float(prev_gap - gap)
+                        rel_impr = abs_impr / max(1.0, abs(prev_gap))
+                        improved = (abs_impr >= max(0.0, stall_min_abs)) or (rel_impr >= max(0.0, stall_min_rel))
+                    if improved:
+                        stall_ctr = 0
+                    else:
+                        stall_ctr += 1
+                    prev_gap = gap
+                    if stall_ctr >= stall_max:
+                        log.info(
+                            "Stopping due to stall: no gap improvement for %d iterations (gap=%.6g)",
+                            stall_ctr,
+                            gap,
+                        )
+                        print(
+                            f"\nStopped early after {it} iterations due to stall: no gap improvement for {stall_ctr} iterations."
+                        )
+                        return BendersRunResult(
+                            status=SolveStatus.FEASIBLE,
+                            iterations=it,
+                            best_lower_bound=best_lb,
+                            best_upper_bound=best_ub,
+                        )
 
         log.warning("Max iterations reached: %d", max_it)
         return BendersRunResult(

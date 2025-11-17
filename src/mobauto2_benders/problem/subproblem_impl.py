@@ -105,8 +105,10 @@ class ProblemSubproblem(Subproblem):
             if isinstance(container, list) and container and isinstance(container[0], dict):
                 import math as _math
                 def _slot_idx_from_minutes(tmin: float) -> int:
+                    # Map continuous minutes to slot index via floor: [0,res) -> 0, [res,2res) -> 1, ...
+                    # Ensures arrivals in slot t are only eligible for departures at tau >= t+1.
                     res = max(1, slot_res)
-                    return max(0, int(_math.ceil(float(tmin) / res) - 1))
+                    return max(0, int(_math.floor(float(tmin) / res)))
                 for r in container:
                     d = r.get("dir")
                     try:
@@ -136,7 +138,7 @@ class ProblemSubproblem(Subproblem):
                 import math as _math
                 def _slot_idx_from_minutes(tmin: float) -> int:
                     res = max(1, slot_res)
-                    return max(0, int(_math.ceil(float(tmin) / res) - 1))
+                    return max(0, int(_math.floor(float(tmin) / res)))
                 for row in container:
                     if not isinstance(row, (list, tuple)) or len(row) < 2:
                         continue
@@ -414,9 +416,10 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
 
     W = P.Wmax_slots
 
-    # Define only valid arcs with causality and max-wait: (t+1) <= tau <= min(T-1, t+W)
-    # Rationale: demand aggregated in slot t arrives within (t*res+1 ... (t+1)*res),
-    # and cannot be served by a departure at the very start of slot t.
+    # Define valid arcs with causality and max-wait: (t + 1) <= tau <= min(T-1, t+W)
+    # Interpretation: demand aggregated in slot t (arrivals during [t*res, (t+1)*res)) can be served
+    # by the next slot's departure at the earliest (tau = t+1). Same-slot service (tau = t) is disallowed
+    # to avoid serving passengers who arrive after the departure at the beginning of slot t.
     Arcs_list = [(t, tau) for t in Tset for tau in Tset if (t + 1) <= tau <= min(P.T - 1, t + W)]
     m.Arcs = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
 

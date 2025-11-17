@@ -19,6 +19,10 @@ class RunConfig:
     time_limit_s: int = 600
     log_level: str = "INFO"
     seed: int = 42
+    # Optional stall-stopping controls
+    stall_max_no_improve_iters: int = 0
+    stall_min_abs_improve: float = 0.0
+    stall_min_rel_improve: float = 0.0
 
 
 @dataclass(slots=True)
@@ -165,6 +169,9 @@ def load_config(path: str | Path | None) -> BendersConfig:
         time_limit_s=int(run.get("time_limit_s", 600)),
         log_level=str(run.get("log_level", "INFO")),
         seed=int(run.get("seed", 42)),
+        stall_max_no_improve_iters=int(run.get("stall_max_no_improve_iters", 0) or 0),
+        stall_min_abs_improve=float(run.get("stall_min_abs_improve", 0.0) or 0.0),
+        stall_min_rel_improve=float(run.get("stall_min_rel_improve", 0.0) or 0.0),
     )
 
     master_params = _as_dict(master.get("params"))

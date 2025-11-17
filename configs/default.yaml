@@ -1,7 +1,7 @@
 run:
-  max_iterations: 100
+  max_iterations: 1000
   tolerance: 0.001
-  time_limit_s: 1800
+  time_limit_s: 3600
   # log_level controls the verbosity of Python's logging output.
   # Options (most verbose to least): DEBUG, INFO, WARNING, ERROR, CRITICAL
   # - DEBUG: detailed internal iteration logs
@@ -9,6 +9,12 @@ run:
   # - WARNING/ERROR/CRITICAL: only problems
   log_level: INFO
   seed: 42
+  # Optional: stop early if gap stalls
+  # Number of iterations with insufficient gap improvement before stopping (0 disables)
+  stall_max_no_improve_iters: 10
+  # Minimum absolute and/or relative gap improvement to reset the stall counter
+  stall_min_abs_improve: 1.0
+  stall_min_rel_improve: 0.002
 
 master:
   impl: pyomo
@@ -21,9 +27,9 @@ master:
     Q: 2
     # Time discretization is defined in minutes; slots are implicit via slot_resolution.
     # T_minutes: total horizon length in minutes (e.g., 600)
-    T_minutes: 600
+    T_minutes: 900
     # slot_resolution: minutes per slot (e.g., 5 -> discrete time grid every 5 minutes)
-    slot_resolution: 15
+    slot_resolution: 30
     # trip_duration_minutes: physical trip duration in minutes. Internally converted to slots as ceil(trip_duration_minutes / slot_resolution).
     trip_duration_minutes: 30
     # Emax: battery capacity (energy units)
@@ -43,6 +49,10 @@ master:
     use_fifo_symmetry: true
     # delta_chg: maximum charge added per slot when c[q,t] = 1
     delta_chg: 30 / (30 / slot_resolution)
+    # Stronger Benders cuts (set to false to use per-(q,t) coefficients)
+    aggregate_cuts_by_tau: true
+    # Drop tiny cut coefficients (helps numerics without changing shape much)
+    cut_coeff_threshold: 0.0
     # binit: initial battery levels per vehicle (length Q)
     binit: [150.0, 150.0]
 
@@ -53,7 +63,7 @@ subproblem:
     lp_solver: cplex_direct
     # S: capacity units contributed by one vehicle starting at time tau.
     #   Master yOUT[q,tau] adds S to C_out[tau] (similarly for yRET/C_ret).
-    S: 10.0
+    S: 15
     # Wmax can be given in slots or minutes. If Wmax_minutes is provided, it is converted to slots using slot_resolution
     # of the master params.
     Wmax_minutes: 30
@@ -75,7 +85,7 @@ subproblem:
     #       { req_matrix: [[OUT|RET|0|1, time], ...] }
     #       { R_out: [...], R_ret: [...] }
     #  - scenario_files: list of files (each as above) for multi-scenario runs
-    demand_file: setups/demo_demand.yaml
+    demand_file: setups/demo_cont_demand.yaml
     # scenario_files:
     #   - setups/scenario_1.yaml
     #   - setups/scenario_2.yaml

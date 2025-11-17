@@ -153,6 +153,13 @@ class ProblemMaster(MasterProblem):
                 m.yOUT[q, t].fix(0)
                 m.yRET[q, t].fix(0)
 
+        # Enforce "returnability" before horizon end: an OUT must leave enough time for a RET to return
+        # A paired OUT+RET requires 2*trip_slots to return to Longvilliers by T-1, so forbid OUT at t >= T - 2*trip_slots
+        t_cut = max(0, T - 2 * trip_slots)
+        for t in range(t_cut, T):
+            for q in m.Q:
+                m.yOUT[q, t].fix(0)
+
         # Occupancy recursions: leave Longvilliers when starting OUT; arrive to Longvilliers after RET duration
         for q in m.Q:
             for t in range(1, T):
@@ -223,8 +230,7 @@ class ProblemMaster(MasterProblem):
         # Avoid uninitialized gchg at the last time period (not used in constraints)
         for q in m.Q:
             m.gchg[q, T - 1].fix(0)
-            # No effect from charging at the last slot (no next state), keep consistent
-            m.c[q, T - 1].fix(0)
+            # Allow charging label at the last slot if desired (battery won't change as gchg[T-1]=0)
 
         # Container block to store explicit Benders cuts incrementally
         m.BendersCuts = pyo.Block(concrete=True)

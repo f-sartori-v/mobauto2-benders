@@ -1,0 +1,265 @@
+n: 120
+requests:
+- dir: OUT
+  time: 10
+- dir: OUT
+  time: 27
+- dir: OUT
+  time: 29
+- dir: OUT
+  time: 7
+- dir: OUT
+  time: 22
+
+- dir: OUT
+  time: 53
+- dir: OUT
+  time: 53
+- dir: OUT
+  time: 56
+- dir: OUT
+  time: 37
+- dir: OUT
+  time: 57
+
+- dir: OUT
+  time: 69
+- dir: OUT
+  time: 67
+- dir: OUT
+  time: 62
+- dir: OUT
+  time: 73
+- dir: OUT
+  time: 88
+
+- dir: OUT
+  time: 102
+- dir: OUT
+  time: 107
+- dir: OUT
+  time: 119
+- dir: OUT
+  time: 119
+- dir: OUT
+  time: 118
+
+- dir: OUT
+  time: 204
+- dir: OUT
+  time: 203
+- dir: OUT
+  time: 194
+- dir: OUT
+  time: 191
+- dir: OUT
+  time: 199
+
+- dir: OUT
+  time: 223
+- dir: OUT
+  time: 234
+- dir: OUT
+  time: 218
+- dir: OUT
+  time: 220
+- dir: OUT
+  time: 218
+
+- dir: OUT
+  time: 403
+- dir: OUT
+  time: 407
+- dir: OUT
+  time: 413
+- dir: OUT
+  time: 406
+- dir: OUT
+  time: 402
+
+- dir: OUT
+  time: 442
+- dir: OUT
+  time: 425
+- dir: OUT
+  time: 423
+- dir: OUT
+  time: 449
+- dir: OUT
+  time: 426
+
+- dir: OUT
+  time: 455
+- dir: OUT
+  time: 475
+- dir: OUT
+  time: 458
+- dir: OUT
+  time: 467
+- dir: OUT
+  time: 470
+
+- dir: OUT
+  time: 502
+- dir: OUT
+  time: 506
+- dir: OUT
+  time: 504
+- dir: OUT
+  time: 486
+- dir: OUT
+  time: 500
+
+- dir: OUT
+  time: 597
+- dir: OUT
+  time: 598
+- dir: OUT
+  time: 588
+- dir: OUT
+  time: 597
+- dir: OUT
+  time: 589
+
+- dir: OUT
+  time: 603
+- dir: OUT
+  time: 619
+- dir: OUT
+  time: 611
+- dir: OUT
+  time: 622
+- dir: OUT
+  time: 605
+
+- dir: RET
+  time: 59
+- dir: RET
+  time: 37
+- dir: RET
+  time: 46
+- dir: RET
+  time: 43
+- dir: RET
+  time: 57
+
+- dir: RET
+  time: 62
+- dir: RET
+  time: 78
+- dir: RET
+  time: 88
+- dir: RET
+  time: 73
+- dir: RET
+  time: 81
+
+- dir: RET
+  time: 94
+- dir: RET
+  time: 100
+- dir: RET
+  time: 101
+- dir: RET
+  time: 92
+- dir: RET
+  time: 93
+
+- dir: RET
+  time: 139
+- dir: RET
+  time: 132
+- dir: RET
+  time: 144
+- dir: RET
+  time: 128
+- dir: RET
+  time: 148
+
+- dir: RET
+  time: 239
+- dir: RET
+  time: 219
+- dir: RET
+  time: 233
+- dir: RET
+  time: 216
+- dir: RET
+  time: 231
+
+- dir: RET
+  time: 268
+- dir: RET
+  time: 243
+- dir: RET
+  time: 263
+- dir: RET
+  time: 243
+- dir: RET
+  time: 267
+
+- dir: RET
+  time: 438
+- dir: RET
+  time: 442
+- dir: RET
+  time: 436
+- dir: RET
+  time: 430
+- dir: RET
+  time: 424
+
+- dir: RET
+  time: 469
+- dir: RET
+  time: 475
+- dir: RET
+  time: 469
+- dir: RET
+  time: 469
+- dir: RET
+  time: 474
+
+- dir: RET
+  time: 489
+- dir: RET
+  time: 502
+- dir: RET
+  time: 488
+- dir: RET
+  time: 482
+- dir: RET
+  time: 489
+
+- dir: RET
+  time: 520
+- dir: RET
+  time: 538
+- dir: RET
+  time: 521
+- dir: RET
+  time: 520
+- dir: RET
+  time: 535
+
+- dir: RET
+  time: 613
+- dir: RET
+  time: 607
+- dir: RET
+  time: 623
+- dir: RET
+  time: 625
+- dir: RET
+  time: 616
+
+- dir: RET
+  time: 648
+- dir: RET
+  time: 652
+- dir: RET
+  time: 632
+- dir: RET
+  time: 640
+- dir: RET
+  time: 638
