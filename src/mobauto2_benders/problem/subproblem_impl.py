@@ -59,6 +59,8 @@ class ProblemSubproblem(Subproblem):
             Wmax = int(params.get("Wmax_slots", params.get("Wmax", 0)))
         p_pen = float(params.get("p", 0.0))
         lp_solver = str(params.get("lp_solver", "cplex_direct"))
+        # Optional: solver-specific options (e.g., CPLEX: {"lpmethod": 2, "threads": 0})
+        solver_options = dict(params.get("solver_options", {}) or {})
         # Prefer packing demand into the first vehicle layer, then the next (LP tie-breaker)
         fill_eps = float(params.get("fill_first_epsilon", 1e-6) or 0.0)
 
@@ -213,6 +215,9 @@ class ProblemSubproblem(Subproblem):
         ub_aggregation: str = str(params.get("ub_aggregation", "mean"))
         weights: list[float] | None = params.get("scenario_weights")
 
+        # Only evaluate finite differences for time slots that appear in candidate (fewer solves)
+        active_taus = sorted(t_idx) if t_idx else list(range(T))
+
         # Finite-difference coefficient builder: for each tau, solve with +S capacity
         def coeffs_by_fdiff(
             ub_base: float,
@@ -229,14 +234,14 @@ class ProblemSubproblem(Subproblem):
             dm_out: Dict[int, float] = {}
             dm_ret: Dict[int, float] = {}
 
-            for tau in range(T):
+            for tau in active_taus:
                 # OUT marginal
                 C_out_tau = C_out_base.copy()
                 C_out_tau[tau] = C_out_tau[tau] + S
                 K_out_tau = K_out_base.copy()
                 K_out_tau[tau] = K_out_tau[tau] + 1
                 _, ub_plus = solve_subproblem(
-                    SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_tau, K_ret=K_ret_base, fill_eps=fill_eps),
+                    SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_tau, K_ret=K_ret_base, fill_eps=fill_eps, solver_options=solver_options),
                     C_out_tau,
                     C_ret_base,
                     R_out_vec,
@@ -251,7 +256,7 @@ class ProblemSubproblem(Subproblem):
                 K_ret_tau = K_ret_base.copy()
                 K_ret_tau[tau] = K_ret_tau[tau] + 1
                 _, ub_plus_r = solve_subproblem(
-                    SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_base, K_ret=K_ret_tau, fill_eps=fill_eps),
+                    SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_base, K_ret=K_ret_tau, fill_eps=fill_eps, solver_options=solver_options),
                     C_out_base,
                     C_ret_tau,
                     R_out_vec,
@@ -306,7 +311,7 @@ class ProblemSubproblem(Subproblem):
                 R_out = (R_out + [0.0] * T)[:T]
                 R_ret = (R_ret + [0.0] * T)[:T]
 
-                sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out, K_ret=K_ret, fill_eps=fill_eps)
+                sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out, K_ret=K_ret, fill_eps=fill_eps, solver_options=solver_options)
                 duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
                 ub_vals.append(ub_val)
 
@@ -361,7 +366,7 @@ class ProblemSubproblem(Subproblem):
             if len(R_ret) != T:
                 R_ret = (R_ret + [0.0] * T)[:T]
 
-            sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out, K_ret=K_ret, fill_eps=fill_eps)
+            sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out, K_ret=K_ret, fill_eps=fill_eps, solver_options=solver_options)
             duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
 
             # Build coefficients via finite differences around current capacity
@@ -398,6 +403,7 @@ class SPParams:
     K_out: list[int]
     K_ret: list[int]
     fill_eps: float = 0.0
+    solver_options: dict | None = None
 
 
 def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float], R_out: Iterable[float], R_ret: Iterable[float]):
@@ -490,6 +496,13 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
     m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
 
     solver = pyo.SolverFactory(P.lp_solver)
+    # Allow tuning via options, e.g., for CPLEX: {"lpmethod": 2, "threads": 0, "parallel": 1}
+    try:
+        if getattr(P, "solver_options", None):
+            for k, v in (P.solver_options or {}).items():
+                solver.options[k] = v
+    except Exception:
+        pass
     solver.solve(m, tee=False)
 
     alpha_OUT = {t: float(m.dual.get(m.D_out[t], 0.0)) for t in Tset}

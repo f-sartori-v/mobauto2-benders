@@ -86,6 +86,3 @@ tests/
 # Project-specific generated scenarios; keep only one example
 setups/*
 !setups/demo_cont_demand.yaml
-
-# Extra virtualenvs
-.venv310/
