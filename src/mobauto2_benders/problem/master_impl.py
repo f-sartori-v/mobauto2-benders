@@ -82,6 +82,7 @@ class ProblemMaster(MasterProblem):
         # Time-bucket total starts z[t] = sum_q (yOUT+ yRET) -- used in cuts to reduce nnz
         m.Z = pyo.Var(m.T, within=pyo.NonNegativeReals)
         # State and action variables
+        # c[q,t] models a continuous charging intensity in [0,1] (fraction of slot/power level)
         m.c = pyo.Var(m.Q, m.T, bounds=(0.0, 1.0))
         # Discrete occupancy at locations: 0=Longvilliers (atL=1), 1=Massy (atM=1)
         m.atL = pyo.Var(m.Q, m.T, within=pyo.Binary)
@@ -212,9 +213,9 @@ class ProblemMaster(MasterProblem):
                     f"C4_bal_{q}_{t}",
                     pyo.Constraint(expr=m.b[q, t + 1] == m.b[q, t] - L * (m.yOUT[q, t] + m.yRET[q, t]) + m.gchg[q, t]),
                 )
-                # Enforce that when charging is selected (c[q,t] = 1),
-                # the battery increases by the nominal charge increment in that slot,
-                # subject to the existing upper bound C4_chg2 (Emax - b).
+                # Charging linkage (continuous): enforce gchg[q,t] = delta_chg * c[q,t],
+                # but respect remaining capacity: gchg[q,t] <= Emax - b[q,t].
+                # With c in [0,1], the model can throttle charging fractionally.
                 m.add_component(
                     f"C4_chg1_{q}_{t}", pyo.Constraint(expr=m.gchg[q, t] <= delta_chg * m.c[q, t])
                 )
@@ -477,7 +478,8 @@ class ProblemMaster(MasterProblem):
         else:
             status = SolveStatus.UNKNOWN
 
-        objective = float(pyo.value(m.theta))
+        # Use full master objective as lower bound on total cost (first-stage + recourse proxy)
+        objective = float(pyo.value(m.obj))
         self._lb = objective
         candidate = self._collect_candidate()
         return SolveResult(status=status, objective=objective, candidate=candidate, lower_bound=self._lb)
@@ -606,8 +608,9 @@ class ProblemMaster(MasterProblem):
 
         # Re-anchor the constant so that the cut passes through the incumbent (y = current MP solution)
         # Using raw dm and Yout/Yret:
-        # RHS = const_dm + sum_t dm_out[t]*Yout[t] + sum_t dm_ret[t]*Yret[t]
-        # This passes through incumbent since const_dm came from SP with dm and sums.
+        # RHS_raw(y) = const_dm + sum_t dm_out[t]*Yout[t] + sum_t dm_ret[t]*Yret[t]
+        # This equals the SP objective at incumbent y. We'll compute ub_est for diagnostics
+        # and then recompute the constant after any aggregation/thresholding so pass-through holds exactly.
         ub_est = float(const)
         # Sum over raw dm maps using current y values
         if isinstance(coeff_yOUT, dict):
@@ -618,10 +621,40 @@ class ProblemMaster(MasterProblem):
             for (q, t), v in coeff_yRET.items():
                 yv = float(m.yRET[q, t].value or 0.0)
                 ub_est += float(v) * yv
-        # With Yout/Yret form, const stays as provided; ub_est is only used for diagnostics.
-        # Keep const unchanged to preserve pass-through at incumbent.
+        # Recompute constant after aggregation/thresholding to preserve pass-through at incumbent
+        # Compute incumbent sums
+        if aggregate:
+            # Aggregate by time: use Yout[t], Yret[t]
+            yout_val = {}
+            yret_val = {}
+            for t in set(list(agg_out.keys()) + list(agg_ret.keys())):  # type: ignore[arg-type]
+                try:
+                    yout_val[int(t)] = float(m.Yout[int(t)].value or 0.0)
+                except Exception:
+                    yout_val[int(t)] = 0.0
+                try:
+                    yret_val[int(t)] = float(m.Yret[int(t)].value or 0.0)
+                except Exception:
+                    yret_val[int(t)] = 0.0
+            contrib = sum(float(v) * float(yout_val.get(int(t), 0.0)) for t, v in agg_out.items())
+            contrib += sum(float(v) * float(yret_val.get(int(t), 0.0)) for t, v in agg_ret.items())
+        else:
+            # Per-(q,t) coefficients
+            contrib = 0.0
+            for (q, t), v in agg_out.items():  # type: ignore[misc]
+                try:
+                    contrib += float(v) * float(m.yOUT[int(q), int(t)].value or 0.0)
+                except Exception:
+                    pass
+            for (q, t), v in agg_ret.items():  # type: ignore[misc]
+                try:
+                    contrib += float(v) * float(m.yRET[int(q), int(t)].value or 0.0)
+                except Exception:
+                    pass
+        const_adj = float(ub_est) - float(contrib)
 
-        # Assemble RHS with aggregated Yout/Yret and raw dm
+        # Assemble RHS with aggregated coefficients using adjusted constant
+        rhs = const_adj
         if aggregate:
             for t, v in agg_out.items():
                 rhs = rhs + float(v) * m.Yout[int(t)]
@@ -655,7 +688,7 @@ class ProblemMaster(MasterProblem):
             max_beta = max(max_beta, max(abs(float(v)) for v in agg_out.values()))
         if agg_ret:
             max_beta = max(max_beta, max(abs(float(v)) for v in agg_ret.values()))
-        max_term = max(float(abs(const)), float(max_beta), 1.0)
+        max_term = max(float(abs(const_adj)), float(max_beta), 1.0)
         scale = 1.0 / max_term
         lhs = scale * m.theta
         rhs_scaled = scale * rhs
@@ -685,7 +718,7 @@ class ProblemMaster(MasterProblem):
         else:
             fp_out = sorted(((int(q), int(t), _round6(float(v))) for (q, t), v in agg_out.items()))  # type: ignore[misc]
             fp_ret = sorted(((int(q), int(t), _round6(float(v))) for (q, t), v in agg_ret.items()))  # type: ignore[misc]
-        fp = ("opt", _round6(const), tuple(fp_out), tuple(fp_ret))
+        fp = ("opt", _round6(const_adj), tuple(fp_out), tuple(fp_ret))
         if not force:
             if fp in self._cut_fps:
                 print("[BENDERS] Skipped duplicate cut")
@@ -728,19 +761,80 @@ class ProblemMaster(MasterProblem):
         if all_betas:
             rng = (min(all_betas), max(all_betas))
             print(
-                f"[BENDERS] Added cut #{self._cut_idx}: const={const:.6g}, nnz={nnz}, slope_range=[{rng[0]:.3g},{rng[1]:.3g}], raw_pos_dm={raw_pos_dm}, scale={scale:.3g}"
+                f"[BENDERS] Added cut #{self._cut_idx}: const={const_adj:.6g}, nnz={nnz}, slope_range=[{rng[0]:.3g},{rng[1]:.3g}], raw_pos_dm={raw_pos_dm}, scale={scale:.3g}"
             )
         else:
-            print(f"[BENDERS] Added cut #{self._cut_idx}: const={const:.6g}, nnz={nnz}, raw_pos_dm={raw_pos_dm}, scale={scale:.3g}")
+            print(f"[BENDERS] Added cut #{self._cut_idx}: const={const_adj:.6g}, nnz={nnz}, raw_pos_dm={raw_pos_dm}, scale={scale:.3g}")
         # Sanity log with LHS and RHS values (scaled)
         print(
             f"[BENDERS] Eval cut: lhs={lhs_val:.6g} rhs={rhs_val:.6g} viol={violation:.3g} thr={threshold:.3g} added=True"
         )
         self._cut_idx += 1
         # Track last cut info for cross-iteration checks
-        self._last_cut_const = const
+        self._last_cut_const = const_adj
         self._last_cut_nnz = nnz
         return True
+
+    # Evaluate deterministic first-stage cost f(y) for a given candidate
+    # Mirrors the master objective components excluding theta: start epsilon and concurrency penalty
+    def first_stage_cost(self, candidate: Candidate) -> float:
+        eps_start = float(self._p("start_cost_epsilon", 0.0) or 0.0)
+        conc_pen = float(self._p("concurrency_penalty", 0.0) or 0.0)
+        if eps_start == 0.0 and conc_pen == 0.0:
+            return 0.0
+
+        # Collect sums per time from candidate
+        # Prefer model T if available; otherwise infer from candidate indices
+        try:
+            T = int(len(self.m.T)) if self.m is not None else None  # type: ignore[arg-type]
+        except Exception:
+            T = None
+        if T is None:
+            # Infer T from candidate keys
+            tmax = -1
+            for name in candidate.keys():
+                if isinstance(name, str) and (name.startswith("yOUT[") or name.startswith("yRET[")):
+                    inside = name[name.find("[") + 1 : name.find("]")]
+                    try:
+                        _, t_str = inside.split(",")
+                        tmax = max(tmax, int(t_str.strip()))
+                    except Exception:
+                        pass
+            T = tmax + 1 if tmax >= 0 else 0
+
+        Yout = [0.0 for _ in range(T)]
+        Yret = [0.0 for _ in range(T)]
+        starts = 0.0
+        for name, val in candidate.items():
+            if not isinstance(name, str):
+                continue
+            try:
+                if name.startswith("yOUT["):
+                    inside = name[name.find("[") + 1 : name.find("]")]
+                    _, tau_str = inside.split(",")
+                    tau = int(tau_str.strip())
+                    vv = float(val)
+                    if 0 <= tau < T:
+                        Yout[tau] += vv
+                        starts += vv
+                elif name.startswith("yRET["):
+                    inside = name[name.find("[") + 1 : name.find("]")]
+                    _, tau_str = inside.split(",")
+                    tau = int(tau_str.strip())
+                    vv = float(val)
+                    if 0 <= tau < T:
+                        Yret[tau] += vv
+                        starts += vv
+            except Exception:
+                continue
+
+        cost = 0.0
+        if eps_start > 0.0:
+            cost += eps_start * float(starts)
+        if conc_pen > 0.0:
+            cost += conc_pen * sum(max(0.0, y - 1.0) for y in Yout)
+            cost += conc_pen * sum(max(0.0, y - 1.0) for y in Yret)
+        return float(cost)
 
     def add_cut(self, cut: Cut) -> None:
         # Normal filtered path

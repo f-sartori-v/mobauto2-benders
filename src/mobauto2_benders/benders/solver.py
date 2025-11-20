@@ -162,7 +162,7 @@ class BendersSolver:
                 pass
             if mres.objective is not None:
                 print(
-                    f"[MP] iter={it} cuts={cuts_in_model if cuts_in_model is not None else '-'} theta={mres.objective:.3f}"
+                    f"[MP] iter={it} cuts={cuts_in_model if cuts_in_model is not None else '-'} obj={mres.objective:.3f}"
                     + (f" last_const={last_const:.3f} last_nnz={last_nnz}" if last_const is not None else "")
                 )
 
@@ -192,21 +192,25 @@ class BendersSolver:
 
             print("Evaluating Subproblem (SP) at candidate...")
             sres: SubproblemResult = self.subproblem.evaluate(mres.candidate)
-            # Update UB if provided
+            # Update UB if provided (include first-stage cost from master to compare totals)
             if sres.upper_bound is not None:
-                best_ub = sres.upper_bound if best_ub is None else min(best_ub, sres.upper_bound)
+                try:
+                    fcost_fn = getattr(self.master, "first_stage_cost", None)
+                    fcost = float(fcost_fn(mres.candidate)) if callable(fcost_fn) else 0.0
+                except Exception:
+                    fcost = 0.0
+                total_ub = float(sres.upper_bound) + float(fcost)
+                best_ub = total_ub if best_ub is None else min(best_ub, total_ub)
             # Keep last diagnostics for end-of-run reporting
             try:
                 last_diag = dict(getattr(sres, "diagnostics", {}) or {})
             except Exception:
                 last_diag = None
-            print(
-                "SP result: ub=%s feasible=%s"
-                % (
-                    (f"{sres.upper_bound:.6g}" if sres.upper_bound is not None else "-"),
-                    sres.is_feasible,
-                )
-            )
+            try:
+                _ub_print = f"{sres.upper_bound:.6g}" if sres.upper_bound is not None else "-"
+            except Exception:
+                _ub_print = "-"
+            print(f"SP result: ub={_ub_print} feasible={sres.is_feasible}")
             # Suppress repetitive demand printouts; diagnostics still available at the end
             # Add cut(s) if provided (optimality or feasibility) unless using lazy cuts
             added = 0
@@ -352,23 +356,98 @@ class BendersSolver:
                     else:
                         stall_ctr += 1
                     prev_gap = gap
-                    if stall_ctr >= stall_max:
-                        log.info(
-                            "Stopping due to stall: no gap improvement for %d iterations (gap=%.6g)",
-                            stall_ctr,
-                            gap,
-                        )
-                        print(
-                            f"\nStopped early after {it} iterations due to stall: no gap improvement for {stall_ctr} iterations."
-                        )
-                        return BendersRunResult(
-                            status=SolveStatus.FEASIBLE,
-                            iterations=it,
-                            best_lower_bound=best_lb,
-                            best_upper_bound=best_ub,
-                        )
+                if stall_ctr >= stall_max:
+                    log.info(
+                        "Stopping due to stall: no gap improvement for %d iterations (gap=%.6g)",
+                        stall_ctr,
+                        gap,
+                    )
+                    print(
+                        f"\nStopped early after {it} iterations due to stall: no gap improvement for {stall_ctr} iterations."
+                    )
+                    # Print best-known incumbent details and formatted solution
+                    try:
+                        elapsed = time.time() - t0
+                        print(f"Total solve time: {elapsed:.3f} seconds")
+                        if best_lb is not None and best_ub is not None:
+                            _gap = abs(best_ub - best_lb)
+                            _rel = _gap / max(1.0, abs(best_ub))
+                            print(
+                                f"Best bounds: LB={best_lb:.6g} UB={best_ub:.6g} gap={_gap:.6g} rel={_rel:.3g}"
+                            )
+                        fmt = getattr(self.master, "format_solution", None)
+                        if callable(fmt):
+                            print("\nBest Master Solution:")
+                            print(fmt())
+                        # Optional diagnostics from last evaluated subproblem (if available)
+                        try:
+                            if last_diag:
+                                T = int(last_diag.get("T")) if "T" in last_diag else None
+                                R_out = last_diag.get("R_out")
+                                R_ret = last_diag.get("R_ret")
+                                pax_out = last_diag.get("pax_out_by_tau")
+                                pax_ret = last_diag.get("pax_ret_by_tau")
+                                if isinstance(pax_out, list) and isinstance(pax_ret, list):
+                                    n = len(pax_out)
+                                    if T is None:
+                                        T = n
+                                    header = "       " + " ".join(f"{t:>3d}" for t in range(T))
+                                    def fmt_row_floats(vals: list[float]) -> str:
+                                        return " ".join(f"{float(v):>3.0f}" for v in (vals + [0.0] * T)[:T])
+                                    if isinstance(R_out, list) and isinstance(R_ret, list):
+                                        print("\nDemand per slot (OUT/RET):")
+                                        print(header)
+                                        print(f"  OUT: {fmt_row_floats(R_out)}")
+                                        print(f"  RET: {fmt_row_floats(R_ret)}")
+                                    try:
+                                        m = getattr(self.master, "m", None)
+                                        if m is not None:
+                                            Q = list(m.Q)
+                                            served_qt = [[0.0 for _ in range(T)] for _ in Q]
+                                            for tau in range(T):
+                                                out_qs = [q for q in Q if float(m.yOUT[q, tau].value or 0.0) >= 0.5]
+                                                ret_qs = [q for q in Q if float(m.yRET[q, tau].value or 0.0) >= 0.5]
+                                                k_out = len(out_qs)
+                                                k_ret = len(ret_qs)
+                                                share_out = (float(pax_out[tau]) / k_out) if k_out > 0 else 0.0
+                                                share_ret = (float(pax_ret[tau]) / k_ret) if k_ret > 0 else 0.0
+                                                for q in out_qs:
+                                                    served_qt[q][tau] += share_out
+                                                for q in ret_qs:
+                                                    served_qt[q][tau] += share_ret
+                                            print("\nPax per shuttle and slot (total):")
+                                            print(header)
+                                            for q in Q:
+                                                print(f"  q={q}: {fmt_row_floats(served_qt[q])}")
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    return BendersRunResult(
+                        status=SolveStatus.FEASIBLE,
+                        iterations=it,
+                        best_lower_bound=best_lb,
+                        best_upper_bound=best_ub,
+                    )
 
         log.warning("Max iterations reached: %d", max_it)
+        # Print incumbent solution if available at max-iterations stop
+        try:
+            elapsed = time.time() - t0
+            print(f"\nMax iterations reached: {max_it}")
+            print(f"Total solve time: {elapsed:.3f} seconds")
+            if best_lb is not None and best_ub is not None:
+                gap = abs(best_ub - best_lb)
+                rel_gap = gap / max(1.0, abs(best_ub))
+                print(f"Best bounds: LB={best_lb:.6g} UB={best_ub:.6g} gap={gap:.6g} rel={rel_gap:.3g}")
+            fmt = getattr(self.master, "format_solution", None)
+            if callable(fmt):
+                print("\nBest Master Solution:")
+                print(fmt())
+        except Exception:
+            pass
         return BendersRunResult(
             status=SolveStatus.UNKNOWN,
             iterations=max_it,

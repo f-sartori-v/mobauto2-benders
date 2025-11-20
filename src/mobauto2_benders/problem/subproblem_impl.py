@@ -105,8 +105,7 @@ class ProblemSubproblem(Subproblem):
             if isinstance(container, list) and container and isinstance(container[0], dict):
                 import math as _math
                 def _slot_idx_from_minutes(tmin: float) -> int:
-                    # Map continuous minutes to slot index via floor: [0,res) -> 0, [res,2res) -> 1, ...
-                    # Ensures arrivals in slot t are only eligible for departures at tau >= t+1.
+                    # Map continuous minutes to slot index via floor: [0,res)->0, [res,2res)->1, ...
                     res = max(1, slot_res)
                     return max(0, int(_math.floor(float(tmin) / res)))
                 for r in container:
@@ -117,7 +116,7 @@ class ProblemSubproblem(Subproblem):
                         continue
                     if tmin < 0:
                         continue
-                    # Map minutes to slot index using ceil scheme: (1..res)->0, (res+1..2res)->1, ...
+                    # Floor-based slot mapping
                     t = _slot_idx_from_minutes(tmin)
                     if not (0 <= t < Tlen):
                         continue
@@ -417,9 +416,9 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
     W = P.Wmax_slots
 
     # Define valid arcs with causality and max-wait: (t + 1) <= tau <= min(T-1, t+W)
-    # Interpretation: demand aggregated in slot t (arrivals during [t*res, (t+1)*res)) can be served
-    # by the next slot's departure at the earliest (tau = t+1). Same-slot service (tau = t) is disallowed
-    # to avoid serving passengers who arrive after the departure at the beginning of slot t.
+    # Interpretation: demand aggregated in slot t (arrivals during [t*res, (t+1)*res))
+    # can be served by the next slot's departure at the earliest (tau = t+1).
+    # Same-slot service (tau = t) is disallowed to avoid serving passengers after the slot's departure.
     Arcs_list = [(t, tau) for t in Tset for tau in Tset if (t + 1) <= tau <= min(P.T - 1, t + W)]
     m.Arcs = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
 
@@ -466,6 +465,8 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
         return sum(m.x_RET[t, tau, k] for tau in taus for k in range(int(P.K_ret[tau]) if tau < len(P.K_ret) else 0) if (t, tau, k) in m.ArcsRet) + m.u_RET[t] == R_ret[t]
 
     m.D_ret = pyo.Constraint(Tset, rule=cons_dem_RET)
+
+    # No same-slot or last-slot caps in the original model
 
     # Per-layer capacities: each vehicle layer is one shuttle => up to S seats
     def cap_out_layer(m, tau, k):

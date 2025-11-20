@@ -1,5 +1,5 @@
 run:
-  max_iterations: 1000
+  max_iterations: 100
   tolerance: 0.001
   time_limit_s: 3600
   # log_level controls the verbosity of Python's logging output.
@@ -29,7 +29,7 @@ master:
     # T_minutes: total horizon length in minutes (e.g., 600)
     T_minutes: 900
     # slot_resolution: minutes per slot (e.g., 5 -> discrete time grid every 5 minutes)
-    slot_resolution: 30
+    slot_resolution: 10
     # trip_duration_minutes: physical trip duration in minutes. Internally converted to slots as ceil(trip_duration_minutes / slot_resolution).
     trip_duration_minutes: 30
     # Emax: battery capacity (energy units)
@@ -40,11 +40,11 @@ master:
     L: 30
     # start_cost_epsilon: tiny penalty on starting trips to discourage gratuitous starts
     #   Applied to sum_q,t (yOUT[q,t] + yRET[q,t]) in the master objective.
-    start_cost_epsilon: 0.1
+    start_cost_epsilon: 0.0
     # concurrency_penalty: optional small penalty per extra concurrent departure beyond 1 per slot
     #   Applied to max(0, Yout[t]-1) + max(0, Yret[t]-1) and helps break ties when two trips
     #   at the same time/direction could be consolidated into one.
-    # concurrency_penalty: 0.0
+    concurrency_penalty: 0.0
     # Optional: enable FIFO symmetry-breaking across vehicles (off by default)
     use_fifo_symmetry: true
     # delta_chg: maximum charge added per slot when c[q,t] = 1
