@@ -311,12 +311,41 @@ class ProblemSubproblem(Subproblem):
                 R_out = (R_out + [0.0] * T)[:T]
                 R_ret = (R_ret + [0.0] * T)[:T]
 
-                sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out, K_ret=K_ret, fill_eps=fill_eps, solver_options=solver_options)
+                # If using dual slopes, force at least one layer per time to create capacity constraints
+                use_dual = bool(params.get("use_dual_slopes", False))
+                K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
+                K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret
+                sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_lp, K_ret=K_ret_lp, fill_eps=fill_eps, solver_options=solver_options)
                 duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
                 ub_vals.append(ub_val)
 
-                # Finite-difference coefficients and constant per scenario
-                c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
+                # Build marginal slopes either from duals (fast) or finite differences (fallback)
+                if use_dual:
+                    pi_out = dict(duals.get("pi_OUT", {}))
+                    pi_ret = dict(duals.get("pi_RET", {}))
+                    dm_out = {int(t): -float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
+                    dm_ret = {int(t): -float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
+                    # Expand to per-(q,t)
+                    c_out_map: Dict[tuple[int, int], float] = {}
+                    c_ret_map: Dict[tuple[int, int], float] = {}
+                    for name in candidate.keys():
+                        if not isinstance(name, str):
+                            continue
+                        if name.startswith("yOUT["):
+                            inside = name[name.find("[") + 1 : name.find("]")]
+                            q_str, tau_str = inside.split(",")
+                            q = int(q_str.strip()); tau = int(tau_str.strip())
+                            if 0 <= tau < T:
+                                c_out_map[(q, tau)] = dm_out.get(tau, 0.0)
+                        elif name.startswith("yRET["):
+                            inside = name[name.find("[") + 1 : name.find("]")]
+                            q_str, tau_str = inside.split(",")
+                            q = int(q_str.strip()); tau = int(tau_str.strip())
+                            if 0 <= tau < T:
+                                c_ret_map[(q, tau)] = dm_ret.get(tau, 0.0)
+                else:
+                    # Finite-difference coefficients and constant per scenario
+                    c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
                 sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
                 sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
                 const = float(ub_val)
@@ -366,11 +395,38 @@ class ProblemSubproblem(Subproblem):
             if len(R_ret) != T:
                 R_ret = (R_ret + [0.0] * T)[:T]
 
-            sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out, K_ret=K_ret, fill_eps=fill_eps, solver_options=solver_options)
+            # If using dual slopes, ensure at least one layer to create capacity constraints
+            use_dual = bool(params.get("use_dual_slopes", False))
+            K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
+            K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret
+            sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_lp, K_ret=K_ret_lp, fill_eps=fill_eps, solver_options=solver_options)
             duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
 
-            # Build coefficients via finite differences around current capacity
-            c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
+            # Build coefficients via duals (fast) or finite differences (fallback)
+            if use_dual:
+                pi_out = dict(duals.get("pi_OUT", {}))
+                pi_ret = dict(duals.get("pi_RET", {}))
+                dm_out = {int(t): -float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
+                dm_ret = {int(t): -float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
+                c_out_map: Dict[tuple[int, int], float] = {}
+                c_ret_map: Dict[tuple[int, int], float] = {}
+                for name in candidate.keys():
+                    if not isinstance(name, str):
+                        continue
+                    if name.startswith("yOUT["):
+                        inside = name[name.find("[") + 1 : name.find("]")]
+                        q_str, tau_str = inside.split(",")
+                        q = int(q_str.strip()); tau = int(tau_str.strip())
+                        if 0 <= tau < T:
+                            c_out_map[(q, tau)] = dm_out.get(tau, 0.0)
+                    elif name.startswith("yRET["):
+                        inside = name[name.find("[") + 1 : name.find("]")]
+                        q_str, tau_str = inside.split(",")
+                        q = int(q_str.strip()); tau = int(tau_str.strip())
+                        if 0 <= tau < T:
+                            c_ret_map[(q, tau)] = dm_ret.get(tau, 0.0)
+            else:
+                c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
 
             # Compute sum_y per tau (number of vehicles starting at tau) from current capacity
             sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]

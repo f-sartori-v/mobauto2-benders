@@ -26,6 +26,9 @@ class ProblemMaster(MasterProblem):
         # Fingerprints of cuts to avoid duplicates
         self._cut_fps: set[tuple] = set()
         self._lazy_installed: bool = False
+        # Optional: warm start values for yOUT/yRET at next solve
+        # Keys: ("yOUT"|"yRET", q:int, t:int) -> float(0/1)
+        self._warm_start: dict[tuple[str, int, int], float] | None = None
 
     def _p(self, key: str, default: Any | None = None) -> Any:
         if self.params is None:
@@ -251,6 +254,11 @@ class ProblemMaster(MasterProblem):
             for k, v in opts.items():
                 self._solver.options[k] = v
 
+    # Allow external code (CLI) to provide a warm-start schedule at the new resolution
+    # Starts should be a dict with keys ("yOUT"|"yRET", q, t) and values in {0,1}
+    def set_warm_start(self, starts: dict[tuple[str, int, int], float] | None) -> None:
+        self._warm_start = dict(starts) if starts else None
+
     def _get_solver(self) -> pyo.SolverFactory:
         assert self.m is not None
         return self._solver
@@ -458,11 +466,141 @@ class ProblemMaster(MasterProblem):
         m = self.m
         solver = self._get_solver()
         tee_flag = bool(self._p("solver_tee", self._p("mp_solve_tee", False)))
+        # Apply warm start if provided: set initial y values and aggregated Yout/Yret
+        use_ws = False
+        if self._warm_start:
+            try:
+                # Set binary starts only where provided; others left unset (partial MIP start)
+                yout_sums: dict[int, float] = {}
+                yret_sums: dict[int, float] = {}
+                # Keep per-(q,t) copies for derived warm-start values
+                _yout_qt: dict[tuple[int, int], float] = {}
+                _yret_qt: dict[tuple[int, int], float] = {}
+                for (typ, q, t), v in self._warm_start.items():
+                    vv = float(v)
+                    if typ == "yOUT" and (q in m.Q) and (t in m.T):
+                        try:
+                            m.yOUT[q, t].value = vv
+                            yout_sums[t] = yout_sums.get(t, 0.0) + vv
+                            _yout_qt[(int(q), int(t))] = vv
+                        except Exception:
+                            pass
+                    elif typ == "yRET" and (q in m.Q) and (t in m.T):
+                        try:
+                            m.yRET[q, t].value = vv
+                            yret_sums[t] = yret_sums.get(t, 0.0) + vv
+                            _yret_qt[(int(q), int(t))] = vv
+                        except Exception:
+                            pass
+                # Initialize aggregations for completeness (not required, but helpful for starts)
+                for t in m.T:
+                    try:
+                        if hasattr(m, "Yout"):
+                            m.Yout[t].value = float(yout_sums.get(int(t), 0.0))
+                        if hasattr(m, "Yret"):
+                            m.Yret[t].value = float(yret_sums.get(int(t), 0.0))
+                        if hasattr(m, "Z"):
+                            m.Z[t].value = float(yout_sums.get(int(t), 0.0) + yret_sums.get(int(t), 0.0))
+                        # Excess variables if present
+                        if hasattr(m, "eOut"):
+                            m.eOut[t].value = max(0.0, float(yout_sums.get(int(t), 0.0)) - 1.0)
+                        if hasattr(m, "eRet"):
+                            m.eRet[t].value = max(0.0, float(yret_sums.get(int(t), 0.0)) - 1.0)
+                    except Exception:
+                        pass
+                # Derive occupancy and inTrip consistent with y if available; this can help MIP start acceptance
+                try:
+                    import math as _math
+                    slot_res = int(self._p("slot_resolution", 1))
+                    trip_dur_min = self._p("trip_duration_minutes", self._p("trip_duration"))
+                    if trip_dur_min is not None:
+                        trip_slots = int(_math.ceil(float(trip_dur_min) / max(1, slot_res)))
+                    else:
+                        trip_slots = int(self._p("trip_slots", 0))
+                except Exception:
+                    trip_slots = 0
+                if trip_slots > 0:
+                    for q in m.Q:
+                        # Initial occupancy
+                        try:
+                            m.atL[q, 0].value = 1.0
+                            m.atM[q, 0].value = 0.0
+                            m.inTrip[q, 0].value = 0.0
+                        except Exception:
+                            pass
+                        # inTrip[q,t] per definition: sum of starts in previous (trip_slots-1) slots
+                        for t in m.T:
+                            t = int(t)
+                            if t == 0:
+                                continue
+                            lo = max(0, t - trip_slots + 1)
+                            hi = t - 1
+                            s = 0.0
+                            for u in range(lo, hi + 1):
+                                s += float(_yout_qt.get((int(q), int(u)), 0.0))
+                                s += float(_yret_qt.get((int(q), int(u)), 0.0))
+                            try:
+                                m.inTrip[q, t].value = s
+                            except Exception:
+                                pass
+                        # Occupancy recursions
+                        for t in m.T:
+                            t = int(t)
+                            if t == 0:
+                                continue
+                            arr_ret = float(_yret_qt.get((int(q), t - trip_slots), 0.0)) if (t - trip_slots) >= 0 else 0.0
+                            arr_out = float(_yout_qt.get((int(q), t - trip_slots), 0.0)) if (t - trip_slots) >= 0 else 0.0
+                            try:
+                                prevL = float(m.atL[q, t - 1].value or 0.0)
+                                prevM = float(m.atM[q, t - 1].value or 0.0)
+                            except Exception:
+                                prevL = prevM = 0.0
+                            try:
+                                m.atL[q, t].value = prevL - float(_yout_qt.get((int(q), t - 1), 0.0)) + arr_ret
+                                m.atM[q, t].value = prevM - float(_yret_qt.get((int(q), t - 1), 0.0)) + arr_out
+                            except Exception:
+                                pass
+                use_ws = True
+            except Exception:
+                use_ws = False
+            finally:
+                # Clear after applying to avoid reusing stale starts in later solves
+                self._warm_start = None
         if getattr(self, "_is_persistent", False):
-            # Persistent: do not pass model
-            res = solver.solve(tee=tee_flag)
+            # Persistent: do not pass model; allow warmstart
+            # If we built a binary warm start, also push an explicit CPLEX MIP start
+            if use_ws:
+                try:
+                    cpx = getattr(solver, "_solver_model", None)
+                    if (cpx is not None) and (cplex is not None):
+                        inds: list[int] = []
+                        vals: list[float] = []
+                        # yOUT / yRET indices by name
+                        for (q, t), vv in list(_yout_qt.items()) + []:
+                            try:
+                                idx = cpx.variables.get_indices(f"yOUT[{int(q)},{int(t)}]")
+                                inds.append(idx)
+                                vals.append(float(vv))
+                            except Exception:
+                                pass
+                        for (q, t), vv in list(_yret_qt.items()) + []:
+                            try:
+                                idx = cpx.variables.get_indices(f"yRET[{int(q)},{int(t)}]")
+                                inds.append(idx)
+                                vals.append(float(vv))
+                            except Exception:
+                                pass
+                        if inds:
+                            try:
+                                spair = cplex.SparsePair(ind=inds, val=vals)
+                                cpx.MIP_starts.add(spair, cpx.MIP_starts.effort_level.auto, "warmstart")
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            res = solver.solve(tee=tee_flag, warmstart=use_ws)
         else:
-            res = solver.solve(m, tee=tee_flag)
+            res = solver.solve(m, tee=tee_flag, warmstart=use_ws)
 
         term = getattr(res.solver, "termination_condition", None)
         st = getattr(res.solver, "status", None)

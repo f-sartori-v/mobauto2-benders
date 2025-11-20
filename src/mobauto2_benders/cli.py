@@ -9,10 +9,12 @@ if __package__ in (None, ""):
     if str(SRC_ROOT) not in sys.path:
         sys.path.insert(0, str(SRC_ROOT))
     from mobauto2_benders.config import load_config  # type: ignore
+    from mobauto2_benders.config import _resolve_param_expressions as _eval_param_exprs  # type: ignore
     from mobauto2_benders.logging_config import setup_logging  # type: ignore
     from mobauto2_benders.benders.solver import BendersSolver  # type: ignore
 else:
     from .config import load_config
+    from .config import _resolve_param_expressions as _eval_param_exprs
     from .logging_config import setup_logging
     from .benders.solver import BendersSolver
 
@@ -58,7 +60,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd")
     sub.required = False
 
-    sub.add_parser("run", help="Run the Benders solver loop")
+    run_p = sub.add_parser("run", help="Run the Benders solver loop")
+    run_p.add_argument(
+        "--multi-res",
+        dest="multi_res",
+        type=str,
+        default=None,
+        help="Comma-separated slot resolutions to run coarse-to-fine, e.g. '30,15,5,1'",
+    )
     sub.add_parser("validate", help="Validate config and problem stubs")
     sub.add_parser("info", help="Show current configuration")
     return p
@@ -74,63 +83,152 @@ def cmd_run(args) -> int:
     # Propagate slot_resolution from master to subproblem if not explicitly set
     if "slot_resolution" not in sp and "slot_resolution" in mp:
         sp["slot_resolution"] = mp["slot_resolution"]
+    def _print_cfg(mp_local: dict, sp_local: dict) -> None:
+        print("Run configuration:")
+        print(
+            f"  run: iterations={cfg.run.max_iterations} tol={cfg.run.tolerance} "
+            f"time_limit_s={cfg.run.time_limit_s} seed={cfg.run.seed}"
+        )
+        T_minutes = mp_local.get("T_minutes")
+        slot_res = mp_local.get("slot_resolution", 1)
+        trip_dur_min = mp_local.get("trip_duration_minutes", mp_local.get("trip_duration"))
+        if T_minutes is not None:
+            try:
+                T_slots = int(int(T_minutes) // int(slot_res or 1))
+            except Exception:
+                T_slots = mp_local.get("T", "-")
+        else:
+            T_slots = mp_local.get("T", "-")
+        trip_slots = mp_local.get("trip_slots")
+        print(
+            "  master: solver=%s Q=%s T_minutes=%s slot_res=%s (slots=%s) trip_dur_min=%s Emax=%s L=%s eps=%s conc_pen=%s delta_chg=%s" % (
+                mp_local.get("solver", "-"), mp_local.get("Q", "-"), T_minutes if T_minutes is not None else mp_local.get("T", "-"), slot_res, T_slots, trip_dur_min if trip_dur_min is not None else trip_slots, mp_local.get("Emax", "-"), mp_local.get("L", "-"), mp_local.get("start_cost_epsilon", "-"), mp_local.get("concurrency_penalty", "-"), mp_local.get("delta_chg", "-"),
+            )
+        )
+        try:
+            _T = int(T_slots) if isinstance(T_slots, int) else int(mp_local.get("T"))
+            import math
+            if trip_dur_min is not None:
+                _res = int(slot_res or 1)
+                _ts = int(math.ceil(float(trip_dur_min) / max(1, _res)))
+            else:
+                _ts = int(mp_local.get("trip_slots"))
+            if _ts >= _T:
+                print("  NOTE: trip duration (in slots) >= horizon; starts limited to t=0 and may prevent serving demand.")
+        except Exception:
+            pass
+        print(
+            "  subproblem: solver=%s S=%s Wmax=%s p=%s fill_eps=%s (slot_res=%s)" % (
+                sp_local.get("lp_solver", "-"), sp_local.get("S", "-"), sp_local.get("Wmax_minutes", sp_local.get("Wmax_slots", sp_local.get("Wmax", "-"))), sp_local.get("p", "-"), sp_local.get("fill_first_epsilon", "-"), sp_local.get("slot_resolution", mp_local.get("slot_resolution", "-")),
+            )
+        )
+        if "demand_file" in sp_local:
+            print(f"  demand_file: {sp_local.get('demand_file')}")
+        if "scenario_files" in sp_local:
+            print(f"  scenario_files: {sp_local.get('scenario_files')}")
+        if "R_out" in sp_local:
+            print(f"  R_out: {sp_local.get('R_out')} (inline)")
+        if "R_ret" in sp_local:
+            print(f"  R_ret: {sp_local.get('R_ret')} (inline)")
+
+    def _map_candidate_to_warm_start(cand: dict[str, float], res_old: int, res_new: int, mp_local: dict) -> dict[tuple[str, int, int], float]:
+        # Compute T_new and trip_slots at new resolution to avoid proposing invalid starts
+        import math
+        T_minutes = mp_local.get("T_minutes")
+        if T_minutes is not None:
+            T_new = int(int(T_minutes) // max(1, int(res_new)))
+        else:
+            T_new = int(mp_local.get("T", 0))
+        trip_min = mp_local.get("trip_duration_minutes", mp_local.get("trip_duration"))
+        if trip_min is not None:
+            trip_slots_new = int(math.ceil(float(trip_min) / max(1, int(res_new))))
+        else:
+            trip_slots_new = int(mp_local.get("trip_slots", 0))
+        def _map_t(t_old: int) -> int:
+            # Map by minutes, rounding to nearest slot at new resolution
+            minutes = int(t_old) * int(res_old)
+            return int(round(minutes / float(max(1, int(res_new)))))
+        starts: dict[tuple[str, int, int], float] = {}
+        for k, v in (cand or {}).items():
+            if not isinstance(k, str) or float(v or 0.0) < 0.5:
+                continue
+            if k.startswith("yOUT[") or k.startswith("yRET["):
+                inside = k[k.find("[") + 1 : k.find("]")]
+                q_str, t_str = inside.split(",")
+                try:
+                    q = int(q_str.strip())
+                    t_old = int(t_str.strip())
+                except Exception:
+                    continue
+                t_new = _map_t(t_old)
+                if not (0 <= t_new < T_new):
+                    continue
+                # Respect last-start feasibility windows at new resolution
+                if t_new > (T_new - trip_slots_new - 1):
+                    continue
+                typ = "yOUT" if k.startswith("yOUT[") else "yRET"
+                starts[(typ, q, t_new)] = 1.0
+        return starts
+
+    # Multi-resolution run (coarse -> fine)
+    if getattr(args, "multi_res", None):
+        seq = [int(x.strip()) for x in str(args.multi_res).split(",") if x.strip()]
+        if not seq:
+            print("No valid resolutions given to --multi-res; exiting.")
+            return 2
+        prev_cand: dict[str, float] | None = None
+        prev_res: int | None = None
+        for i, res in enumerate(seq, start=1):
+            # Capture previous resolution before overriding
+            try:
+                prev_slot_res = int(mp.get("slot_resolution", res))
+            except Exception:
+                prev_slot_res = int(res)
+            mp["slot_resolution"] = int(res)
+            # Ensure subproblem sees the same resolution
+            sp["slot_resolution"] = int(res)
+            # Re-evaluate arithmetic expressions that depend on slot_resolution (e.g., delta_chg)
+            mp = _eval_param_exprs(dict(mp))
+            sp = _eval_param_exprs(dict(sp))
+            # If delta_chg was already numeric (from initial config evaluation), scale it with resolution
+            try:
+                if "delta_chg" in mp:
+                    mp["delta_chg"] = float(mp["delta_chg"]) * (float(res) / max(1.0, float(prev_slot_res)))
+            except Exception:
+                pass
+            master = ProblemMaster(mp)
+            sub = ProblemSubproblem(sp)
+            solver = BendersSolver(master, sub, cfg)
+            print(f"\n=== Multi-res stage {i}/{len(seq)}: slot_resolution={res} ===")
+            _print_cfg(mp, sp)
+            if prev_cand is not None and prev_res is not None:
+                starts = _map_candidate_to_warm_start(prev_cand, prev_res, int(res), mp)
+                if starts:
+                    try:
+                        master.set_warm_start(starts)
+                        print(f"Applied warm start with {len(starts)} start(s).")
+                    except Exception:
+                        pass
+            result = solver.run()
+            print(
+                f"Stage {i} result: status={result.status} iters={result.iterations} "
+                f"LB={result.best_lower_bound} UB={result.best_upper_bound}"
+            )
+            # Capture candidate from the solved master for next stage warm start
+            try:
+                prev_cand = getattr(master, "_collect_candidate")()
+                prev_res = int(res)
+            except Exception:
+                prev_cand = None
+                prev_res = None
+        return 0
+
+    # Single-resolution run (default)
     master = ProblemMaster(mp)
     sub = ProblemSubproblem(sp)
-
     solver = BendersSolver(master, sub, cfg)
-    # Friendly header with initial parameters
-    print("Run configuration:")
-    print(
-        f"  run: iterations={cfg.run.max_iterations} tol={cfg.run.tolerance} "
-        f"time_limit_s={cfg.run.time_limit_s} seed={cfg.run.seed}"
-    )
-    mp = mp or {}
-    sp = sp or {}
-    # Derive slots from minutes + resolution if provided
-    T_minutes = mp.get("T_minutes")
-    slot_res = mp.get("slot_resolution", 1)
-    trip_dur_min = mp.get("trip_duration_minutes", mp.get("trip_duration"))
-    if T_minutes is not None:
-        try:
-            T_slots = int(int(T_minutes) // int(slot_res or 1))
-        except Exception:
-            T_slots = mp.get("T", "-")
-    else:
-        T_slots = mp.get("T", "-")
-    trip_slots = mp.get("trip_slots")
-    print(
-        "  master: solver=%s Q=%s T_minutes=%s slot_res=%s (slots=%s) trip_dur_min=%s Emax=%s L=%s eps=%s conc_pen=%s delta_chg=%s" % (
-            mp.get("solver", "-"), mp.get("Q", "-"), T_minutes if T_minutes is not None else mp.get("T", "-"), slot_res, T_slots, trip_dur_min if trip_dur_min is not None else trip_slots, mp.get("Emax", "-"), mp.get("L", "-"), mp.get("start_cost_epsilon", "-"), mp.get("concurrency_penalty", "-"), mp.get("delta_chg", "-"),
-        )
-    )
-    # Inform when trip duration exceeds horizon after discretization
-    try:
-        _T = int(T_slots) if isinstance(T_slots, int) else int(mp.get("T"))
-        import math
-        if trip_dur_min is not None:
-            _res = int(slot_res or 1)
-            _ts = int(math.ceil(float(trip_dur_min) / max(1, _res)))
-        else:
-            _ts = int(mp.get("trip_slots"))
-        if _ts >= _T:
-            print("  NOTE: trip duration (in slots) >= horizon; starts limited to t=0 and may prevent serving demand.")
-    except Exception:
-        pass
-    print(
-        "  subproblem: solver=%s S=%s Wmax=%s p=%s fill_eps=%s (slot_res=%s)" % (
-            sp.get("lp_solver", "-"), sp.get("S", "-"), sp.get("Wmax_minutes", sp.get("Wmax_slots", sp.get("Wmax", "-"))), sp.get("p", "-"), sp.get("fill_first_epsilon", "-"), sp.get("slot_resolution", mp.get("slot_resolution", "-")),
-        )
-    )
-    if "demand_file" in sp:
-        print(f"  demand_file: {sp.get('demand_file')}")
-    if "scenario_files" in sp:
-        print(f"  scenario_files: {sp.get('scenario_files')}")
-    if "R_out" in sp:
-        print(f"  R_out: {sp.get('R_out')} (inline)")
-    if "R_ret" in sp:
-        print(f"  R_ret: {sp.get('R_ret')} (inline)")
+    _print_cfg(mp, sp)
     result = solver.run()
-    # Final summary
     print(
         f"\nResult: status={result.status} iterations={result.iterations} "
         f"best_lb={result.best_lower_bound} best_ub={result.best_upper_bound}"

@@ -1,7 +1,7 @@
 run:
   max_iterations: 100
   tolerance: 0.001
-  time_limit_s: 3600
+  time_limit_s: 180
   # log_level controls the verbosity of Python's logging output.
   # Options (most verbose to least): DEBUG, INFO, WARNING, ERROR, CRITICAL
   # - DEBUG: detailed internal iteration logs
@@ -21,15 +21,19 @@ master:
   params:
     # MILP solver used by the master (Pyomo name)
     solver: cplex_persistent
+    # Install lazy cuts via CPLEX callback (reduces full MP re-solves)
+    # Disabled to revert to the stable explicit-cut path
+    use_lazy_cuts: false
     # Print the underlying solver's log during each MP solve
     solver_tee: false
+    # (Optional) CPLEX tuning can go here; keeping defaults for stability
     # Q: number of vehicles modeled in the master
     Q: 2
     # Time discretization is defined in minutes; slots are implicit via slot_resolution.
     # T_minutes: total horizon length in minutes (e.g., 600)
     T_minutes: 900
     # slot_resolution: minutes per slot (e.g., 5 -> discrete time grid every 5 minutes)
-    slot_resolution: 10
+    slot_resolution: 15
     # trip_duration_minutes: physical trip duration in minutes. Internally converted to slots as ceil(trip_duration_minutes / slot_resolution).
     trip_duration_minutes: 30
     # Emax: battery capacity (energy units)
@@ -46,13 +50,13 @@ master:
     #   at the same time/direction could be consolidated into one.
     concurrency_penalty: 0.0
     # Optional: enable FIFO symmetry-breaking across vehicles (off by default)
-    use_fifo_symmetry: true
+    use_fifo_symmetry: false
     # delta_chg: maximum charge added per slot when c[q,t] = 1
     delta_chg: 30 / (30 / slot_resolution)
     # Stronger Benders cuts (set to false to use per-(q,t) coefficients)
     aggregate_cuts_by_tau: true
     # Drop tiny cut coefficients (helps numerics without changing shape much)
-    cut_coeff_threshold: 0.0
+    cut_coeff_threshold: 0.001
     # binit: initial battery levels per vehicle (length Q)
     binit: [150.0, 150.0]
 
@@ -61,6 +65,9 @@ subproblem:
   params:
     # LP solver used by the subproblem (Pyomo name)
     lp_solver: cplex_direct
+    # Use finite-difference slopes (stable baseline)
+    use_dual_slopes: false
+    # (Optional) LP tuning can go here; keeping defaults for stability
     # S: capacity units contributed by one vehicle starting at time tau.
     #   Master yOUT[q,tau] adds S to C_out[tau] (similarly for yRET/C_ret).
     S: 15
