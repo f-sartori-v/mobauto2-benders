@@ -16,17 +16,18 @@ from ..benders.types import Candidate, Cut, CutType, SubproblemResult
 
 
 class ProblemSubproblem(Subproblem):
-    """LP assignment/waiting subproblem generating optimality cuts.
+    """LP assignment/waiting subproblem generating classical (direct) Benders cuts.
 
-    Builds a time-expanded assignment LP for both directions (OUT, RET) with
-    waiting costs and unmet-demand penalties. Extracts dual multipliers to
-    form the Benders optimality cut for a minimization master:
+    We build a time-expanded assignment LP for both directions (OUT, RET) with
+    waiting costs and unmet-demand penalties. From an optimal dual solution we
+    form the standard Benders optimality cut for a minimization master:
 
-        theta >= const - S * sum_{q,tau} [pi_OUT[tau]*yOUT[q,tau] + pi_RET[tau]*yRET[q,tau]]
+        theta >= sum_t [alpha_OUT[t] * R_out[t] + alpha_RET[t] * R_ret[t]]
+                 + S * sum_{q,tau} [pi_OUT[tau] * yOUT[q,tau] + pi_RET[tau] * yRET[q,tau]]
 
-    where const = sum_t alpha_OUT[t]*R_out[t] + sum_t alpha_RET[t]*R_ret[t], and
-    pi_* are duals on capacity constraints (>= 0). Increasing capacity (y) reduces
-    the subproblem cost, hence the negative sign.
+    where alpha_* are duals of demand-conservation equalities (free) and
+    pi_* are duals (>= 0) of departure-capacity constraints. This is the
+    direct dual-based cut shape consistent with the thesis' basic formulation.
     """
 
     def __init__(self, params: dict[str, Any] | None = None):
@@ -319,13 +320,13 @@ class ProblemSubproblem(Subproblem):
                 duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
                 ub_vals.append(ub_val)
 
-                # Build marginal slopes either from duals (fast) or finite differences (fallback)
+                # Build dual-based coefficients (classic Benders): beta = +S * pi
                 if use_dual:
                     pi_out = dict(duals.get("pi_OUT", {}))
                     pi_ret = dict(duals.get("pi_RET", {}))
-                    dm_out = {int(t): -float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
-                    dm_ret = {int(t): -float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
-                    # Expand to per-(q,t)
+                    beta_out = {int(t): float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
+                    beta_ret = {int(t): float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
+                    # Expand to per-(q,t) maps expected by the master (all vehicles at tau share the same coeff)
                     c_out_map: Dict[tuple[int, int], float] = {}
                     c_ret_map: Dict[tuple[int, int], float] = {}
                     for name in candidate.keys():
@@ -336,21 +337,21 @@ class ProblemSubproblem(Subproblem):
                             q_str, tau_str = inside.split(",")
                             q = int(q_str.strip()); tau = int(tau_str.strip())
                             if 0 <= tau < T:
-                                c_out_map[(q, tau)] = dm_out.get(tau, 0.0)
+                                c_out_map[(q, tau)] = beta_out.get(tau, 0.0)
                         elif name.startswith("yRET["):
                             inside = name[name.find("[") + 1 : name.find("]")]
                             q_str, tau_str = inside.split(",")
                             q = int(q_str.strip()); tau = int(tau_str.strip())
                             if 0 <= tau < T:
-                                c_ret_map[(q, tau)] = dm_ret.get(tau, 0.0)
+                                c_ret_map[(q, tau)] = beta_ret.get(tau, 0.0)
                 else:
                     # Finite-difference coefficients and constant per scenario
                     c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
-                sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
-                sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
-                const = float(ub_val)
-                const -= sum(dm_out[tau] * sum_y_out[tau] for tau in range(T))
-                const -= sum(dm_ret[tau] * sum_y_ret[tau] for tau in range(T))
+                # Classic constant term from dual objective (alpha dot R)
+                alpha_out = dict(duals.get("alpha_OUT", {}))
+                alpha_ret = dict(duals.get("alpha_RET", {}))
+                const = float(sum(float(alpha_out.get(t, 0.0)) * float(R_out[t]) for t in range(T)))
+                const += float(sum(float(alpha_ret.get(t, 0.0)) * float(R_ret[t]) for t in range(T)))
                 consts.append(const)
                 coeffs_out_list.append(c_out_map)
                 coeffs_ret_list.append(c_ret_map)
@@ -402,12 +403,12 @@ class ProblemSubproblem(Subproblem):
             sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_lp, K_ret=K_ret_lp, fill_eps=fill_eps, solver_options=solver_options)
             duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
 
-            # Build coefficients via duals (fast) or finite differences (fallback)
+            # Build coefficients via duals (classic) or finite differences (fallback)
             if use_dual:
                 pi_out = dict(duals.get("pi_OUT", {}))
                 pi_ret = dict(duals.get("pi_RET", {}))
-                dm_out = {int(t): -float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
-                dm_ret = {int(t): -float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
+                beta_out = {int(t): float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
+                beta_ret = {int(t): float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
                 c_out_map: Dict[tuple[int, int], float] = {}
                 c_ret_map: Dict[tuple[int, int], float] = {}
                 for name in candidate.keys():
@@ -418,24 +419,21 @@ class ProblemSubproblem(Subproblem):
                         q_str, tau_str = inside.split(",")
                         q = int(q_str.strip()); tau = int(tau_str.strip())
                         if 0 <= tau < T:
-                            c_out_map[(q, tau)] = dm_out.get(tau, 0.0)
+                            c_out_map[(q, tau)] = beta_out.get(tau, 0.0)
                     elif name.startswith("yRET["):
                         inside = name[name.find("[") + 1 : name.find("]")]
                         q_str, tau_str = inside.split(",")
                         q = int(q_str.strip()); tau = int(tau_str.strip())
                         if 0 <= tau < T:
-                            c_ret_map[(q, tau)] = dm_ret.get(tau, 0.0)
+                            c_ret_map[(q, tau)] = beta_ret.get(tau, 0.0)
             else:
                 c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
 
-            # Compute sum_y per tau (number of vehicles starting at tau) from current capacity
-            sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
-            sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
-
-            # Constant so that cut passes through (y, Q(y))
-            const = float(ub_val)
-            const -= sum(dm_out[tau] * sum_y_out[tau] for tau in range(T))
-            const -= sum(dm_ret[tau] * sum_y_ret[tau] for tau in range(T))
+            # Classic constant from dual objective (alpha dot R)
+            alpha_out = dict(duals.get("alpha_OUT", {}))
+            alpha_ret = dict(duals.get("alpha_RET", {}))
+            const = float(sum(float(alpha_out.get(t, 0.0)) * float(R_out[t]) for t in range(T)))
+            const += float(sum(float(alpha_ret.get(t, 0.0)) * float(R_ret[t]) for t in range(T)))
 
             cut = Cut(name="opt_cut", cut_type=CutType.OPTIMALITY, metadata={"const": const, "coeff_yOUT": c_out_map, "coeff_yRET": c_ret_map})
             # Diagnostics: demand per slot split by direction and served pax per departure slot (OUT/RET)

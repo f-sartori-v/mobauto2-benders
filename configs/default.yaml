@@ -1,7 +1,7 @@
 run:
-  max_iterations: 100
+  max_iterations: 1000
   tolerance: 0.001
-  time_limit_s: 180
+  time_limit_s: 3600
   # log_level controls the verbosity of Python's logging output.
   # Options (most verbose to least): DEBUG, INFO, WARNING, ERROR, CRITICAL
   # - DEBUG: detailed internal iteration logs
@@ -9,12 +9,13 @@ run:
   # - WARNING/ERROR/CRITICAL: only problems
   log_level: INFO
   seed: 42
-  # Optional: stop early if gap stalls
-  # Number of iterations with insufficient gap improvement before stopping (0 disables)
-  stall_max_no_improve_iters: 10
+  # Optional: stop early if gap stalls (0 disables)
+  stall_max_no_improve_iters: 0
   # Minimum absolute and/or relative gap improvement to reset the stall counter
   stall_min_abs_improve: 1.0
   stall_min_rel_improve: 0.002
+  # Print iteration summary every N iterations
+  print_every: 10
 
 master:
   impl: pyomo
@@ -65,8 +66,8 @@ subproblem:
   params:
     # LP solver used by the subproblem (Pyomo name)
     lp_solver: cplex_direct
-    # Use finite-difference slopes (stable baseline)
-    use_dual_slopes: false
+    # Use dual-based (direct) Benders slopes from the LP dual
+    use_dual_slopes: true
     # (Optional) LP tuning can go here; keeping defaults for stability
     # S: capacity units contributed by one vehicle starting at time tau.
     #   Master yOUT[q,tau] adds S to C_out[tau] (similarly for yRET/C_ret).

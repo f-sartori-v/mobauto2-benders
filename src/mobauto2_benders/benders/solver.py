@@ -31,6 +31,13 @@ class BendersSolver:
         t0 = time.time()
         max_it = self.cfg.run.max_iterations
         tol = self.cfg.run.tolerance
+        # Print iteration summaries every N iterations
+        try:
+            print_every = int(getattr(self.cfg.run, "print_every", 10) or 10)
+        except Exception:
+            print_every = 10
+        def _do_print(it: int) -> bool:
+            return (it == 1) or (print_every > 0 and (it % print_every == 0))
         self.master.initialize()
         print("Initialized master problem.")
 
@@ -131,40 +138,43 @@ class BendersSolver:
                     best_upper_bound=best_ub,
                 )
 
-            print(f"\n=== Iteration {it} ===")
-            print("Solving Master (MP)...")
+            if _do_print(it):
+                print(f"\n=== Iteration {it} ===")
+                print("Solving Master (MP)...")
             mres = self.master.solve()
-            log.info(
-                "iter=%d master status=%s obj=%s lb=%s",
-                it,
-                mres.status,
-                f"{mres.objective:.6g}" if mres.objective is not None else None,
-                f"{mres.lower_bound:.6g}" if mres.lower_bound is not None else None,
-            )
-            print(
-                "MP result: status=%s obj=%s lb=%s"
-                % (
+            if _do_print(it):
+                log.info(
+                    "iter=%d master status=%s obj=%s lb=%s",
+                    it,
                     mres.status,
-                    (f"{mres.objective:.6g}" if mres.objective is not None else "-"),
-                    (f"{mres.lower_bound:.6g}" if mres.lower_bound is not None else "-"),
+                    f"{mres.objective:.6g}" if mres.objective is not None else None,
+                    f"{mres.lower_bound:.6g}" if mres.lower_bound is not None else None,
                 )
-            )
-
-            # Instrumentation: per-iteration summary
-            try:
-                cuts_in_model = getattr(self.master, "cuts_count", lambda: None)()
-            except Exception:
-                cuts_in_model = None
-            last_const, last_nnz = (None, None)
-            try:
-                last_const, last_nnz = getattr(self.master, "last_cut_info", lambda: (None, None))()
-            except Exception:
-                pass
-            if mres.objective is not None:
                 print(
-                    f"[MP] iter={it} cuts={cuts_in_model if cuts_in_model is not None else '-'} obj={mres.objective:.3f}"
-                    + (f" last_const={last_const:.3f} last_nnz={last_nnz}" if last_const is not None else "")
+                    "MP result: status=%s obj=%s lb=%s"
+                    % (
+                        mres.status,
+                        (f"{mres.objective:.6g}" if mres.objective is not None else "-"),
+                        (f"{mres.lower_bound:.6g}" if mres.lower_bound is not None else "-"),
+                    )
                 )
+
+            # Instrumentation: per-iteration summary (throttled)
+            if _do_print(it):
+                try:
+                    cuts_in_model = getattr(self.master, "cuts_count", lambda: None)()
+                except Exception:
+                    cuts_in_model = None
+                last_const, last_nnz = (None, None)
+                try:
+                    last_const, last_nnz = getattr(self.master, "last_cut_info", lambda: (None, None))()
+                except Exception:
+                    pass
+                if mres.objective is not None:
+                    print(
+                        f"[MP] iter={it} cuts={cuts_in_model if cuts_in_model is not None else '-'} obj={mres.objective:.3f}"
+                        + (f" last_const={last_const:.3f} last_nnz={last_nnz}" if last_const is not None else "")
+                    )
 
             # (Diagnostic only) We no longer assert binding; the MP is free to change y
 
@@ -190,7 +200,8 @@ class BendersSolver:
                     best_upper_bound=best_ub,
                 )
 
-            print("Evaluating Subproblem (SP) at candidate...")
+            if _do_print(it):
+                print("Evaluating Subproblem (SP) at candidate...")
             sres: SubproblemResult = self.subproblem.evaluate(mres.candidate)
             # Update UB if provided (include first-stage cost from master to compare totals)
             if sres.upper_bound is not None:
@@ -210,7 +221,8 @@ class BendersSolver:
                 _ub_print = f"{sres.upper_bound:.6g}" if sres.upper_bound is not None else "-"
             except Exception:
                 _ub_print = "-"
-            print(f"SP result: ub={_ub_print} feasible={sres.is_feasible}")
+            if _do_print(it):
+                print(f"SP result: ub={_ub_print} feasible={sres.is_feasible}")
             # Suppress repetitive demand printouts; diagnostics still available at the end
             # Add cut(s) if provided (optimality or feasibility) unless using lazy cuts
             added = 0
@@ -231,7 +243,8 @@ class BendersSolver:
                         forced_added = False
                     if forced_added:
                         cut_names.append(sres.cut.name)
-                        log.info("force-added %s cut '%s'", sres.cut.cut_type, sres.cut.name)
+                        if _do_print(it):
+                            log.info("force-added %s cut '%s'", sres.cut.cut_type, sres.cut.name)
 
                 # If nothing forced yet, try forcing the first in sres.cuts
                 if (not forced_added) and getattr(sres, "cuts", None) and hasattr(self.master, "add_cut_force"):
@@ -242,7 +255,8 @@ class BendersSolver:
                             forced_added = False
                         if forced_added:
                             cut_names.append(c.name)
-                            log.info("force-added %s cut '%s'", c.cut_type, c.name)
+                            if _do_print(it):
+                                log.info("force-added %s cut '%s'", c.cut_type, c.name)
                             break
 
                 # Add remaining cuts through the normal filtered path
@@ -263,11 +277,12 @@ class BendersSolver:
                     cuts_after = cuts_before
                 added = int(cuts_after) - int(cuts_before)
                 if added > 0:
-                    log.info("added %d cut(s)", added)
-                    names_str = ", ".join(cut_names) if cut_names else "(unnamed)"
-                    print(f"Master updated: added {added} cut(s): {names_str}")
+                    if _do_print(it):
+                        log.info("added %d cut(s)", added)
+                        names_str = ", ".join(cut_names) if cut_names else "(unnamed)"
+                        print(f"Master updated: added {added} cut(s): {names_str}")
                 else:
-                    if cut_names:
+                    if cut_names and _do_print(it):
                         print("Master updated: no new cuts (all skipped / duplicates)")
 
             # Check gap if we have both bounds
@@ -275,7 +290,8 @@ class BendersSolver:
                 gap = abs(best_ub - best_lb)
                 rel_gap = gap / max(1.0, abs(best_ub))
                 log.info("bounds: best_lb=%.6g best_ub=%.6g gap=%.6g rel=%.3g", best_lb, best_ub, gap, rel_gap)
-                print(f"Bounds: LB={best_lb:.6g} UB={best_ub:.6g} gap={gap:.6g} rel={rel_gap:.3g}")
+                if _do_print(it):
+                    print(f"Bounds: LB={best_lb:.6g} UB={best_ub:.6g} gap={gap:.6g} rel={rel_gap:.3g}")
                 if rel_gap <= tol:
                     log.info("Optimality reached within tolerance after %d iterations", it)
                     elapsed = time.time() - t0
@@ -356,7 +372,7 @@ class BendersSolver:
                     else:
                         stall_ctr += 1
                     prev_gap = gap
-                if stall_ctr >= stall_max:
+                if (stall_max > 0) and (stall_ctr >= stall_max):
                     log.info(
                         "Stopping due to stall: no gap improvement for %d iterations (gap=%.6g)",
                         stall_ctr,

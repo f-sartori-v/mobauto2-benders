@@ -23,6 +23,8 @@ class RunConfig:
     stall_max_no_improve_iters: int = 0
     stall_min_abs_improve: float = 0.0
     stall_min_rel_improve: float = 0.0
+    # Print iteration summary every N iters (1 = every iter)
+    print_every: int = 10
 
 
 @dataclass(slots=True)
@@ -172,6 +174,7 @@ def load_config(path: str | Path | None) -> BendersConfig:
         stall_max_no_improve_iters=int(run.get("stall_max_no_improve_iters", 0) or 0),
         stall_min_abs_improve=float(run.get("stall_min_abs_improve", 0.0) or 0.0),
         stall_min_rel_improve=float(run.get("stall_min_rel_improve", 0.0) or 0.0),
+        print_every=int(run.get("print_every", 10) or 10),
     )
 
     master_params = _as_dict(master.get("params"))
