@@ -59,6 +59,7 @@ class ProblemSubproblem(Subproblem):
         else:
             Wmax = int(params.get("Wmax_slots", params.get("Wmax", 0)))
         p_pen = float(params.get("p", 0.0))
+        ucap_pen = float(params.get("unused_capacity_penalty", 0.0) or 0.0)
         lp_solver = str(params.get("lp_solver", "cplex_direct"))
         # Optional: solver-specific options (e.g., CPLEX: {"lpmethod": 2, "threads": 0})
         solver_options = dict(params.get("solver_options", {}) or {})
@@ -242,7 +243,7 @@ class ProblemSubproblem(Subproblem):
                 K_out_tau = K_out_base.copy()
                 K_out_tau[tau] = K_out_tau[tau] + 1
                 _, ub_plus = solve_subproblem(
-                    SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_tau, K_ret=K_ret_base, fill_eps=fill_eps, solver_options=solver_options),
+                    SPParams(T=T, Wmax_slots=Wmax, p=p_pen, ucap_pen=ucap_pen, lp_solver=lp_solver, S=S, K_out=K_out_tau, K_ret=K_ret_base, fill_eps=fill_eps, solver_options=solver_options),
                     C_out_tau,
                     C_ret_base,
                     R_out_vec,
@@ -257,7 +258,7 @@ class ProblemSubproblem(Subproblem):
                 K_ret_tau = K_ret_base.copy()
                 K_ret_tau[tau] = K_ret_tau[tau] + 1
                 _, ub_plus_r = solve_subproblem(
-                    SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_base, K_ret=K_ret_tau, fill_eps=fill_eps, solver_options=solver_options),
+                    SPParams(T=T, Wmax_slots=Wmax, p=p_pen, ucap_pen=ucap_pen, lp_solver=lp_solver, S=S, K_out=K_out_base, K_ret=K_ret_tau, fill_eps=fill_eps, solver_options=solver_options),
                     C_out_base,
                     C_ret_tau,
                     R_out_vec,
@@ -316,7 +317,7 @@ class ProblemSubproblem(Subproblem):
                 use_dual = bool(params.get("use_dual_slopes", False))
                 K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
                 K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret
-                sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_lp, K_ret=K_ret_lp, fill_eps=fill_eps, solver_options=solver_options)
+                sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, ucap_pen=ucap_pen, lp_solver=lp_solver, S=S, K_out=K_out_lp, K_ret=K_ret_lp, fill_eps=fill_eps, solver_options=solver_options)
                 duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
                 ub_vals.append(ub_val)
 
@@ -324,8 +325,17 @@ class ProblemSubproblem(Subproblem):
                 if use_dual:
                     pi_out = dict(duals.get("pi_OUT", {}))
                     pi_ret = dict(duals.get("pi_RET", {}))
-                    beta_out = {int(t): float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
-                    beta_ret = {int(t): float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
+                    # For a min-LP with (<=) capacity constraints, imported duals are typically non-positive.
+                    # Use betas consistent with subgradients of Q(y): betas should be non-positive so adding capacity
+                    # (increasing y) can reduce the RHS and thus lower theta.
+                    beta_out = {
+                        int(t): float(S) * (float(pi_out.get(int(t), 0.0)) + float(ucap_pen))
+                        for t in range(T)
+                    }
+                    beta_ret = {
+                        int(t): float(S) * (float(pi_ret.get(int(t), 0.0)) + float(ucap_pen))
+                        for t in range(T)
+                    }
                     # Expand to per-(q,t) maps expected by the master (all vehicles at tau share the same coeff)
                     c_out_map: Dict[tuple[int, int], float] = {}
                     c_ret_map: Dict[tuple[int, int], float] = {}
@@ -347,15 +357,27 @@ class ProblemSubproblem(Subproblem):
                 else:
                     # Finite-difference coefficients and constant per scenario
                     c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
-                # Classic constant term from dual objective (alpha dot R)
-                alpha_out = dict(duals.get("alpha_OUT", {}))
-                alpha_ret = dict(duals.get("alpha_RET", {}))
-                const = float(sum(float(alpha_out.get(t, 0.0)) * float(R_out[t]) for t in range(T)))
-                const += float(sum(float(alpha_ret.get(t, 0.0)) * float(R_ret[t]) for t in range(T)))
+                # Robust constant via pass-through: const = Q(y) - sum_t beta[t]*sum_y[t]
+                sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
+                sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
+                const = float(ub_val)
+                const -= sum(beta_out[tau] * sum_y_out[tau] for tau in range(T))
+                const -= sum(beta_ret[tau] * sum_y_ret[tau] for tau in range(T))
                 consts.append(const)
                 coeffs_out_list.append(c_out_map)
                 coeffs_ret_list.append(c_ret_map)
-                cuts.append(Cut(name="opt_cut_s", cut_type=CutType.OPTIMALITY, metadata={"const": const, "coeff_yOUT": c_out_map, "coeff_yRET": c_ret_map}))
+                cuts.append(
+                    Cut(
+                        name="opt_cut_s",
+                        cut_type=CutType.OPTIMALITY,
+                        metadata={
+                            "const": const,
+                            "coeff_yOUT": c_out_map,
+                            "coeff_yRET": c_ret_map,
+                            "cut_form": "dual",
+                        },
+                    )
+                )
 
             # Aggregate UB
             if ub_aggregation == "mean":
@@ -378,7 +400,16 @@ class ProblemSubproblem(Subproblem):
                     avg_out[k] = sum(weights[i] * coeffs_out_list[i].get(k, 0.0) for i in range(len(coeffs_out_list)))
                 for k in keys_ret:
                     avg_ret[k] = sum(weights[i] * coeffs_ret_list[i].get(k, 0.0) for i in range(len(coeffs_ret_list)))
-                cut = Cut(name="opt_cut_avg", cut_type=CutType.OPTIMALITY, metadata={"const": const_avg, "coeff_yOUT": avg_out, "coeff_yRET": avg_ret})
+                cut = Cut(
+                    name="opt_cut_avg",
+                    cut_type=CutType.OPTIMALITY,
+                    metadata={
+                        "const": const_avg,
+                        "coeff_yOUT": avg_out,
+                        "coeff_yRET": avg_ret,
+                        "cut_form": "dual",
+                    },
+                )
                 return SubproblemResult(is_feasible=True, cut=cut, upper_bound=ub_val_agg)
             else:
                 return SubproblemResult(is_feasible=True, cuts=cuts, upper_bound=ub_val_agg)
@@ -400,15 +431,21 @@ class ProblemSubproblem(Subproblem):
             use_dual = bool(params.get("use_dual_slopes", False))
             K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
             K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret
-            sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_lp, K_ret=K_ret_lp, fill_eps=fill_eps, solver_options=solver_options)
+            sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, ucap_pen=ucap_pen, lp_solver=lp_solver, S=S, K_out=K_out_lp, K_ret=K_ret_lp, fill_eps=fill_eps, solver_options=solver_options)
             duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
 
             # Build coefficients via duals (classic) or finite differences (fallback)
             if use_dual:
                 pi_out = dict(duals.get("pi_OUT", {}))
                 pi_ret = dict(duals.get("pi_RET", {}))
-                beta_out = {int(t): float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
-                beta_ret = {int(t): float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
+                beta_out = {
+                    int(t): float(S) * (float(pi_out.get(int(t), 0.0)) + float(ucap_pen))
+                    for t in range(T)
+                }
+                beta_ret = {
+                    int(t): float(S) * (float(pi_ret.get(int(t), 0.0)) + float(ucap_pen))
+                    for t in range(T)
+                }
                 c_out_map: Dict[tuple[int, int], float] = {}
                 c_ret_map: Dict[tuple[int, int], float] = {}
                 for name in candidate.keys():
@@ -429,13 +466,23 @@ class ProblemSubproblem(Subproblem):
             else:
                 c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
 
-            # Classic constant from dual objective (alpha dot R)
-            alpha_out = dict(duals.get("alpha_OUT", {}))
-            alpha_ret = dict(duals.get("alpha_RET", {}))
-            const = float(sum(float(alpha_out.get(t, 0.0)) * float(R_out[t]) for t in range(T)))
-            const += float(sum(float(alpha_ret.get(t, 0.0)) * float(R_ret[t]) for t in range(T)))
+            # Robust constant via pass-through: const = Q(y) - sum_t beta[t]*sum_y[t]
+            sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
+            sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
+            const = float(ub_val)
+            const -= sum(beta_out[tau] * sum_y_out[tau] for tau in range(T))
+            const -= sum(beta_ret[tau] * sum_y_ret[tau] for tau in range(T))
 
-            cut = Cut(name="opt_cut", cut_type=CutType.OPTIMALITY, metadata={"const": const, "coeff_yOUT": c_out_map, "coeff_yRET": c_ret_map})
+            cut = Cut(
+                name="opt_cut",
+                cut_type=CutType.OPTIMALITY,
+                metadata={
+                    "const": const,
+                    "coeff_yOUT": c_out_map,
+                    "coeff_yRET": c_ret_map,
+                    "cut_form": "dual",
+                },
+            )
             # Diagnostics: demand per slot split by direction and served pax per departure slot (OUT/RET)
             diagnostics = {
                 "T": T,
@@ -456,6 +503,7 @@ class SPParams:
     S: float
     K_out: list[int]
     K_ret: list[int]
+    ucap_pen: float = 0.0
     fill_eps: float = 0.0
     solver_options: dict | None = None
 
@@ -506,13 +554,28 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
     def layer_cost(t: int, tau: int, k: int) -> float:
         return float(max(0, tau - t)) + max(0.0, float(P.fill_eps)) * float(k)
 
-    m.obj = pyo.Objective(
-        expr=
-            sum(layer_cost(t, tau, k) * m.x_OUT[t, tau, k] for (t, tau, k) in m.ArcsOut)
-            + sum(layer_cost(t, tau, k) * m.x_RET[t, tau, k] for (t, tau, k) in m.ArcsRet)
-            + P.p * (sum(m.u_OUT[t] for t in Tset) + sum(m.u_RET[t] for t in Tset)),
-        sense=pyo.minimize,
+    # Base objective: waiting cost + penalties for unserved
+    base_obj = (
+        sum(layer_cost(t, tau, k) * m.x_OUT[t, tau, k] for (t, tau, k) in m.ArcsOut)
+        + sum(layer_cost(t, tau, k) * m.x_RET[t, tau, k] for (t, tau, k) in m.ArcsRet)
+        + P.p * (sum(m.u_OUT[t] for t in Tset) + sum(m.u_RET[t] for t in Tset))
     )
+    # Optional: penalty for unused capacity to discourage overscheduling
+    if float(P.ucap_pen or 0.0) > 0.0:
+        served_out_tau = {
+            tau: sum(m.x_OUT[t, tau, k] for t in Tset for k in range(int(P.K_out[tau]) if tau < len(P.K_out) else 0) if (t, tau, k) in m.ArcsOut)
+            for tau in Tset
+        }
+        served_ret_tau = {
+            tau: sum(m.x_RET[t, tau, k] for t in Tset for k in range(int(P.K_ret[tau]) if tau < len(P.K_ret) else 0) if (t, tau, k) in m.ArcsRet)
+            for tau in Tset
+        }
+        unused_out = sum(float(C_out[tau]) - served_out_tau[tau] for tau in Tset)
+        unused_ret = sum(float(C_ret[tau]) - served_ret_tau[tau] for tau in Tset)
+        obj_expr = base_obj + float(P.ucap_pen) * (unused_out + unused_ret)
+    else:
+        obj_expr = base_obj
+    m.obj = pyo.Objective(expr=obj_expr, sense=pyo.minimize)
 
     def cons_dem_OUT(m, t):
         taus = [tau for tau in Tset if t <= tau <= min(P.T - 1, t + W)]

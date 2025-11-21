@@ -32,7 +32,7 @@ master:
     Q: 2
     # Time discretization is defined in minutes; slots are implicit via slot_resolution.
     # T_minutes: total horizon length in minutes (e.g., 600)
-    T_minutes: 900
+    T_minutes: 660
     # slot_resolution: minutes per slot (e.g., 5 -> discrete time grid every 5 minutes)
     slot_resolution: 15
     # trip_duration_minutes: physical trip duration in minutes. Internally converted to slots as ceil(trip_duration_minutes / slot_resolution).
@@ -86,14 +86,14 @@ subproblem:
     #   in the LP subproblem. This discourages releasing empty shuttles by charging a
     #   cost for capacity that is not used to serve demand at each slot/direction.
     #   Units: cost per passenger-seat per slot (e.g., 0.01).
-    # unused_capacity_penalty: 0.0
+    unused_capacity_penalty: 0.05
     # Demand source (prefer external files). Provide either:
     #  - demand_file: path to YAML/JSON with one of:
     #       { requests: [{dir: OUT|RET|0|1, time: int}, ...] }
     #       { req_matrix: [[OUT|RET|0|1, time], ...] }
     #       { R_out: [...], R_ret: [...] }
     #  - scenario_files: list of files (each as above) for multi-scenario runs
-    demand_file: setups/demo_cont_demand.yaml
+    demand_file: setups/demo_cont_demand_simpler.yaml
     # scenario_files:
     #   - setups/scenario_1.yaml
     #   - setups/scenario_2.yaml

@@ -744,52 +744,50 @@ class ProblemMaster(MasterProblem):
                         continue
                     agg_ret[(q, t)] = vraw
 
-        # Re-anchor the constant so that the cut passes through the incumbent (y = current MP solution)
-        # Using raw dm and Yout/Yret:
-        # RHS_raw(y) = const_dm + sum_t dm_out[t]*Yout[t] + sum_t dm_ret[t]*Yret[t]
-        # This equals the SP objective at incumbent y. We'll compute ub_est for diagnostics
-        # and then recompute the constant after any aggregation/thresholding so pass-through holds exactly.
-        ub_est = float(const)
-        # Sum over raw dm maps using current y values
-        if isinstance(coeff_yOUT, dict):
-            for (q, t), v in coeff_yOUT.items():
-                yv = float(m.yOUT[q, t].value or 0.0)
-                ub_est += float(v) * yv
-        if isinstance(coeff_yRET, dict):
-            for (q, t), v in coeff_yRET.items():
-                yv = float(m.yRET[q, t].value or 0.0)
-                ub_est += float(v) * yv
-        # Recompute constant after aggregation/thresholding to preserve pass-through at incumbent
-        # Compute incumbent sums
-        if aggregate:
-            # Aggregate by time: use Yout[t], Yret[t]
-            yout_val = {}
-            yret_val = {}
-            for t in set(list(agg_out.keys()) + list(agg_ret.keys())):  # type: ignore[arg-type]
-                try:
-                    yout_val[int(t)] = float(m.Yout[int(t)].value or 0.0)
-                except Exception:
-                    yout_val[int(t)] = 0.0
-                try:
-                    yret_val[int(t)] = float(m.Yret[int(t)].value or 0.0)
-                except Exception:
-                    yret_val[int(t)] = 0.0
-            contrib = sum(float(v) * float(yout_val.get(int(t), 0.0)) for t, v in agg_out.items())
-            contrib += sum(float(v) * float(yret_val.get(int(t), 0.0)) for t, v in agg_ret.items())
+        # Determine constant term to use in the cut.
+        # If the subproblem provided a dual-form cut (alpha + beta*y), do not re-anchor; use it directly.
+        # Otherwise (finite-difference pass-through form), re-anchor to ensure the cut passes through incumbent.
+        cut_form = str(getattr(cut, "metadata", {}).get("cut_form", "")).lower() if hasattr(cut, "metadata") else ""
+        if cut_form == "dual":
+            const_adj = float(const)
         else:
-            # Per-(q,t) coefficients
-            contrib = 0.0
-            for (q, t), v in agg_out.items():  # type: ignore[misc]
-                try:
-                    contrib += float(v) * float(m.yOUT[int(q), int(t)].value or 0.0)
-                except Exception:
-                    pass
-            for (q, t), v in agg_ret.items():  # type: ignore[misc]
-                try:
-                    contrib += float(v) * float(m.yRET[int(q), int(t)].value or 0.0)
-                except Exception:
-                    pass
-        const_adj = float(ub_est) - float(contrib)
+            ub_est = float(const)
+            if isinstance(coeff_yOUT, dict):
+                for (q, t), v in coeff_yOUT.items():
+                    yv = float(m.yOUT[q, t].value or 0.0)
+                    ub_est += float(v) * yv
+            if isinstance(coeff_yRET, dict):
+                for (q, t), v in coeff_yRET.items():
+                    yv = float(m.yRET[q, t].value or 0.0)
+                    ub_est += float(v) * yv
+            # Compute incumbent sums
+            if aggregate:
+                yout_val = {}
+                yret_val = {}
+                for t in set(list(agg_out.keys()) + list(agg_ret.keys())):  # type: ignore[arg-type]
+                    try:
+                        yout_val[int(t)] = float(m.Yout[int(t)].value or 0.0)
+                    except Exception:
+                        yout_val[int(t)] = 0.0
+                    try:
+                        yret_val[int(t)] = float(m.Yret[int(t)].value or 0.0)
+                    except Exception:
+                        yret_val[int(t)] = 0.0
+                contrib = sum(float(v) * float(yout_val.get(int(t), 0.0)) for t, v in agg_out.items())
+                contrib += sum(float(v) * float(yret_val.get(int(t), 0.0)) for t, v in agg_ret.items())
+            else:
+                contrib = 0.0
+                for (q, t), v in agg_out.items():  # type: ignore[misc]
+                    try:
+                        contrib += float(v) * float(m.yOUT[int(q), int(t)].value or 0.0)
+                    except Exception:
+                        pass
+                for (q, t), v in agg_ret.items():  # type: ignore[misc]
+                    try:
+                        contrib += float(v) * float(m.yRET[int(q), int(t)].value or 0.0)
+                    except Exception:
+                        pass
+            const_adj = float(ub_est) - float(contrib)
 
         # Assemble RHS with aggregated coefficients using adjusted constant
         rhs = const_adj
