@@ -211,6 +211,29 @@ class BendersSolver:
             except Exception:
                 _ub_print = "-"
             print(f"SP result: ub={_ub_print} feasible={sres.is_feasible}")
+            # Cut tightness check: evaluate line(y) from the raw cut metadata and compare to SP upper bound
+            try:
+                if sres.cut is not None and sres.upper_bound is not None and mres.candidate is not None:
+                    cmeta = getattr(sres.cut, "metadata", {}) or {}
+                    const = float(cmeta.get("const", 0.0))
+                    coeff_yout = cmeta.get("coeff_yOUT") or {}
+                    coeff_yret = cmeta.get("coeff_yRET") or {}
+                    line_val = float(const)
+                    # Candidate has keys like 'yOUT[q,t]' and 'yRET[q,t]'
+                    def _cand_val(prefix: str, q: int, t: int) -> float:
+                        return float(mres.candidate.get(f"{prefix}[{int(q)},{int(t)}]", 0.0))
+                    if isinstance(coeff_yout, dict):
+                        for (q, tau), v in coeff_yout.items():
+                            line_val += float(v) * _cand_val("yOUT", int(q), int(tau))
+                    if isinstance(coeff_yret, dict):
+                        for (q, tau), v in coeff_yret.items():
+                            line_val += float(v) * _cand_val("yRET", int(q), int(tau))
+                    diff = float(line_val) - float(sres.upper_bound)
+                    print(
+                        f"[CUT TIGHTNESS] line(y)={line_val:.6g}  SP_ub={float(sres.upper_bound):.6g}  diff={diff:.3g}"
+                    )
+            except Exception:
+                pass
             # Suppress repetitive demand printouts; diagnostics still available at the end
             # Add cut(s) if provided (optimality or feasibility) unless using lazy cuts
             added = 0
@@ -356,7 +379,7 @@ class BendersSolver:
                     else:
                         stall_ctr += 1
                     prev_gap = gap
-                if stall_ctr >= stall_max:
+                if stall_max > 0 and stall_ctr >= stall_max:
                     log.info(
                         "Stopping due to stall: no gap improvement for %d iterations (gap=%.6g)",
                         stall_ctr,

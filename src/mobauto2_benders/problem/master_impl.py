@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Optional
+from pathlib import Path
 
 import pyomo.environ as pyo
 
@@ -95,7 +96,13 @@ class ProblemMaster(MasterProblem):
         m.b = pyo.Var(m.Q, m.T, bounds=(0, Emax))
         m.gchg = pyo.Var(m.Q, m.T, within=pyo.NonNegativeReals)
         # Theta models recourse cost; keep nonnegative to avoid initial unboundedness
-        m.theta = pyo.Var(within=pyo.NonNegativeReals)
+        # Theta models recourse cost; optionally split by direction (OUT/RET) for stronger multi-cuts
+        disagg_dir = bool(self._p("disaggregate_theta_by_direction", self._p("theta_split_by_direction", False)))
+        if disagg_dir:
+            m.theta_out = pyo.Var(within=pyo.NonNegativeReals)
+            m.theta_ret = pyo.Var(within=pyo.NonNegativeReals)
+        else:
+            m.theta = pyo.Var(within=pyo.NonNegativeReals)
 
         # Objective composition: theta + optional small start penalty + optional concurrency penalty
         eps_start = float(self._p("start_cost_epsilon", 0.0) or 0.0)
@@ -109,7 +116,7 @@ class ProblemMaster(MasterProblem):
             m.C_ex_out = pyo.Constraint(m.T, rule=lambda m, t: m.eOut[t] >= m.Yout[t] - 1)
             m.C_ex_ret = pyo.Constraint(m.T, rule=lambda m, t: m.eRet[t] >= m.Yret[t] - 1)
 
-        obj_expr = m.theta
+        obj_expr = (m.theta_out + m.theta_ret) if disagg_dir else m.theta
         if eps_start > 0.0:
             obj_expr = obj_expr + eps_start * sum(m.yOUT[q, t] + m.yRET[q, t] for q in m.Q for t in m.T)
         if conc_pen > 0.0:
@@ -458,7 +465,14 @@ class ProblemMaster(MasterProblem):
             for t in m.T:
                 cand[f"yOUT[{q},{t}]"] = pyo.value(m.yOUT[q, t])
                 cand[f"yRET[{q},{t}]"] = pyo.value(m.yRET[q, t])
-        cand["theta"] = pyo.value(m.theta)
+        # Report total theta for compatibility
+        try:
+            if hasattr(m, "theta"):
+                cand["theta"] = pyo.value(m.theta)
+            else:
+                cand["theta"] = float(pyo.value(m.theta_out)) + float(pyo.value(m.theta_ret))
+        except Exception:
+            cand["theta"] = 0.0
         return cand
 
     def solve(self) -> SolveResult:
@@ -632,7 +646,13 @@ class ProblemMaster(MasterProblem):
         lines.append(f"Q={len(Q)} T={len(T)}")
         # Theta
         try:
-            lines.append(f"theta = {pyo.value(m.theta):.6g}")
+            if hasattr(m, "theta"):
+                lines.append(f"theta = {pyo.value(m.theta):.6g}")
+            else:
+                tot = float(pyo.value(m.theta_out)) + float(pyo.value(m.theta_ret))
+                lines.append(f"theta = {tot:.6g}")
+                lines.append(f"  - theta_out = {float(pyo.value(m.theta_out)):.6g}")
+                lines.append(f"  - theta_ret = {float(pyo.value(m.theta_ret)):.6g}")
         except Exception:
             lines.append("theta = (unavailable)")
         # Binary schedules
@@ -691,6 +711,8 @@ class ProblemMaster(MasterProblem):
         assert self.m is not None
         m = self.m
         const = float(cut.metadata.get("const", 0.0)) if hasattr(cut, "metadata") else 0.0
+        const_out_meta = float(cut.metadata.get("const_out", 0.0)) if hasattr(cut, "metadata") and ("const_out" in cut.metadata) else None
+        const_ret_meta = float(cut.metadata.get("const_ret", 0.0)) if hasattr(cut, "metadata") and ("const_ret" in cut.metadata) else None
         coeff_yOUT = cut.metadata.get("coeff_yOUT") if hasattr(cut, "metadata") else None
         coeff_yRET = cut.metadata.get("coeff_yRET") if hasattr(cut, "metadata") else None
 
@@ -750,15 +772,22 @@ class ProblemMaster(MasterProblem):
         # This equals the SP objective at incumbent y. We'll compute ub_est for diagnostics
         # and then recompute the constant after any aggregation/thresholding so pass-through holds exactly.
         ub_est = float(const)
+        # If we have per-direction constants, track those too
+        ub_est_out = float(const_out_meta) if const_out_meta is not None else None
+        ub_est_ret = float(const_ret_meta) if const_ret_meta is not None else None
         # Sum over raw dm maps using current y values
         if isinstance(coeff_yOUT, dict):
             for (q, t), v in coeff_yOUT.items():
                 yv = float(m.yOUT[q, t].value or 0.0)
                 ub_est += float(v) * yv
+                if ub_est_out is not None:
+                    ub_est_out += float(v) * yv
         if isinstance(coeff_yRET, dict):
             for (q, t), v in coeff_yRET.items():
                 yv = float(m.yRET[q, t].value or 0.0)
                 ub_est += float(v) * yv
+                if ub_est_ret is not None:
+                    ub_est_ret += float(v) * yv
         # Recompute constant after aggregation/thresholding to preserve pass-through at incumbent
         # Compute incumbent sums
         if aggregate:
@@ -776,20 +805,30 @@ class ProblemMaster(MasterProblem):
                     yret_val[int(t)] = 0.0
             contrib = sum(float(v) * float(yout_val.get(int(t), 0.0)) for t, v in agg_out.items())
             contrib += sum(float(v) * float(yret_val.get(int(t), 0.0)) for t, v in agg_ret.items())
+            contrib_out = sum(float(v) * float(yout_val.get(int(t), 0.0)) for t, v in agg_out.items())
+            contrib_ret = sum(float(v) * float(yret_val.get(int(t), 0.0)) for t, v in agg_ret.items())
         else:
             # Per-(q,t) coefficients
             contrib = 0.0
+            contrib_out = 0.0
+            contrib_ret = 0.0
             for (q, t), v in agg_out.items():  # type: ignore[misc]
                 try:
-                    contrib += float(v) * float(m.yOUT[int(q), int(t)].value or 0.0)
+                    vv = float(m.yOUT[int(q), int(t)].value or 0.0)
+                    contrib += float(v) * vv
+                    contrib_out += float(v) * vv
                 except Exception:
                     pass
             for (q, t), v in agg_ret.items():  # type: ignore[misc]
                 try:
-                    contrib += float(v) * float(m.yRET[int(q), int(t)].value or 0.0)
+                    vv = float(m.yRET[int(q), int(t)].value or 0.0)
+                    contrib += float(v) * vv
+                    contrib_ret += float(v) * vv
                 except Exception:
                     pass
         const_adj = float(ub_est) - float(contrib)
+        const_adj_out = (float(ub_est_out) - float(contrib_out)) if ub_est_out is not None else None
+        const_adj_ret = (float(ub_est_ret) - float(contrib_ret)) if ub_est_ret is not None else None
 
         # Assemble RHS with aggregated coefficients using adjusted constant
         rhs = const_adj
@@ -820,29 +859,52 @@ class ProblemMaster(MasterProblem):
                     q, t = int(parts[0]), int(parts[1])
                     rhs = rhs - v2 * m.yRET[q, t]
 
-        # Scale both sides to normalize coefficient magnitudes (theta and RHS)
-        max_beta = 0.0
-        if agg_out:
-            max_beta = max(max_beta, max(abs(float(v)) for v in agg_out.values()))
-        if agg_ret:
-            max_beta = max(max_beta, max(abs(float(v)) for v in agg_ret.values()))
-        max_term = max(float(abs(const_adj)), float(max_beta), 1.0)
-        scale = 1.0 / max_term
-        lhs = scale * m.theta
-        rhs_scaled = scale * rhs
-
-        # Evaluate violation using Option A: viol = RHS - theta
+        # Temporarily disable scaling: enforce raw cut(s)
+        # Support disaggregation by direction to strengthen the linearization
+        scale = 1.0
+        disagg_dir = hasattr(m, "theta_out") and hasattr(m, "theta_ret")
+        added_any = True
         add_abs_tol = float(self._p("cut_add_tolerance", 1e-6))
         add_rel_tol = float(self._p("cut_add_rel_tolerance", 1e-6))
-        lhs_val = float(pyo.value(lhs))
-        rhs_val = float(pyo.value(rhs_scaled))
-        violation = rhs_val - lhs_val
-        threshold = add_abs_tol + add_rel_tol * abs(rhs_val)
-        if not force and not (violation > threshold):
-            print(
-                f"[BENDERS] Eval cut: lhs={lhs_val:.6g} rhs={rhs_val:.6g} viol={violation:.3g} thr={threshold:.3g} added=False"
-            )
-            return False
+        if disagg_dir and (const_adj_out is not None) and (const_adj_ret is not None):
+            # Build separate RHS for OUT/RET
+            if aggregate:
+                rhs_out = float(const_adj_out) + sum(float(v) * m.Yout[int(t)] for t, v in agg_out.items())
+                rhs_ret = float(const_adj_ret) + sum(float(v) * m.Yret[int(t)] for t, v in agg_ret.items())
+            else:
+                rhs_out = float(const_adj_out) + sum(float(v) * m.yOUT[int(q), int(t)] for (q, t), v in agg_out.items())  # type: ignore[misc]
+                rhs_ret = float(const_adj_ret) + sum(float(v) * m.yRET[int(q), int(t)] for (q, t), v in agg_ret.items())  # type: ignore[misc]
+
+            lhs_out = m.theta_out
+            lhs_ret = m.theta_ret
+
+            # Violation checks
+            lhs_out_val = float(pyo.value(lhs_out))
+            rhs_out_val = float(pyo.value(rhs_out))
+            lhs_ret_val = float(pyo.value(lhs_ret))
+            rhs_ret_val = float(pyo.value(rhs_ret))
+            viol_out = rhs_out_val - lhs_out_val
+            viol_ret = rhs_ret_val - lhs_ret_val
+            thr_out = add_abs_tol + add_rel_tol * abs(rhs_out_val)
+            thr_ret = add_abs_tol + add_rel_tol * abs(rhs_ret_val)
+            if not force and (viol_out <= thr_out) and (viol_ret <= thr_ret):
+                print(
+                    f"[BENDERS] Eval cut (dir): OUT: lhs={lhs_out_val:.6g} rhs={rhs_out_val:.6g} viol={viol_out:.3g} thr={thr_out:.3g}; "
+                    f"RET: lhs={lhs_ret_val:.6g} rhs={rhs_ret_val:.6g} viol={viol_ret:.3g} thr={thr_ret:.3g} added=False"
+                )
+                return False
+        else:
+            lhs = m.theta
+            rhs_scaled = rhs
+            lhs_val = float(pyo.value(lhs))
+            rhs_val = float(pyo.value(rhs_scaled))
+            violation = rhs_val - lhs_val
+            threshold = add_abs_tol + add_rel_tol * abs(rhs_val)
+            if not force and not (violation > threshold):
+                print(
+                    f"[BENDERS] Eval cut: lhs={lhs_val:.6g} rhs={rhs_val:.6g} viol={violation:.3g} thr={threshold:.3g} added=False"
+                )
+                return False
 
         # Fingerprint to avoid adding duplicates
         def _round6(x: float) -> float:
@@ -856,25 +918,46 @@ class ProblemMaster(MasterProblem):
         else:
             fp_out = sorted(((int(q), int(t), _round6(float(v))) for (q, t), v in agg_out.items()))  # type: ignore[misc]
             fp_ret = sorted(((int(q), int(t), _round6(float(v))) for (q, t), v in agg_ret.items()))  # type: ignore[misc]
-        fp = ("opt", _round6(const_adj), tuple(fp_out), tuple(fp_ret))
+        if disagg_dir and (const_adj_out is not None) and (const_adj_ret is not None):
+            fp = ("opt_dir", _round6(const_adj_out), _round6(const_adj_ret), tuple(fp_out), tuple(fp_ret))
+        else:
+            fp = ("opt", _round6(const_adj), tuple(fp_out), tuple(fp_ret))
         if not force:
             if fp in self._cut_fps:
                 print("[BENDERS] Skipped duplicate cut")
                 return False
             self._cut_fps.add(fp)
 
-        # Create explicit constraint and register with persistent solver if used
-        cname = f"benders_cut_{self._cut_idx}"
-        con = pyo.Constraint(expr=(lhs >= rhs_scaled))
-        setattr(m.BendersCuts, cname, con)
-        if getattr(self, "_is_persistent", False):
-            self._solver.add_constraint(con)
+        # Create explicit constraint(s) and register with persistent solver if used
+        if hasattr(m, "theta_out") and hasattr(m, "theta_ret") and (const_adj_out is not None) and (const_adj_ret is not None):
+            cname_out = f"benders_cut_out_{self._cut_idx}"
+            cname_ret = f"benders_cut_ret_{self._cut_idx}"
+            con_out = pyo.Constraint(expr=(m.theta_out >= rhs_out))
+            con_ret = pyo.Constraint(expr=(m.theta_ret >= rhs_ret))
+            setattr(m.BendersCuts, cname_out, con_out)
+            setattr(m.BendersCuts, cname_ret, con_ret)
+            if getattr(self, "_is_persistent", False):
+                self._solver.add_constraint(con_out)
+                self._solver.add_constraint(con_ret)
+            con_list = [con_out, con_ret]
+            name_list = [cname_out, cname_ret]
+        else:
+            cname = f"benders_cut_{self._cut_idx}"
+            lhs = m.theta
+            rhs_scaled = rhs
+            con = pyo.Constraint(expr=(lhs >= rhs_scaled))
+            setattr(m.BendersCuts, cname, con)
+            if getattr(self, "_is_persistent", False):
+                self._solver.add_constraint(con)
+            con_list = [con]
+            name_list = [cname]
         # Maintain pool for optional pruning
         if not hasattr(self, "_cut_cons"):
             self._cut_cons = []
             self._cut_names = []
-        self._cut_cons.append(con)
-        self._cut_names.append(cname)
+        for con_i, name_i in zip(con_list, name_list):
+            self._cut_cons.append(con_i)
+            self._cut_names.append(name_i)
 
         # Cut pool management: cap number of active cuts
         max_cuts = int(self._p("max_cuts_active", 0) or 0)
@@ -892,24 +975,78 @@ class ProblemMaster(MasterProblem):
                 except Exception:
                     pass
 
+        # Optional: export MP LP after adding a cut for inspection
+        try:
+            if bool(self._p("write_lp_after_cut", False)):
+                out_dir = Path(self._p("lp_output_dir", "Report"))
+                out_dir.mkdir(parents=True, exist_ok=True)
+                lp_path = out_dir / f"master_after_cut_{self._cut_idx}.lp"
+                # Prefer underlying CPLEX model if persistent, else use Pyomo writer
+                wrote = False
+                if getattr(self, "_is_persistent", False):
+                    try:
+                        cpx = getattr(self._solver, "_solver_model", None)
+                        if cpx is not None:
+                            cpx.write(str(lp_path))
+                            wrote = True
+                    except Exception:
+                        wrote = False
+                if not wrote:
+                    try:
+                        # Fall back to Pyomo's model writer
+                        m.write(str(lp_path), io_options={"symbolic_solver_labels": True})
+                        wrote = True
+                    except Exception:
+                        wrote = False
+                if wrote:
+                    print(f"[BENDERS] Wrote LP to {lp_path}")
+                # Also write a symbolic LP via Pyomo for readability
+                try:
+                    sym_lp_path = out_dir / f"master_after_cut_{self._cut_idx}_sym.lp"
+                    m.write(str(sym_lp_path), io_options={"symbolic_solver_labels": True})
+                    print(f"[BENDERS] Wrote symbolic LP to {sym_lp_path}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         # Simple logging: constant and nonzeros
         nnz = (len(agg_out) if aggregate else len(agg_out)) + (len(agg_ret) if aggregate else len(agg_ret))
         # Log slope range
         all_betas = list(agg_out.values()) + list(agg_ret.values())
         if all_betas:
             rng = (min(all_betas), max(all_betas))
-            print(
-                f"[BENDERS] Added cut #{self._cut_idx}: const={const_adj:.6g}, nnz={nnz}, slope_range=[{rng[0]:.3g},{rng[1]:.3g}], raw_pos_dm={raw_pos_dm}, scale={scale:.3g}"
-            )
+            if hasattr(m, "theta_out") and hasattr(m, "theta_ret") and (const_adj_out is not None) and (const_adj_ret is not None):
+                print(
+                    f"[BENDERS] Added cut #{self._cut_idx}: const_out={const_adj_out:.6g}, const_ret={const_adj_ret:.6g}, nnz={nnz}, slope_range=[{rng[0]:.3g},{rng[1]:.3g}], raw_pos_dm={raw_pos_dm}, scale={scale:.3g}"
+                )
+            else:
+                print(
+                    f"[BENDERS] Added cut #{self._cut_idx}: const={const_adj:.6g}, nnz={nnz}, slope_range=[{rng[0]:.3g},{rng[1]:.3g}], raw_pos_dm={raw_pos_dm}, scale={scale:.3g}"
+                )
         else:
-            print(f"[BENDERS] Added cut #{self._cut_idx}: const={const_adj:.6g}, nnz={nnz}, raw_pos_dm={raw_pos_dm}, scale={scale:.3g}")
+            if hasattr(m, "theta_out") and hasattr(m, "theta_ret") and (const_adj_out is not None) and (const_adj_ret is not None):
+                print(
+                    f"[BENDERS] Added cut #{self._cut_idx}: const_out={const_adj_out:.6g}, const_ret={const_adj_ret:.6g}, nnz={nnz}, raw_pos_dm={raw_pos_dm}, scale={scale:.3g}"
+                )
+            else:
+                print(f"[BENDERS] Added cut #{self._cut_idx}: const={const_adj:.6g}, nnz={nnz}, raw_pos_dm={raw_pos_dm}, scale={scale:.3g}")
         # Sanity log with LHS and RHS values (scaled)
-        print(
-            f"[BENDERS] Eval cut: lhs={lhs_val:.6g} rhs={rhs_val:.6g} viol={violation:.3g} thr={threshold:.3g} added=True"
-        )
+        try:
+            if hasattr(m, "theta_out") and hasattr(m, "theta_ret") and (const_adj_out is not None) and (const_adj_ret is not None):
+                print(
+                    f"[BENDERS] Eval cut (dir): OUT lhs={lhs_out_val:.6g} rhs={rhs_out_val:.6g} viol={viol_out:.3g} thr={thr_out:.3g}; "
+                    f"RET lhs={lhs_ret_val:.6g} rhs={rhs_ret_val:.6g} viol={viol_ret:.3g} thr={thr_ret:.3g} added=True"
+                )
+            else:
+                print(
+                    f"[BENDERS] Eval cut: lhs={lhs_val:.6g} rhs={rhs_val:.6g} viol={violation:.3g} thr={threshold:.3g} added=True"
+                )
+        except Exception:
+            pass
         self._cut_idx += 1
         # Track last cut info for cross-iteration checks
-        self._last_cut_const = const_adj
+        self._last_cut_const = (const_adj_out + const_adj_ret) if (const_adj_out is not None and const_adj_ret is not None) else const_adj
         self._last_cut_nnz = nnz
         return True
 

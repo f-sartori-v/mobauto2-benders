@@ -296,6 +296,8 @@ class ProblemSubproblem(Subproblem):
             cuts: list[Cut] = []
             ub_vals: list[float] = []
             consts: list[float] = []
+            consts_out: list[float] = []
+            consts_ret: list[float] = []
             coeffs_out_list: list[Dict[tuple[int, int], float]] = []
             coeffs_ret_list: list[Dict[tuple[int, int], float]] = []
 
@@ -323,8 +325,10 @@ class ProblemSubproblem(Subproblem):
                 if use_dual:
                     pi_out = dict(duals.get("pi_OUT", {}))
                     pi_ret = dict(duals.get("pi_RET", {}))
-                    dm_out = {int(t): -float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
-                    dm_ret = {int(t): -float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
+                    # Duals on capacity (<=) constraints in Pyomo have negative sign for binding constraints
+                    # Build supporting hyperplane slopes consistent with finite differences: dm should be ≤ 0
+                    dm_out = {int(t): float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
+                    dm_ret = {int(t): float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
                     # Expand to per-(q,t)
                     c_out_map: Dict[tuple[int, int], float] = {}
                     c_ret_map: Dict[tuple[int, int], float] = {}
@@ -354,7 +358,30 @@ class ProblemSubproblem(Subproblem):
                 consts.append(const)
                 coeffs_out_list.append(c_out_map)
                 coeffs_ret_list.append(c_ret_map)
-                cuts.append(Cut(name="opt_cut_s", cut_type=CutType.OPTIMALITY, metadata={"const": const, "coeff_yOUT": c_out_map, "coeff_yRET": c_ret_map}))
+                # Per-direction constants if available from SP diagnostics
+                try:
+                    ub_out = float(duals.get("ub_out", const))
+                except Exception:
+                    ub_out = float(const)
+                try:
+                    ub_ret = float(duals.get("ub_ret", 0.0))
+                except Exception:
+                    ub_ret = 0.0
+                const_out = float(ub_out) - sum(dm_out[tau] * sum_y_out[tau] for tau in range(T))
+                const_ret = float(ub_ret) - sum(dm_ret[tau] * sum_y_ret[tau] for tau in range(T))
+                consts_out.append(const_out)
+                consts_ret.append(const_ret)
+                cuts.append(Cut(
+                    name="opt_cut_s",
+                    cut_type=CutType.OPTIMALITY,
+                    metadata={
+                        "const": const,
+                        "const_out": const_out,
+                        "const_ret": const_ret,
+                        "coeff_yOUT": c_out_map,
+                        "coeff_yRET": c_ret_map,
+                    },
+                ))
 
             # Aggregate UB
             if ub_aggregation == "mean":
@@ -369,6 +396,8 @@ class ProblemSubproblem(Subproblem):
             if average_cuts:
                 # Weighted average of constants and coefficients
                 const_avg = sum(w * c for w, c in zip(weights, consts))
+                const_out_avg = sum(w * c for w, c in zip(weights, consts_out)) if consts_out else const_avg
+                const_ret_avg = sum(w * c for w, c in zip(weights, consts_ret)) if consts_ret else 0.0
                 keys_out = set().union(*[set(d.keys()) for d in coeffs_out_list])
                 keys_ret = set().union(*[set(d.keys()) for d in coeffs_ret_list])
                 avg_out: Dict[tuple[int, int], float] = {}
@@ -377,7 +406,17 @@ class ProblemSubproblem(Subproblem):
                     avg_out[k] = sum(weights[i] * coeffs_out_list[i].get(k, 0.0) for i in range(len(coeffs_out_list)))
                 for k in keys_ret:
                     avg_ret[k] = sum(weights[i] * coeffs_ret_list[i].get(k, 0.0) for i in range(len(coeffs_ret_list)))
-                cut = Cut(name="opt_cut_avg", cut_type=CutType.OPTIMALITY, metadata={"const": const_avg, "coeff_yOUT": avg_out, "coeff_yRET": avg_ret})
+                cut = Cut(
+                    name="opt_cut_avg",
+                    cut_type=CutType.OPTIMALITY,
+                    metadata={
+                        "const": const_avg,
+                        "const_out": const_out_avg,
+                        "const_ret": const_ret_avg,
+                        "coeff_yOUT": avg_out,
+                        "coeff_yRET": avg_ret,
+                    },
+                )
                 return SubproblemResult(is_feasible=True, cut=cut, upper_bound=ub_val_agg)
             else:
                 return SubproblemResult(is_feasible=True, cuts=cuts, upper_bound=ub_val_agg)
@@ -406,8 +445,8 @@ class ProblemSubproblem(Subproblem):
             if use_dual:
                 pi_out = dict(duals.get("pi_OUT", {}))
                 pi_ret = dict(duals.get("pi_RET", {}))
-                dm_out = {int(t): -float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
-                dm_ret = {int(t): -float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
+                dm_out = {int(t): float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
+                dm_ret = {int(t): float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
                 c_out_map: Dict[tuple[int, int], float] = {}
                 c_ret_map: Dict[tuple[int, int], float] = {}
                 for name in candidate.keys():
@@ -436,8 +475,29 @@ class ProblemSubproblem(Subproblem):
             const = float(ub_val)
             const -= sum(dm_out[tau] * sum_y_out[tau] for tau in range(T))
             const -= sum(dm_ret[tau] * sum_y_ret[tau] for tau in range(T))
+            # Per-direction constants if available from SP diagnostics
+            try:
+                ub_out = float(duals.get("ub_out", const))
+            except Exception:
+                ub_out = float(const)
+            try:
+                ub_ret = float(duals.get("ub_ret", 0.0))
+            except Exception:
+                ub_ret = 0.0
+            const_out = float(ub_out) - sum(dm_out[tau] * sum_y_out[tau] for tau in range(T))
+            const_ret = float(ub_ret) - sum(dm_ret[tau] * sum_y_ret[tau] for tau in range(T))
 
-            cut = Cut(name="opt_cut", cut_type=CutType.OPTIMALITY, metadata={"const": const, "coeff_yOUT": c_out_map, "coeff_yRET": c_ret_map})
+            cut = Cut(
+                name="opt_cut",
+                cut_type=CutType.OPTIMALITY,
+                metadata={
+                    "const": const,
+                    "const_out": const_out,
+                    "const_ret": const_ret,
+                    "coeff_yOUT": c_out_map,
+                    "coeff_yRET": c_ret_map,
+                },
+            )
             # Diagnostics: demand per slot split by direction and served pax per departure slot (OUT/RET)
             diagnostics = {
                 "T": T,
@@ -587,6 +647,18 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
         served_out_by_tau[tau] = sum(float(pyo.value(m.x_OUT[t, tau, k])) for t in Tset for k in range(int(P.K_out[tau]) if tau < len(P.K_out) else 0) if (t, tau, k) in m.ArcsOut)
         served_ret_by_tau[tau] = sum(float(pyo.value(m.x_RET[t, tau, k])) for t in Tset for k in range(int(P.K_ret[tau]) if tau < len(P.K_ret) else 0) if (t, tau, k) in m.ArcsRet)
 
+    # Component costs (per direction)
+    try:
+        out_cost_val = sum(layer_cost(t, tau, k) * float(pyo.value(m.x_OUT[t, tau, k])) for (t, tau, k) in m.ArcsOut)
+        out_cost_val += float(P.p) * sum(float(pyo.value(m.u_OUT[t])) for t in Tset)
+    except Exception:
+        out_cost_val = 0.0
+    try:
+        ret_cost_val = sum(layer_cost(t, tau, k) * float(pyo.value(m.x_RET[t, tau, k])) for (t, tau, k) in m.ArcsRet)
+        ret_cost_val += float(P.p) * sum(float(pyo.value(m.u_RET[t])) for t in Tset)
+    except Exception:
+        ret_cost_val = 0.0
+
     obj_val = float(pyo.value(m.obj))
     return (
         {
@@ -597,6 +669,9 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
             # diagnostics
             "served_out_by_tau": served_out_by_tau,
             "served_ret_by_tau": served_ret_by_tau,
+            # components
+            "ub_out": float(out_cost_val),
+            "ub_ret": float(ret_cost_val),
         },
         obj_val,
     )

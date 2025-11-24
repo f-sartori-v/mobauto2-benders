@@ -11,7 +11,7 @@ run:
   seed: 42
   # Optional: stop early if gap stalls
   # Number of iterations with insufficient gap improvement before stopping (0 disables)
-  stall_max_no_improve_iters: 10
+  stall_max_no_improve_iters: 0
   # Minimum absolute and/or relative gap improvement to reset the stall counter
   stall_min_abs_improve: 1.0
   stall_min_rel_improve: 0.002
@@ -31,9 +31,9 @@ master:
     Q: 2
     # Time discretization is defined in minutes; slots are implicit via slot_resolution.
     # T_minutes: total horizon length in minutes (e.g., 600)
-    T_minutes: 900
+    T_minutes: 660
     # slot_resolution: minutes per slot (e.g., 5 -> discrete time grid every 5 minutes)
-    slot_resolution: 15
+    slot_resolution: 30
     # trip_duration_minutes: physical trip duration in minutes. Internally converted to slots as ceil(trip_duration_minutes / slot_resolution).
     trip_duration_minutes: 30
     # Emax: battery capacity (energy units)
@@ -44,11 +44,11 @@ master:
     L: 30
     # start_cost_epsilon: tiny penalty on starting trips to discourage gratuitous starts
     #   Applied to sum_q,t (yOUT[q,t] + yRET[q,t]) in the master objective.
-    start_cost_epsilon: 0.0
+    start_cost_epsilon: 0.01
     # concurrency_penalty: optional small penalty per extra concurrent departure beyond 1 per slot
     #   Applied to max(0, Yout[t]-1) + max(0, Yret[t]-1) and helps break ties when two trips
     #   at the same time/direction could be consolidated into one.
-    concurrency_penalty: 0.0
+    concurrency_penalty: 0.25
     # Optional: enable FIFO symmetry-breaking across vehicles (off by default)
     use_fifo_symmetry: false
     # delta_chg: maximum charge added per slot when c[q,t] = 1
@@ -57,6 +57,8 @@ master:
     aggregate_cuts_by_tau: true
     # Drop tiny cut coefficients (helps numerics without changing shape much)
     cut_coeff_threshold: 0.001
+    # Debug: write LP after each new cut to inspect constraint rows
+    write_lp_after_cut: false
     # binit: initial battery levels per vehicle (length Q)
     binit: [150.0, 150.0]
 
@@ -65,7 +67,7 @@ subproblem:
   params:
     # LP solver used by the subproblem (Pyomo name)
     lp_solver: cplex_direct
-    # Use finite-difference slopes (stable baseline)
+    # Use dual slopes (supporting hyperplanes ensure tight envelope)
     use_dual_slopes: false
     # (Optional) LP tuning can go here; keeping defaults for stability
     # S: capacity units contributed by one vehicle starting at time tau.
@@ -81,18 +83,17 @@ subproblem:
     #   Keeps the subproblem linear and pushes solutions to avoid splitting
     #   demand across multiple simultaneous vehicles unless necessary.
     fill_first_epsilon: 1.0e-6
-    # unused_capacity_penalty: optional small penalty per unit of unused seat-capacity
-    #   in the LP subproblem. This discourages releasing empty shuttles by charging a
-    #   cost for capacity that is not used to serve demand at each slot/direction.
-    #   Units: cost per passenger-seat per slot (e.g., 0.01).
-    # unused_capacity_penalty: 0.0
+    # unused_capacity_penalty: penalty per unit of unused seat-capacity
+    #   Discourages releasing a new trip while the previous departure still has slack.
+    #   Units: cost per passenger-seat per slot (e.g., 0.1–1.0). Tune to balance with waiting cost units.
+    unused_capacity_penalty: 0.5
     # Demand source (prefer external files). Provide either:
     #  - demand_file: path to YAML/JSON with one of:
     #       { requests: [{dir: OUT|RET|0|1, time: int}, ...] }
     #       { req_matrix: [[OUT|RET|0|1, time], ...] }
     #       { R_out: [...], R_ret: [...] }
     #  - scenario_files: list of files (each as above) for multi-scenario runs
-    demand_file: setups/demo_cont_demand.yaml
+    demand_file: setups/demo_cont_demand_simpler.yaml
     # scenario_files:
     #   - setups/scenario_1.yaml
     #   - setups/scenario_2.yaml
