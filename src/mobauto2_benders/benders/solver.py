@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Iterable, Mapping, Any
 
 from ..config import BendersConfig
 from .master import MasterProblem
@@ -11,6 +11,142 @@ from .subproblem import Subproblem
 from .types import SolveStatus, SubproblemResult
 
 log = logging.getLogger(__name__)
+
+
+# --- Global cut filtering knobs ---
+# relative violation threshold
+VIOL_TOL_REL: float = 1e-3
+# rounding digits for coefficients in signatures
+COEFF_ROUND_DIGITS: int = 5
+# treat smaller coefficients as zero
+COEFF_ZERO_TOL: float = 1e-8
+
+# Global pool of cut signatures to avoid numerical duplicates
+_cut_signatures: set[tuple] = set()
+
+# Debug logging for cuts (to avoid log explosion)
+DEBUG_CUTS: bool = True
+DEBUG_MAX_CUTS: int = 50
+_debug_cut_count: int = 0
+_debug_suppressed_notice_done: bool = False
+# Limit how many coefficients to list per cut in debug
+DEBUG_COEFFS_TOP_K: int = 10
+
+
+def _key_for_sort(idx: Any) -> Any:
+    """Stable key for sorting heterogeneous index types in signatures."""
+    if isinstance(idx, (int, float, str)):
+        return idx
+    try:
+        return tuple(idx)  # type: ignore[arg-type]
+    except Exception:
+        return repr(idx)
+
+
+def make_cut_signature(const: float, slopes: Mapping[Any, float] | Iterable[tuple[Any, float]]) -> tuple:
+    """Build a canonical signature for a cut: (rounded_const, ((idx, rounded_beta), ...)).
+
+    - Only include coefficients with |beta| > COEFF_ZERO_TOL.
+    - Round constant and betas to COEFF_ROUND_DIGITS.
+    - Sort entries by index for determinism.
+    """
+    if not isinstance(slopes, Mapping):
+        slopes = dict(slopes)  # type: ignore[arg-type]
+    rc = round(float(const), COEFF_ROUND_DIGITS)
+    items: list[tuple[Any, float]] = []
+    for k, v in slopes.items():
+        vv = float(v)
+        if abs(vv) <= COEFF_ZERO_TOL:
+            continue
+        items.append((k, round(vv, COEFF_ROUND_DIGITS)))
+    items.sort(key=lambda kv: _key_for_sort(kv[0]))
+    return (rc, tuple(items))
+
+
+def add_benders_cut(
+    iteration: int,
+    const: float,
+    slopes: Mapping[Any, float] | Iterable[tuple[Any, float]],
+    lhs_value: float,
+    rhs_value: float,
+    cut_type: str = "optimality",
+) -> bool:
+    """Common filter for adding a Benders cut.
+
+    - Computes violation and compares to relative threshold.
+    - Skips numerically duplicate cuts using a global signature set.
+    - Logs a concise status message and returns True if the cut should be added.
+    """
+    viol = float(rhs_value) - float(lhs_value)
+    thr = VIOL_TOL_REL * (abs(float(rhs_value)) + 1.0)
+    def _dbg(msg: str) -> None:
+        global _debug_cut_count, _debug_suppressed_notice_done
+        if not DEBUG_CUTS:
+            return
+        if _debug_cut_count < DEBUG_MAX_CUTS:
+            log.info(msg)
+            _debug_cut_count += 1
+        else:
+            if not _debug_suppressed_notice_done:
+                log.info("[BENDERS] cut debug: further messages suppressed")
+                _debug_suppressed_notice_done = True
+
+    if viol < thr:
+        _dbg(
+            f"[BENDERS] cut skipped: small violation (it={iteration} type={cut_type} lhs={float(lhs_value):.6g} rhs={float(rhs_value):.6g} viol={viol:.3g} thr={thr:.3g})"
+        )
+        return False
+
+    # Prepare slopes as a dictionary for debug printing and signature computation
+    if isinstance(slopes, Mapping):
+        _slopes_dict: dict[Any, float] = dict(slopes)
+    else:
+        _slopes_dict = dict(slopes)  # type: ignore[arg-type]
+
+    # Verbose cut debug: print summary + top-K coefficients using module logger
+    if DEBUG_CUTS:
+        global _debug_cut_count
+        _debug_cut_count += 1
+        if _debug_cut_count <= DEBUG_MAX_CUTS:
+            # Only report coefficients above zero tolerance
+            nz_items = [(k, float(v)) for k, v in _slopes_dict.items() if abs(float(v)) > COEFF_ZERO_TOL]
+            nnz = len(nz_items)
+            # Summary: range of coefficients if any
+            if nz_items:
+                vals = [abs(v) for _, v in nz_items]
+                # Sort by descending magnitude for top-K printout
+                nz_items.sort(key=lambda kv: abs(kv[1]), reverse=True)
+                vmin = min(nz_items, key=lambda kv: kv[1])[1]
+                vmax = max(nz_items, key=lambda kv: kv[1])[1]
+                log.info(
+                    "[CUT DEBUG] it=%s type=%s const=%.6g nnz=%s range=[%.3g,%.3g]",
+                    str(iteration), str(cut_type), float(const), nnz, vmin, vmax,
+                )
+            else:
+                log.info(
+                    "[CUT DEBUG] it=%s type=%s const=%.6g nnz=0",
+                    str(iteration), str(cut_type), float(const),
+                )
+            # Print top-K by absolute value
+            kmax = max(0, int(DEBUG_COEFFS_TOP_K))
+            for k, v in nz_items[:kmax]:
+                try:
+                    log.info("beta[%s] = %.6g", str(k), float(v))
+                except Exception:
+                    log.info("beta[%r] = %.6g", k, float(v))
+            if nnz > kmax > 0:
+                log.info("... (%d coefficient(s) omitted)", nnz - kmax)
+
+    sig = make_cut_signature(const, _slopes_dict)
+    if sig in _cut_signatures:
+        nnz = len(sig[1]) if isinstance(sig, tuple) and len(sig) > 1 else "-"
+        _dbg(f"[BENDERS] cut skipped: duplicate (it={iteration} type={cut_type} nnz={nnz})")
+        return False
+
+    _cut_signatures.add(sig)
+    nnz = len(sig[1]) if isinstance(sig, tuple) and len(sig) > 1 else "-"
+    _dbg(f"[BENDERS] cut added (it={iteration} type={cut_type} nnz={nnz})")
+    return True
 
 
 @dataclass(slots=True)

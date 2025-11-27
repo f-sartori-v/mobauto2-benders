@@ -8,6 +8,7 @@ import pyomo.environ as pyo
 from ..benders.master import MasterProblem
 from ..benders.subproblem import Subproblem
 from ..benders.types import SubproblemResult
+from ..benders.solver import add_benders_cut  # shared cut filtering
 
 try:  # Optional import for CPLEX lazy callbacks
     import cplex  # type: ignore
@@ -194,6 +195,20 @@ class ProblemMaster(MasterProblem):
 
         # Note: We no longer enforce "first non-idle must be OUT".
         # Charging at Longvilliers (s=0) is allowed even before the first OUT.
+
+        # Never recharge right after an idle slot at Longvilliers.
+        # Interpretation: if the previous slot at Longvilliers had neither a departure nor charging
+        # (i.e., it was an idle/wait slot), then charging in the current slot is not allowed.
+        # Linear form: c[q,t] <= yOUT[q,t-1] + c[q,t-1] + (1 - atL[q,t-1])
+        # - If prev was idle at L: yOUT=0, c=0, atL=1 -> RHS=0, so c[q,t]=0
+        # - If prev not at L (travel/Massy): atL=0 -> RHS>=1, no restriction beyond other gates
+        # - If prev had charge or departure: RHS>=something positive, allowing continued charge if feasible
+        for q in m.Q:
+            for t in range(1, T):
+                m.add_component(
+                    f"C_no_recharge_after_idle_{q}_{t}",
+                    pyo.Constraint(expr=m.c[q, t] <= m.yOUT[q, t - 1] + m.c[q, t - 1] + 1 - m.atL[q, t - 1]),
+                )
 
         for q in m.Q:
             # Start at Longvilliers and end at Longvilliers (no ongoing trip at the end)
@@ -435,11 +450,16 @@ class ProblemMaster(MasterProblem):
                     except Exception:
                         pass
                 rhs_val = float(const)
-                abs_tol = 1e-6
-                rel_tol = 1e-6
-                viol = rhs_val - lhs_val
-                thr = abs_tol + rel_tol * abs(rhs_val)
-                if not (viol > thr):
+                # Build slopes map over y-variable indices (β for RHS representation)
+                slopes = {}
+                for t, a in coeff_out_t.items():
+                    if t in Yout_index:
+                        slopes[Yout_index[t]] = float(a)
+                for t, a in coeff_ret_t.items():
+                    if t in Yret_index:
+                        slopes[Yret_index[t]] = float(a)
+                # Use shared filter (logs and deduplicates)
+                if not add_benders_cut(iteration=0, const=float(const), slopes=slopes, lhs_value=lhs_val, rhs_value=rhs_val, cut_type="optimality"):
                     return
 
                 # Add lazy constraint
@@ -864,8 +884,6 @@ class ProblemMaster(MasterProblem):
         scale = 1.0
         disagg_dir = hasattr(m, "theta_out") and hasattr(m, "theta_ret")
         added_any = True
-        add_abs_tol = float(self._p("cut_add_tolerance", 1e-6))
-        add_rel_tol = float(self._p("cut_add_rel_tolerance", 1e-6))
         if disagg_dir and (const_adj_out is not None) and (const_adj_ret is not None):
             # Build separate RHS for OUT/RET
             if aggregate:
@@ -878,69 +896,85 @@ class ProblemMaster(MasterProblem):
             lhs_out = m.theta_out
             lhs_ret = m.theta_ret
 
-            # Violation checks
+            # Violation values and shared filter per direction
             lhs_out_val = float(pyo.value(lhs_out))
             rhs_out_val = float(pyo.value(rhs_out))
             lhs_ret_val = float(pyo.value(lhs_ret))
             rhs_ret_val = float(pyo.value(rhs_ret))
-            viol_out = rhs_out_val - lhs_out_val
-            viol_ret = rhs_ret_val - lhs_ret_val
-            thr_out = add_abs_tol + add_rel_tol * abs(rhs_out_val)
-            thr_ret = add_abs_tol + add_rel_tol * abs(rhs_ret_val)
-            if not force and (viol_out <= thr_out) and (viol_ret <= thr_ret):
-                print(
-                    f"[BENDERS] Eval cut (dir): OUT: lhs={lhs_out_val:.6g} rhs={rhs_out_val:.6g} viol={viol_out:.3g} thr={thr_out:.3g}; "
-                    f"RET: lhs={lhs_ret_val:.6g} rhs={rhs_ret_val:.6g} viol={viol_ret:.3g} thr={thr_ret:.3g} added=False"
+            if aggregate:
+                slopes_out = {("Yout", int(t)): float(v) for t, v in agg_out.items()}
+                slopes_ret = {("Yret", int(t)): float(v) for t, v in agg_ret.items()}
+            else:
+                slopes_out = {("yOUT", int(q), int(t)): float(v) for (q, t), v in agg_out.items()}  # type: ignore[misc]
+                slopes_ret = {("yRET", int(q), int(t)): float(v) for (q, t), v in agg_ret.items()}  # type: ignore[misc]
+            added_out = True
+            added_ret = True
+            if not force:
+                added_out = add_benders_cut(
+                    iteration=-1,
+                    const=float(const_adj_out),
+                    slopes=slopes_out,
+                    lhs_value=lhs_out_val,
+                    rhs_value=rhs_out_val,
+                    cut_type="optimality:out",
                 )
-                return False
+                added_ret = add_benders_cut(
+                    iteration=-1,
+                    const=float(const_adj_ret),
+                    slopes=slopes_ret,
+                    lhs_value=lhs_ret_val,
+                    rhs_value=rhs_ret_val,
+                    cut_type="optimality:ret",
+                )
+                if not (added_out or added_ret):
+                    return False
         else:
             lhs = m.theta
             rhs_scaled = rhs
             lhs_val = float(pyo.value(lhs))
             rhs_val = float(pyo.value(rhs_scaled))
-            violation = rhs_val - lhs_val
-            threshold = add_abs_tol + add_rel_tol * abs(rhs_val)
-            if not force and not (violation > threshold):
-                print(
-                    f"[BENDERS] Eval cut: lhs={lhs_val:.6g} rhs={rhs_val:.6g} viol={violation:.3g} thr={threshold:.3g} added=False"
+            if aggregate:
+                slopes_all = {("Yout", int(t)): float(v) for t, v in agg_out.items()}
+                slopes_all.update({("Yret", int(t)): float(v) for t, v in agg_ret.items()})
+            else:
+                slopes_all = {("yOUT", int(q), int(t)): float(v) for (q, t), v in agg_out.items()}  # type: ignore[misc]
+                slopes_all.update({("yRET", int(q), int(t)): float(v) for (q, t), v in agg_ret.items()})  # type: ignore[misc]
+            if not force:
+                ok = add_benders_cut(
+                    iteration=-1,
+                    const=float(const_adj),
+                    slopes=slopes_all,
+                    lhs_value=lhs_val,
+                    rhs_value=rhs_val,
+                    cut_type=str(cut.cut_type).lower() if hasattr(cut, "cut_type") else "optimality",
                 )
-                return False
+                if not ok:
+                    return False
 
-        # Fingerprint to avoid adding duplicates
-        def _round6(x: float) -> float:
-            return float(f"{x:.6g}")
-        fp_out = []
-        fp_ret = []
-        # Fingerprint on Yout/Yret aggregated slopes (bypass if force=True)
-        if aggregate:
-            fp_out = sorted((int(t), _round6(float(v))) for t, v in agg_out.items())
-            fp_ret = sorted((int(t), _round6(float(v))) for t, v in agg_ret.items())
-        else:
-            fp_out = sorted(((int(q), int(t), _round6(float(v))) for (q, t), v in agg_out.items()))  # type: ignore[misc]
-            fp_ret = sorted(((int(q), int(t), _round6(float(v))) for (q, t), v in agg_ret.items()))  # type: ignore[misc]
-        if disagg_dir and (const_adj_out is not None) and (const_adj_ret is not None):
-            fp = ("opt_dir", _round6(const_adj_out), _round6(const_adj_ret), tuple(fp_out), tuple(fp_ret))
-        else:
-            fp = ("opt", _round6(const_adj), tuple(fp_out), tuple(fp_ret))
-        if not force:
-            if fp in self._cut_fps:
-                print("[BENDERS] Skipped duplicate cut")
-                return False
-            self._cut_fps.add(fp)
+        # Duplicate check handled by add_benders_cut
 
         # Create explicit constraint(s) and register with persistent solver if used
         if hasattr(m, "theta_out") and hasattr(m, "theta_ret") and (const_adj_out is not None) and (const_adj_ret is not None):
-            cname_out = f"benders_cut_out_{self._cut_idx}"
-            cname_ret = f"benders_cut_ret_{self._cut_idx}"
-            con_out = pyo.Constraint(expr=(m.theta_out >= rhs_out))
-            con_ret = pyo.Constraint(expr=(m.theta_ret >= rhs_ret))
-            setattr(m.BendersCuts, cname_out, con_out)
-            setattr(m.BendersCuts, cname_ret, con_ret)
-            if getattr(self, "_is_persistent", False):
-                self._solver.add_constraint(con_out)
-                self._solver.add_constraint(con_ret)
-            con_list = [con_out, con_ret]
-            name_list = [cname_out, cname_ret]
+            con_list = []
+            name_list = []
+            # OUT direction
+            if force or 'added_out' in locals() and added_out:
+                cname_out = f"benders_cut_out_{self._cut_idx}"
+                con_out = pyo.Constraint(expr=(m.theta_out >= rhs_out))
+                setattr(m.BendersCuts, cname_out, con_out)
+                if getattr(self, "_is_persistent", False):
+                    self._solver.add_constraint(con_out)
+                con_list.append(con_out)
+                name_list.append(cname_out)
+            # RET direction
+            if force or 'added_ret' in locals() and added_ret:
+                cname_ret = f"benders_cut_ret_{self._cut_idx}"
+                con_ret = pyo.Constraint(expr=(m.theta_ret >= rhs_ret))
+                setattr(m.BendersCuts, cname_ret, con_ret)
+                if getattr(self, "_is_persistent", False):
+                    self._solver.add_constraint(con_ret)
+                con_list.append(con_ret)
+                name_list.append(cname_ret)
         else:
             cname = f"benders_cut_{self._cut_idx}"
             lhs = m.theta
@@ -1035,13 +1069,11 @@ class ProblemMaster(MasterProblem):
         try:
             if hasattr(m, "theta_out") and hasattr(m, "theta_ret") and (const_adj_out is not None) and (const_adj_ret is not None):
                 print(
-                    f"[BENDERS] Eval cut (dir): OUT lhs={lhs_out_val:.6g} rhs={rhs_out_val:.6g} viol={viol_out:.3g} thr={thr_out:.3g}; "
-                    f"RET lhs={lhs_ret_val:.6g} rhs={rhs_ret_val:.6g} viol={viol_ret:.3g} thr={thr_ret:.3g} added=True"
+                    f"[BENDERS] Eval cut (dir): OUT lhs={lhs_out_val:.6g} rhs={rhs_out_val:.6g}; "
+                    f"RET lhs={lhs_ret_val:.6g} rhs={rhs_ret_val:.6g}"
                 )
             else:
-                print(
-                    f"[BENDERS] Eval cut: lhs={lhs_val:.6g} rhs={rhs_val:.6g} viol={violation:.3g} thr={threshold:.3g} added=True"
-                )
+                print(f"[BENDERS] Eval cut: lhs={lhs_val:.6g} rhs={rhs_val:.6g}")
         except Exception:
             pass
         self._cut_idx += 1

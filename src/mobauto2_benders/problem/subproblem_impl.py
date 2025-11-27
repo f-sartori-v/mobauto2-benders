@@ -371,6 +371,10 @@ class ProblemSubproblem(Subproblem):
                 const_ret = float(ub_ret) - sum(dm_ret[tau] * sum_y_ret[tau] for tau in range(T))
                 consts_out.append(const_out)
                 consts_ret.append(const_ret)
+                # Evaluate line at incumbent for diagnostics
+                theta_lb_s = float(const) \
+                    + sum(dm_out[t] * sum_y_out[t] for t in range(T)) \
+                    + sum(dm_ret[t] * sum_y_ret[t] for t in range(T))
                 cuts.append(Cut(
                     name="opt_cut_s",
                     cut_type=CutType.OPTIMALITY,
@@ -379,6 +383,7 @@ class ProblemSubproblem(Subproblem):
                         "const_out": const_out,
                         "const_ret": const_ret,
                         "coeff_yOUT": c_out_map,
+                        "theta_lb": float(theta_lb_s),
                         "coeff_yRET": c_ret_map,
                     },
                 ))
@@ -443,10 +448,13 @@ class ProblemSubproblem(Subproblem):
 
             # Build coefficients via duals (fast) or finite differences (fallback)
             if use_dual:
+                # Read duals π on capacity layers and aggregate by time tau
                 pi_out = dict(duals.get("pi_OUT", {}))
                 pi_ret = dict(duals.get("pi_RET", {}))
+                # Slopes dm[t] = S * π[t] (typically <= 0 in minimization; more capacity reduces cost)
                 dm_out = {int(t): float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
                 dm_ret = {int(t): float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
+                # Expand to per-(q,t)
                 c_out_map: Dict[tuple[int, int], float] = {}
                 c_ret_map: Dict[tuple[int, int], float] = {}
                 for name in candidate.keys():
@@ -465,17 +473,19 @@ class ProblemSubproblem(Subproblem):
                         if 0 <= tau < T:
                             c_ret_map[(q, tau)] = dm_ret.get(tau, 0.0)
             else:
+                # Finite differences fallback
                 c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
 
-            # Compute sum_y per tau (number of vehicles starting at tau) from current capacity
+            # Number of vehicles per departure time from current candidate
             sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
             sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
 
-            # Constant so that cut passes through (y, Q(y))
+            # Intercept (const) so that the cut passes through current incumbent: const = Q(y) - dm·Y
             const = float(ub_val)
-            const -= sum(dm_out[tau] * sum_y_out[tau] for tau in range(T))
-            const -= sum(dm_ret[tau] * sum_y_ret[tau] for tau in range(T))
-            # Per-direction constants if available from SP diagnostics
+            const -= sum(dm_out[t] * sum_y_out[t] for t in range(T))
+            const -= sum(dm_ret[t] * sum_y_ret[t] for t in range(T))
+
+            # Directional intercepts if available from decomposition diagnostics
             try:
                 ub_out = float(duals.get("ub_out", const))
             except Exception:
@@ -484,18 +494,26 @@ class ProblemSubproblem(Subproblem):
                 ub_ret = float(duals.get("ub_ret", 0.0))
             except Exception:
                 ub_ret = 0.0
-            const_out = float(ub_out) - sum(dm_out[tau] * sum_y_out[tau] for tau in range(T))
-            const_ret = float(ub_ret) - sum(dm_ret[tau] * sum_y_ret[tau] for tau in range(T))
+            const_out = float(ub_out) - sum(dm_out[t] * sum_y_out[t] for t in range(T))
+            const_ret = float(ub_ret) - sum(dm_ret[t] * sum_y_ret[t] for t in range(T))
 
+            # Optional: evaluate the line at the incumbent (theta_lb) to verify tightness (≈ ub_val)
+            theta_lb = float(const) \
+                + sum(dm_out[t] * sum_y_out[t] for t in range(T)) \
+                + sum(dm_ret[t] * sum_y_ret[t] for t in range(T))
+
+            # Emit cut metadata
             cut = Cut(
                 name="opt_cut",
                 cut_type=CutType.OPTIMALITY,
                 metadata={
-                    "const": const,
-                    "const_out": const_out,
-                    "const_ret": const_ret,
+                    "const": float(const),
+                    "const_out": float(const_out),
+                    "const_ret": float(const_ret),
                     "coeff_yOUT": c_out_map,
                     "coeff_yRET": c_ret_map,
+                    # diagnostics
+                    "theta_lb": float(theta_lb),
                 },
             )
             # Diagnostics: demand per slot split by direction and served pax per departure slot (OUT/RET)

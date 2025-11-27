@@ -1,7 +1,7 @@
 run:
   max_iterations: 100
   tolerance: 0.001
-  time_limit_s: 180
+  time_limit_s: 600
   # log_level controls the verbosity of Python's logging output.
   # Options (most verbose to least): DEBUG, INFO, WARNING, ERROR, CRITICAL
   # - DEBUG: detailed internal iteration logs
@@ -23,7 +23,7 @@ master:
     solver: cplex_persistent
     # Install lazy cuts via CPLEX callback (reduces full MP re-solves)
     # Disabled to revert to the stable explicit-cut path
-    use_lazy_cuts: false
+    use_lazy_cuts: true
     # Print the underlying solver's log during each MP solve
     solver_tee: false
     # (Optional) CPLEX tuning can go here; keeping defaults for stability
@@ -41,7 +41,7 @@ master:
     # L: energy consumed when starting a trip (units consistent with Emax). This is
     #   NOT the number of slots; it is used in the battery balance and a guard
     #   constraint requiring b[q,t] >= 2*L to start an OUT trip.
-    L: 30
+    L: 28
     # start_cost_epsilon: tiny penalty on starting trips to discourage gratuitous starts
     #   Applied to sum_q,t (yOUT[q,t] + yRET[q,t]) in the master objective.
     start_cost_epsilon: 0.01
@@ -93,7 +93,9 @@ subproblem:
     #       { req_matrix: [[OUT|RET|0|1, time], ...] }
     #       { R_out: [...], R_ret: [...] }
     #  - scenario_files: list of files (each as above) for multi-scenario runs
-    demand_file: setups/demo_cont_demand_simpler.yaml
-    # scenario_files:
-    #   - setups/scenario_1.yaml
-    #   - setups/scenario_2.yaml
+    #demand_file: setups/demo_cont_demand_simpler.yaml
+    scenario_files:
+       - setups/demo_cont_demand_simpler.yaml
+       - setups/demo_cont_demand_simpler2.yaml
+       - setups/demo_cont_demand_simpler3.yaml
+    #   - setups/demo_cont_demand3.yaml
