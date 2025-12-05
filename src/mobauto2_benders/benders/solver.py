@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Iterable, Mapping, Any
 
 from ..config import BendersConfig
+from .core import CorePoint
 from .master import MasterProblem
 from .subproblem import Subproblem
 from .types import SolveStatus, SubproblemResult
@@ -43,7 +44,7 @@ def _key_for_sort(idx: Any) -> Any:
         return repr(idx)
 
 
-def make_cut_signature(const: float, slopes: Mapping[Any, float] | Iterable[tuple[Any, float]]) -> tuple:
+def make_cut_signature(const: float, slopes: Mapping[Any, float] | Iterable[tuple[Any, float]], scope: Any | None = None) -> tuple:
     """Build a canonical signature for a cut: (rounded_const, ((idx, rounded_beta), ...)).
 
     - Only include coefficients with |beta| > COEFF_ZERO_TOL.
@@ -60,7 +61,14 @@ def make_cut_signature(const: float, slopes: Mapping[Any, float] | Iterable[tupl
             continue
         items.append((k, round(vv, COEFF_ROUND_DIGITS)))
     items.sort(key=lambda kv: _key_for_sort(kv[0]))
-    return (rc, tuple(items))
+    # Include an optional scope key (e.g., scenario id) to avoid cross-scope dedup
+    if scope is None:
+        return (rc, tuple(items))
+    try:
+        scope_key = tuple(scope) if not isinstance(scope, (int, float, str)) else scope
+    except Exception:
+        scope_key = repr(scope)
+    return (scope_key, rc, tuple(items))
 
 
 def add_benders_cut(
@@ -70,6 +78,7 @@ def add_benders_cut(
     lhs_value: float,
     rhs_value: float,
     cut_type: str = "optimality",
+    signature_scope: Any | None = None,
 ) -> bool:
     """Common filter for adding a Benders cut.
 
@@ -137,14 +146,14 @@ def add_benders_cut(
             if nnz > kmax > 0:
                 log.info("... (%d coefficient(s) omitted)", nnz - kmax)
 
-    sig = make_cut_signature(const, _slopes_dict)
+    sig = make_cut_signature(const, _slopes_dict, scope=signature_scope)
     if sig in _cut_signatures:
-        nnz = len(sig[1]) if isinstance(sig, tuple) and len(sig) > 1 else "-"
+        nnz = len(sig[-1]) if isinstance(sig, tuple) and len(sig) > 0 else "-"
         _dbg(f"[BENDERS] cut skipped: duplicate (it={iteration} type={cut_type} nnz={nnz})")
         return False
 
     _cut_signatures.add(sig)
-    nnz = len(sig[1]) if isinstance(sig, tuple) and len(sig) > 1 else "-"
+    nnz = len(sig[-1]) if isinstance(sig, tuple) and len(sig) > 0 else "-"
     _dbg(f"[BENDERS] cut added (it={iteration} type={cut_type} nnz={nnz})")
     return True
 
@@ -170,8 +179,159 @@ class BendersSolver:
         self.master.initialize()
         print("Initialized master problem.")
 
+        # Helper: print diagnostics from the most recent subproblem evaluation
+        def _print_sp_diagnostics(diag: dict | None) -> None:
+            if not diag:
+                return
+            # If multiple scenarios were evaluated, expect a list under 'scenarios'
+            scenarios = diag.get("scenarios") if isinstance(diag, dict) else None
+            try:
+                m = getattr(self.master, "m", None)
+            except Exception:
+                m = None
+            def _fmt_header(T: int) -> str:
+                return "       " + " ".join(f"{t:>3d}" for t in range(int(T)))
+            def _fmt_row(vals: list[float], T: int) -> str:
+                return " ".join(f"{float(v):>3.0f}" for v in (list(vals) + [0.0] * int(T))[: int(T)])
+            def _map_layers_to_shuttles(T: int, pax_by_tau_k: list[list[float]], dir_: str) -> list[list[float]]:
+                # Build per-shuttle matrix [q][tau] from per-layer at each tau using master starts
+                if m is None:
+                    # Fallback: evenly distribute across layers if no model available
+                    # Keep same shape as Q x T with zeros
+                    try:
+                        Q = list(getattr(m, "Q", []))
+                        qn = len(Q)
+                    except Exception:
+                        qn = 0
+                    return [[0.0 for _ in range(T)] for _ in range(qn)]
+                Q = list(m.Q)
+                per_q_tau = [[0.0 for _ in range(T)] for _ in Q]
+                for tau in range(T):
+                    # Determine which shuttles start at tau in the given direction
+                    if dir_.upper() == "OUT":
+                        qs = [q for q in Q if float(m.yOUT[q, tau].value or 0.0) >= 0.5]
+                    else:
+                        qs = [q for q in Q if float(m.yRET[q, tau].value or 0.0) >= 0.5]
+                    kmax = min(len(qs), len(pax_by_tau_k[tau]) if tau < len(pax_by_tau_k) else 0)
+                    for k in range(kmax):
+                        q = qs[k]
+                        per_q_tau[q][tau] = float(pax_by_tau_k[tau][k] or 0.0)
+                return per_q_tau
+            # Multi-scenario path
+            if isinstance(scenarios, list) and scenarios:
+                try:
+                    T = int(diag.get("T")) if "T" in diag else None
+                except Exception:
+                    T = None
+                for idx, sdiag in enumerate(scenarios, start=1):
+                    try:
+                        label = sdiag.get("label", f"scenario {idx}")
+                    except Exception:
+                        label = f"scenario {idx}"
+                    try:
+                        R_out = sdiag.get("R_out")
+                        R_ret = sdiag.get("R_ret")
+                        pax_out = sdiag.get("pax_out_by_tau")
+                        pax_ret = sdiag.get("pax_ret_by_tau")
+                        pax_out_k = sdiag.get("pax_out_by_tau_k") or []
+                        pax_ret_k = sdiag.get("pax_ret_by_tau_k") or []
+                        if T is None:
+                            if isinstance(pax_out, list):
+                                T = len(pax_out)
+                            elif isinstance(R_out, list):
+                                T = len(R_out)
+                        if not isinstance(T, int):
+                            continue
+                        header = _fmt_header(T)
+                        print(f"\nScenario {idx}: {label}")
+                        if isinstance(R_out, list) and isinstance(R_ret, list):
+                            print("Demand per slot (OUT/RET):")
+                            print(header)
+                            print(f"  OUT: {_fmt_row(R_out, T)}")
+                            print(f"  RET: {_fmt_row(R_ret, T)}")
+                        # Per-shuttle passengers using per-layer flows mapped to shuttles
+                        try:
+                            per_q_out = _map_layers_to_shuttles(T, pax_out_k, "OUT")
+                            per_q_ret = _map_layers_to_shuttles(T, pax_ret_k, "RET")
+                            # Totals (OUT+RET)
+                            Q = list(m.Q) if m is not None else list(range(len(per_q_out)))
+                            print("Passengers per shuttle and slot (OUT):")
+                            print(header)
+                            for q in Q:
+                                print(f"  q={q}: {_fmt_row(per_q_out[q] if q < len(per_q_out) else [0.0]*T, T)}")
+                            print("Passengers per shuttle and slot (RET):")
+                            print(header)
+                            for q in Q:
+                                print(f"  q={q}: {_fmt_row(per_q_ret[q] if q < len(per_q_ret) else [0.0]*T, T)}")
+                            # Combined total per shuttle (optional)
+                            try:
+                                print("Passengers per shuttle and slot (TOTAL):")
+                                print(header)
+                                for q in Q:
+                                    row = [0.0 for _ in range(T)]
+                                    if q < len(per_q_out):
+                                        for t in range(T):
+                                            row[t] += float(per_q_out[q][t] if t < len(per_q_out[q]) else 0.0)
+                                    if q < len(per_q_ret):
+                                        for t in range(T):
+                                            row[t] += float(per_q_ret[q][t] if t < len(per_q_ret[q]) else 0.0)
+                                    print(f"  q={q}: {_fmt_row(row, T)}")
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    except Exception:
+                        continue
+                return
+            # Single-scenario path (legacy)
+            try:
+                T = int(diag.get("T")) if "T" in diag else None
+                R_out = diag.get("R_out")
+                R_ret = diag.get("R_ret")
+                pax_out = diag.get("pax_out_by_tau")
+                pax_ret = diag.get("pax_ret_by_tau")
+                if isinstance(pax_out, list) and isinstance(pax_ret, list):
+                    n = len(pax_out)
+                    if T is None:
+                        T = n
+                    header = _fmt_header(T)
+                    if isinstance(R_out, list) and isinstance(R_ret, list):
+                        print("\nDemand per slot (OUT/RET):")
+                        print(header)
+                        print(f"  OUT: {_fmt_row(R_out, T)}")
+                        print(f"  RET: {_fmt_row(R_ret, T)}")
+                    try:
+                        if m is not None:
+                            Q = list(m.Q)
+                            served_qt = [[0.0 for _ in range(T)] for _ in Q]
+                            for tau in range(T):
+                                out_qs = [q for q in Q if float(m.yOUT[q, tau].value or 0.0) >= 0.5]
+                                ret_qs = [q for q in Q if float(m.yRET[q, tau].value or 0.0) >= 0.5]
+                                k_out = len(out_qs)
+                                k_ret = len(ret_qs)
+                                share_out = (float(pax_out[tau]) / k_out) if k_out > 0 else 0.0
+                                share_ret = (float(pax_ret[tau]) / k_ret) if k_ret > 0 else 0.0
+                                for q in out_qs:
+                                    served_qt[q][tau] += share_out
+                                for q in ret_qs:
+                                    served_qt[q][tau] += share_ret
+                            print("\nPax per shuttle and slot (total):")
+                            print(header)
+                            for q in Q:
+                                print(f"  q={q}: {_fmt_row(served_qt[q], T)}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
         # Optionally install lazy constraints callback if supported
         use_lazy = bool(self.cfg.master.params.get("use_lazy_cuts", False))
+        # Magnanti–Wong requires explicit separation to access the core point; disable lazy when enabled
+        try:
+            if bool(self.cfg.subproblem.params.get("use_magnanti_wong", False)):
+                use_lazy = False
+        except Exception:
+            pass
         if use_lazy and hasattr(self.master, "install_lazy_callback"):
             # Pass the subproblem instance so the callback can generate cuts
             getattr(self.master, "install_lazy_callback")(self.subproblem)
@@ -216,46 +376,7 @@ class BendersSolver:
                         pass
                     # Optional diagnostics from last evaluated subproblem (if available)
                     try:
-                        if last_diag:
-                            T = int(last_diag.get("T")) if "T" in last_diag else None
-                            R_out = last_diag.get("R_out")
-                            R_ret = last_diag.get("R_ret")
-                            pax_out = last_diag.get("pax_out_by_tau")
-                            pax_ret = last_diag.get("pax_ret_by_tau")
-                            if isinstance(pax_out, list) and isinstance(pax_ret, list):
-                                n = len(pax_out)
-                                if T is None:
-                                    T = n
-                                header = "       " + " ".join(f"{t:>3d}" for t in range(T))
-                                def fmt_row_floats(vals: list[float]) -> str:
-                                    return " ".join(f"{float(v):>3.0f}" for v in (vals + [0.0] * T)[:T])
-                                if isinstance(R_out, list) and isinstance(R_ret, list):
-                                    print("\nDemand per slot (OUT/RET):")
-                                    print(header)
-                                    print(f"  OUT: {fmt_row_floats(R_out)}")
-                                    print(f"  RET: {fmt_row_floats(R_ret)}")
-                                try:
-                                    m = getattr(self.master, "m", None)
-                                    if m is not None:
-                                        Q = list(m.Q)
-                                        served_qt = [[0.0 for _ in range(T)] for _ in Q]
-                                        for tau in range(T):
-                                            out_qs = [q for q in Q if float(m.yOUT[q, tau].value or 0.0) >= 0.5]
-                                            ret_qs = [q for q in Q if float(m.yRET[q, tau].value or 0.0) >= 0.5]
-                                            k_out = len(out_qs)
-                                            k_ret = len(ret_qs)
-                                            share_out = (float(pax_out[tau]) / k_out) if k_out > 0 else 0.0
-                                            share_ret = (float(pax_ret[tau]) / k_ret) if k_ret > 0 else 0.0
-                                            for q in out_qs:
-                                                served_qt[q][tau] += share_out
-                                            for q in ret_qs:
-                                                served_qt[q][tau] += share_ret
-                                        print("\nPax per shuttle and slot (total):")
-                                        print(header)
-                                        for q in Q:
-                                            print(f"  q={q}: {fmt_row_floats(served_qt[q])}")
-                                except Exception:
-                                    pass
+                        _print_sp_diagnostics(last_diag)
                     except Exception:
                         pass
                 except Exception:
@@ -325,6 +446,36 @@ class BendersSolver:
                     best_lower_bound=best_lb,
                     best_upper_bound=best_ub,
                 )
+
+            # Optional: update and pass a core point for Magnanti–Wong selection
+            try:
+                mw_enabled = bool(self.cfg.subproblem.params.get("use_magnanti_wong", False))
+            except Exception:
+                mw_enabled = False
+            if mw_enabled:
+                # Lazy-init the core point helper with configured alpha
+                try:
+                    alpha = float(self.cfg.subproblem.params.get("mw_core_alpha", 0.3) or 0.3)
+                except Exception:
+                    alpha = 0.3
+                if not hasattr(self, "_core_point") or self._core_point is None:
+                    self._core_point = CorePoint(alpha=alpha)
+                # Update core from current incumbent (moving average)
+                try:
+                    # Provide a hint for T from last diagnostics if available
+                    T_hint = None
+                    if last_diag and isinstance(last_diag, dict) and "T" in last_diag:
+                        try:
+                            T_hint = int(last_diag.get("T"))
+                        except Exception:
+                            T_hint = None
+                    self._core_point.update_from_candidate(mres.candidate, T_hint=T_hint)
+                    # Attach to subproblem params for MW dual selection
+                    if isinstance(getattr(self.subproblem, "params", None), dict):
+                        self.subproblem.params["mw_core_point"] = self._core_point.as_params()
+                        self.subproblem.params["use_magnanti_wong"] = True
+                except Exception:
+                    pass
 
             print("Evaluating Subproblem (SP) at candidate...")
             sres: SubproblemResult = self.subproblem.evaluate(mres.candidate)
@@ -450,49 +601,7 @@ class BendersSolver:
                         pass
                     # Additional matrices from subproblem diagnostics (if available)
                     try:
-                        if last_diag:
-                            T = int(last_diag.get("T")) if "T" in last_diag else None
-                            R_out = last_diag.get("R_out")
-                            R_ret = last_diag.get("R_ret")
-                            pax_out = last_diag.get("pax_out_by_tau")
-                            pax_ret = last_diag.get("pax_ret_by_tau")
-                            if isinstance(pax_out, list) and isinstance(pax_ret, list):
-                                n = len(pax_out)
-                                if T is None:
-                                    T = n
-                                # Header aligned as in master formatter
-                                header = "       " + " ".join(f"{t:>3d}" for t in range(T))
-                                def fmt_row_floats(vals: list[float]) -> str:
-                                    return " ".join(f"{float(v):>3.0f}" for v in (vals + [0.0] * T)[:T])
-                                # Demand by direction
-                                if isinstance(R_out, list) and isinstance(R_ret, list):
-                                    print("\nDemand per slot (OUT/RET):")
-                                    print(header)
-                                    print(f"  OUT: {fmt_row_floats(R_out)}")
-                                    print(f"  RET: {fmt_row_floats(R_ret)}")
-                                # Pax per shuttle and slot (total), evenly allocate across starting shuttles at that slot
-                                try:
-                                    m = getattr(self.master, "m", None)
-                                    if m is not None:
-                                        Q = list(m.Q)
-                                        served_qt = [[0.0 for _ in range(T)] for _ in Q]
-                                        for tau in range(T):
-                                            out_qs = [q for q in Q if float(m.yOUT[q, tau].value or 0.0) >= 0.5]
-                                            ret_qs = [q for q in Q if float(m.yRET[q, tau].value or 0.0) >= 0.5]
-                                            k_out = len(out_qs)
-                                            k_ret = len(ret_qs)
-                                            share_out = (float(pax_out[tau]) / k_out) if k_out > 0 else 0.0
-                                            share_ret = (float(pax_ret[tau]) / k_ret) if k_ret > 0 else 0.0
-                                            for q in out_qs:
-                                                served_qt[q][tau] += share_out
-                                            for q in ret_qs:
-                                                served_qt[q][tau] += share_ret
-                                        print("\nPax per shuttle and slot (total):")
-                                        print(header)
-                                        for q in Q:
-                                            print(f"  q={q}: {fmt_row_floats(served_qt[q])}")
-                                except Exception:
-                                    pass
+                        _print_sp_diagnostics(last_diag)
                     except Exception:
                         pass
                     return BendersRunResult(
@@ -540,46 +649,7 @@ class BendersSolver:
                             print(fmt())
                         # Optional diagnostics from last evaluated subproblem (if available)
                         try:
-                            if last_diag:
-                                T = int(last_diag.get("T")) if "T" in last_diag else None
-                                R_out = last_diag.get("R_out")
-                                R_ret = last_diag.get("R_ret")
-                                pax_out = last_diag.get("pax_out_by_tau")
-                                pax_ret = last_diag.get("pax_ret_by_tau")
-                                if isinstance(pax_out, list) and isinstance(pax_ret, list):
-                                    n = len(pax_out)
-                                    if T is None:
-                                        T = n
-                                    header = "       " + " ".join(f"{t:>3d}" for t in range(T))
-                                    def fmt_row_floats(vals: list[float]) -> str:
-                                        return " ".join(f"{float(v):>3.0f}" for v in (vals + [0.0] * T)[:T])
-                                    if isinstance(R_out, list) and isinstance(R_ret, list):
-                                        print("\nDemand per slot (OUT/RET):")
-                                        print(header)
-                                        print(f"  OUT: {fmt_row_floats(R_out)}")
-                                        print(f"  RET: {fmt_row_floats(R_ret)}")
-                                    try:
-                                        m = getattr(self.master, "m", None)
-                                        if m is not None:
-                                            Q = list(m.Q)
-                                            served_qt = [[0.0 for _ in range(T)] for _ in Q]
-                                            for tau in range(T):
-                                                out_qs = [q for q in Q if float(m.yOUT[q, tau].value or 0.0) >= 0.5]
-                                                ret_qs = [q for q in Q if float(m.yRET[q, tau].value or 0.0) >= 0.5]
-                                                k_out = len(out_qs)
-                                                k_ret = len(ret_qs)
-                                                share_out = (float(pax_out[tau]) / k_out) if k_out > 0 else 0.0
-                                                share_ret = (float(pax_ret[tau]) / k_ret) if k_ret > 0 else 0.0
-                                                for q in out_qs:
-                                                    served_qt[q][tau] += share_out
-                                                for q in ret_qs:
-                                                    served_qt[q][tau] += share_ret
-                                            print("\nPax per shuttle and slot (total):")
-                                            print(header)
-                                            for q in Q:
-                                                print(f"  q={q}: {fmt_row_floats(served_qt[q])}")
-                                    except Exception:
-                                        pass
+                            _print_sp_diagnostics(last_diag)
                         except Exception:
                             pass
                     except Exception:
@@ -605,6 +675,11 @@ class BendersSolver:
             if callable(fmt):
                 print("\nBest Master Solution:")
                 print(fmt())
+            # Diagnostics from last evaluated subproblem, if any
+            try:
+                _print_sp_diagnostics(last_diag)
+            except Exception:
+                pass
         except Exception:
             pass
         return BendersRunResult(

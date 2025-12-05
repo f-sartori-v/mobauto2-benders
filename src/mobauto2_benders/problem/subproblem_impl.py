@@ -211,12 +211,126 @@ class ProblemSubproblem(Subproblem):
         # Allow specifying scenarios as file paths
         if not scenarios and isinstance(params.get("scenario_files"), list):
             scenarios = list(params.get("scenario_files"))
-        average_cuts: bool = bool(params.get("average_cuts_across_scenarios", False))
+        # Multi-cut vs averaged cut control.
+        # New flag: multi_cuts_by_scenario (True => return one cut per scenario)
+        # Backward compat: if not provided, use legacy average_cuts_across_scenarios (True => single averaged cut)
+        _mc = params.get("multi_cuts_by_scenario", None)
+        if _mc is None:
+            average_cuts: bool = bool(params.get("average_cuts_across_scenarios", False))
+            multi_cuts: bool = not average_cuts
+        else:
+            multi_cuts = bool(_mc)
+            average_cuts = not multi_cuts
         ub_aggregation: str = str(params.get("ub_aggregation", "mean"))
         weights: list[float] | None = params.get("scenario_weights")
 
         # Only evaluate finite differences for time slots that appear in candidate (fewer solves)
         active_taus = sorted(t_idx) if t_idx else list(range(T))
+
+        # Optional Magnanti–Wong selection
+        mw_enabled: bool = bool(params.get("use_magnanti_wong", False))
+        core_point = params.get("mw_core_point") or {}
+        Ybar_out = list(core_point.get("Yout", [])) if isinstance(core_point, dict) else []
+        Ybar_ret = list(core_point.get("Yret", [])) if isinstance(core_point, dict) else []
+        if len(Ybar_out) < T:
+            Ybar_out = (Ybar_out + [0.0] * T)[:T]
+        if len(Ybar_ret) < T:
+            Ybar_ret = (Ybar_ret + [0.0] * T)[:T]
+        # If the core point is still all zeros (common in early iters), seed it to a small positive
+        # profile so MW has direction to select non-trivial duals.
+        try:
+            if sum(Ybar_out) + sum(Ybar_ret) == 0.0 and T > 0:
+                Ybar_out = [1.0 for _ in range(T)]
+                Ybar_ret = [1.0 for _ in range(T)]
+        except Exception:
+            pass
+
+        def solve_mw_dual(
+            T_: int,
+            Wmax_slots: int,
+            p_penalty: float,
+            S_cap: float,
+            K_out_use: list[int],
+            K_ret_use: list[int],
+            C_out_vec: list[float],
+            C_ret_vec: list[float],
+            R_out_vec: list[float],
+            R_ret_vec: list[float],
+            Ybar_out_vec: list[float],
+            Ybar_ret_vec: list[float],
+            ub_base: float,
+            lp: str,
+            lp_opts: dict | None = None,
+        ) -> tuple[dict[int, float], dict[int, float]] | None:
+            """Solve the dual LP on the optimal face to select a Pareto-optimal dual.
+
+            Returns dm_out[t], dm_ret[t] (slopes w.r.t. sum_y_out[t], sum_y_ret[t]).
+            """
+            md = pyo.ConcreteModel()
+            Tset = range(T_)
+
+            # Dual variables
+            md.a_OUT = pyo.Var(Tset)
+            md.a_RET = pyo.Var(Tset)
+            md.pi_OUT = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)], within=pyo.NonNegativeReals)
+            md.pi_RET = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)], within=pyo.NonNegativeReals)
+
+            # Dual feasibility: for every primal x_OUT[t, tau, k]
+            def df_out_rule(m, t, tau, k):
+                # active arc iff (t+1) <= tau <= min(T-1, t+W)
+                if not ((t + 1) <= tau <= min(T_ - 1, t + Wmax_slots)):
+                    return pyo.Constraint.Skip
+                return m.a_OUT[t] + m.pi_OUT[tau, k] >= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
+            md.DF_OUT = pyo.Constraint([(t, tau, k) for t in Tset for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)],
+                                       rule=lambda m, t, tau, k: df_out_rule(m, t, tau, k))
+            # Dual feasibility for RET
+            def df_ret_rule(m, t, tau, k):
+                if not ((t + 1) <= tau <= min(T_ - 1, t + Wmax_slots)):
+                    return pyo.Constraint.Skip
+                return m.a_RET[t] + m.pi_RET[tau, k] >= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
+            md.DF_RET = pyo.Constraint([(t, tau, k) for t in Tset for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)],
+                                       rule=lambda m, t, tau, k: df_ret_rule(m, t, tau, k))
+
+            # u constraints (nonnegativity vars): a_[t] >= p
+            md.A_OUT_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_OUT[t] >= float(p_penalty))
+            md.A_RET_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_RET[t] >= float(p_penalty))
+
+            # Optimality face equality: dual objective equals primal UB at incumbent
+            cap_out_rhs = [min(float(S_cap), float(C_out_vec[tau])) for tau in Tset]
+            cap_ret_rhs = [min(float(S_cap), float(C_ret_vec[tau])) for tau in Tset]
+            def dual_obj_expr(m):
+                term_dem = sum(float(R_out_vec[t]) * m.a_OUT[t] for t in Tset) + sum(float(R_ret_vec[t]) * m.a_RET[t] for t in Tset)
+                term_cap = sum(cap_out_rhs[tau] * m.pi_OUT[tau, k] for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)) \
+                           + sum(cap_ret_rhs[tau] * m.pi_RET[tau, k] for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0))
+                return term_dem + term_cap
+            md.OptFace = pyo.Constraint(expr=(dual_obj_expr(md) == float(ub_base)))
+
+            # MW objective: maximize dm·Ybar where dm[tau] = S * sum_k pi[tau,k]
+            md.obj = pyo.Objective(
+                expr= float(S_cap) * (
+                    sum(float(Ybar_out_vec[tau]) * sum(md.pi_OUT[tau, k] for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)) for tau in Tset)
+                    + sum(float(Ybar_ret_vec[tau]) * sum(md.pi_RET[tau, k] for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)) for tau in Tset)
+                ),
+                sense=pyo.maximize,
+            )
+
+            solver = pyo.SolverFactory(lp)
+            try:
+                for k, v in (lp_opts or {}).items():
+                    solver.options[k] = v
+            except Exception:
+                pass
+            res = solver.solve(md, tee=False)
+            term = getattr(res.solver, "termination_condition", None)
+            if term not in (pyo.TerminationCondition.optimal,):
+                return None
+
+            dm_out = {}
+            dm_ret = {}
+            for tau in range(T_):
+                dm_out[tau] = float(S_cap) * sum(float(pyo.value(md.pi_OUT[tau, k])) for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0))
+                dm_ret[tau] = float(S_cap) * sum(float(pyo.value(md.pi_RET[tau, k])) for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0))
+            return dm_out, dm_ret
 
         # Finite-difference coefficient builder: for each tau, solve with +S capacity
         def coeffs_by_fdiff(
@@ -300,16 +414,20 @@ class ProblemSubproblem(Subproblem):
             consts_ret: list[float] = []
             coeffs_out_list: list[Dict[tuple[int, int], float]] = []
             coeffs_ret_list: list[Dict[tuple[int, int], float]] = []
+            scenario_diags: list[dict] = []
 
-            for s in scenarios:
+            for idx_s, s in enumerate(scenarios):
                 if isinstance(s, (str, Path)):
                     R_out, R_ret = _load_demand_from_file(s, T)
+                    scen_label = str(s)
                 elif isinstance(s, dict) and ("requests" in s or "req_matrix" in s or "R_out" in s or "R_ret" in s):
                     R_out, R_ret = _aggregate_requests(s, T)
+                    scen_label = str(s.get("name") or s.get("label") or "scenario")
                 else:
                     # Best effort
                     R_out = list(getattr(s, "R_out", [0.0] * T))
                     R_ret = list(getattr(s, "R_ret", [0.0] * T))
+                    scen_label = str(getattr(s, "name", "scenario"))
                 R_out = (R_out + [0.0] * T)[:T]
                 R_ret = (R_ret + [0.0] * T)[:T]
 
@@ -322,7 +440,45 @@ class ProblemSubproblem(Subproblem):
                 ub_vals.append(ub_val)
 
                 # Build marginal slopes either from duals (fast) or finite differences (fallback)
-                if use_dual:
+                if mw_enabled:
+                    # MW-selected dual slopes on optimal face
+                    # Ensure at least one capacity layer per tau for dual π variables
+                    K_out_mw = [max(1, int(K_out_lp[t])) for t in range(T)]
+                    K_ret_mw = [max(1, int(K_ret_lp[t])) for t in range(T)]
+                    dm_pair = solve_mw_dual(
+                        T, Wmax, p_pen, S,
+                        K_out_mw, K_ret_mw,
+                        C_out, C_ret,
+                        R_out, R_ret,
+                        Ybar_out, Ybar_ret,
+                        ub_val,
+                        lp_solver,
+                        solver_options,
+                    )
+                    if dm_pair is None:
+                        # Fallback to finite differences to guarantee nonzero slopes
+                        c_out_fd, c_ret_fd, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
+                    else:
+                        dm_out, dm_ret = dm_pair
+                    # Expand to per-(q,t)
+                    c_out_map: Dict[tuple[int, int], float] = {}
+                    c_ret_map: Dict[tuple[int, int], float] = {}
+                    for name in candidate.keys():
+                        if not isinstance(name, str):
+                            continue
+                        if name.startswith("yOUT["):
+                            inside = name[name.find("[") + 1 : name.find("]")]
+                            q_str, tau_str = inside.split(",")
+                            q = int(q_str.strip()); tau = int(tau_str.strip())
+                            if 0 <= tau < T:
+                                c_out_map[(q, tau)] = dm_out.get(tau, 0.0)
+                        elif name.startswith("yRET["):
+                            inside = name[name.find("[") + 1 : name.find("]")]
+                            q_str, tau_str = inside.split(",")
+                            q = int(q_str.strip()); tau = int(tau_str.strip())
+                            if 0 <= tau < T:
+                                c_ret_map[(q, tau)] = dm_ret.get(tau, 0.0)
+                elif use_dual:
                     pi_out = dict(duals.get("pi_OUT", {}))
                     pi_ret = dict(duals.get("pi_RET", {}))
                     # Duals on capacity (<=) constraints in Pyomo have negative sign for binding constraints
@@ -376,7 +532,7 @@ class ProblemSubproblem(Subproblem):
                     + sum(dm_out[t] * sum_y_out[t] for t in range(T)) \
                     + sum(dm_ret[t] * sum_y_ret[t] for t in range(T))
                 cuts.append(Cut(
-                    name="opt_cut_s",
+                    name=f"opt_cut_s_{int(idx_s)}",
                     cut_type=CutType.OPTIMALITY,
                     metadata={
                         "const": const,
@@ -385,8 +541,20 @@ class ProblemSubproblem(Subproblem):
                         "coeff_yOUT": c_out_map,
                         "theta_lb": float(theta_lb_s),
                         "coeff_yRET": c_ret_map,
+                        "scenario_index": int(idx_s),
                     },
                 ))
+                # Collect per-scenario diagnostics for reporting
+                scenario_diags.append({
+                    "label": scen_label,
+                    "T": T,
+                    "R_out": [float(R_out[t]) for t in range(T)],
+                    "R_ret": [float(R_ret[t]) for t in range(T)],
+                    "pax_out_by_tau": list(duals.get("served_out_by_tau", [0.0] * T)),
+                    "pax_ret_by_tau": list(duals.get("served_ret_by_tau", [0.0] * T)),
+                    "pax_out_by_tau_k": list(duals.get("served_out_by_tau_k", [[] for _ in range(T)])),
+                    "pax_ret_by_tau_k": list(duals.get("served_ret_by_tau_k", [[] for _ in range(T)])),
+                })
 
             # Aggregate UB
             if ub_aggregation == "mean":
@@ -398,7 +566,7 @@ class ProblemSubproblem(Subproblem):
             else:
                 raise ValueError("ub_aggregation must be one of 'mean', 'sum', 'max'")
 
-            if average_cuts:
+            if not multi_cuts:
                 # Weighted average of constants and coefficients
                 const_avg = sum(w * c for w, c in zip(weights, consts))
                 const_out_avg = sum(w * c for w, c in zip(weights, consts_out)) if consts_out else const_avg
@@ -424,7 +592,16 @@ class ProblemSubproblem(Subproblem):
                 )
                 return SubproblemResult(is_feasible=True, cut=cut, upper_bound=ub_val_agg)
             else:
-                return SubproblemResult(is_feasible=True, cuts=cuts, upper_bound=ub_val_agg)
+                return SubproblemResult(
+                    is_feasible=True,
+                    cuts=cuts,
+                    upper_bound=ub_val_agg,
+                    diagnostics={
+                        "T": T,
+                        "scenarios": scenario_diags,
+                        "scenario_weights": list(weights) if weights is not None else None,
+                    },
+                )
         else:
             # Single-demand case from params (prefer external file if given)
             if params.get("demand_file"):
@@ -446,8 +623,44 @@ class ProblemSubproblem(Subproblem):
             sp_params = SPParams(T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S, K_out=K_out_lp, K_ret=K_ret_lp, fill_eps=fill_eps, solver_options=solver_options)
             duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret)
 
-            # Build coefficients via duals (fast) or finite differences (fallback)
-            if use_dual:
+            # Build coefficients via MW, duals (fast) or finite differences (fallback)
+            if mw_enabled:
+                dm_pair = solve_mw_dual(
+                    T, Wmax, p_pen, S,
+                    # Ensure at least one capacity layer per tau for dual π variables
+                    [max(1, int(K_out_lp[t])) for t in range(T)],
+                    [max(1, int(K_ret_lp[t])) for t in range(T)],
+                    C_out, C_ret,
+                    R_out, R_ret,
+                    Ybar_out, Ybar_ret,
+                    ub_val,
+                    lp_solver,
+                    solver_options,
+                )
+                if dm_pair is None:
+                    # Fallback to finite differences to guarantee nonzero slopes
+                    c_out_fd, c_ret_fd, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
+                else:
+                    dm_out, dm_ret = dm_pair
+                # Expand to per-(q,t)
+                c_out_map: Dict[tuple[int, int], float] = {}
+                c_ret_map: Dict[tuple[int, int], float] = {}
+                for name in candidate.keys():
+                    if not isinstance(name, str):
+                        continue
+                    if name.startswith("yOUT["):
+                        inside = name[name.find("[") + 1 : name.find("]")]
+                        q_str, tau_str = inside.split(",")
+                        q = int(q_str.strip()); tau = int(tau_str.strip())
+                        if 0 <= tau < T:
+                            c_out_map[(q, tau)] = dm_out.get(tau, 0.0)
+                    elif name.startswith("yRET["):
+                        inside = name[name.find("[") + 1 : name.find("]")]
+                        q_str, tau_str = inside.split(",")
+                        q = int(q_str.strip()); tau = int(tau_str.strip())
+                        if 0 <= tau < T:
+                            c_ret_map[(q, tau)] = dm_ret.get(tau, 0.0)
+            elif use_dual:
                 # Read duals π on capacity layers and aggregate by time tau
                 pi_out = dict(duals.get("pi_OUT", {}))
                 pi_ret = dict(duals.get("pi_RET", {}))
@@ -523,6 +736,8 @@ class ProblemSubproblem(Subproblem):
                 "R_ret": [float(R_ret[t]) for t in range(T)],
                 "pax_out_by_tau": list(duals.get("served_out_by_tau", [0.0] * T)),
                 "pax_ret_by_tau": list(duals.get("served_ret_by_tau", [0.0] * T)),
+                "pax_out_by_tau_k": list(duals.get("served_out_by_tau_k", [[] for _ in range(T)])),
+                "pax_ret_by_tau_k": list(duals.get("served_ret_by_tau_k", [[] for _ in range(T)])),
             }
             return SubproblemResult(is_feasible=True, cut=cut, upper_bound=ub_val, diagnostics=diagnostics)
 
@@ -661,9 +876,31 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
     # Gather simple primal summaries
     served_out_by_tau = [0.0 for _ in Tset]
     served_ret_by_tau = [0.0 for _ in Tset]
+    # Also collect per-layer (per shuttle) served counts at each departure slot
+    served_out_by_tau_k = [[] for _ in Tset]
+    served_ret_by_tau_k = [[] for _ in Tset]
     for tau in Tset:
-        served_out_by_tau[tau] = sum(float(pyo.value(m.x_OUT[t, tau, k])) for t in Tset for k in range(int(P.K_out[tau]) if tau < len(P.K_out) else 0) if (t, tau, k) in m.ArcsOut)
-        served_ret_by_tau[tau] = sum(float(pyo.value(m.x_RET[t, tau, k])) for t in Tset for k in range(int(P.K_ret[tau]) if tau < len(P.K_ret) else 0) if (t, tau, k) in m.ArcsRet)
+        # Aggregate across demand time t for each layer k
+        kmax_out = int(P.K_out[tau]) if tau < len(P.K_out) else 0
+        kmax_ret = int(P.K_ret[tau]) if tau < len(P.K_ret) else 0
+        # Initialize per-layer arrays
+        if kmax_out > 0:
+            served_out_by_tau_k[tau] = [0.0 for _ in range(kmax_out)]
+        if kmax_ret > 0:
+            served_ret_by_tau_k[tau] = [0.0 for _ in range(kmax_ret)]
+        # Sum flows
+        total_out_tau = 0.0
+        total_ret_tau = 0.0
+        for k in range(kmax_out):
+            val_k = sum(float(pyo.value(m.x_OUT[t, tau, k])) for t in Tset if (t, tau, k) in m.ArcsOut)
+            served_out_by_tau_k[tau][k] = val_k
+            total_out_tau += val_k
+        for k in range(kmax_ret):
+            val_k = sum(float(pyo.value(m.x_RET[t, tau, k])) for t in Tset if (t, tau, k) in m.ArcsRet)
+            served_ret_by_tau_k[tau][k] = val_k
+            total_ret_tau += val_k
+        served_out_by_tau[tau] = total_out_tau
+        served_ret_by_tau[tau] = total_ret_tau
 
     # Component costs (per direction)
     try:
@@ -687,6 +924,9 @@ def solve_subproblem(P: SPParams, C_out: Iterable[float], C_ret: Iterable[float]
             # diagnostics
             "served_out_by_tau": served_out_by_tau,
             "served_ret_by_tau": served_ret_by_tau,
+            # per-layer diagnostics (per departure layer k at each tau)
+            "served_out_by_tau_k": served_out_by_tau_k,
+            "served_ret_by_tau_k": served_ret_by_tau_k,
             # components
             "ub_out": float(out_cost_val),
             "ub_ret": float(ret_cost_val),

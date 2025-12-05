@@ -68,6 +68,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Comma-separated slot resolutions to run coarse-to-fine, e.g. '30,15,5,1'",
     )
+    run_p.add_argument(
+        "--mw",
+        dest="mw",
+        action="store_true",
+        help="Enable Magnanti–Wong (Pareto-optimal) cut selection",
+    )
+    run_p.add_argument(
+        "--mw-alpha",
+        dest="mw_alpha",
+        type=float,
+        default=None,
+        help="Core-point mixing factor alpha in (0,1]; default from config or 0.3",
+    )
     sub.add_parser("validate", help="Validate config and problem stubs")
     sub.add_parser("info", help="Show current configuration")
     return p
@@ -83,6 +96,35 @@ def cmd_run(args) -> int:
     # Propagate slot_resolution from master to subproblem if not explicitly set
     if "slot_resolution" not in sp and "slot_resolution" in mp:
         sp["slot_resolution"] = mp["slot_resolution"]
+    # Enable MW via CLI switch if requested
+    if getattr(args, "mw", False):
+        sp["use_magnanti_wong"] = True
+    if getattr(args, "mw_alpha", None) is not None:
+        sp["mw_core_alpha"] = float(args.mw_alpha)
+
+    # If multi-cuts by scenario is enabled and scenarios present, propagate scenario count/weights to master
+    try:
+        multi_cuts = bool(sp.get("multi_cuts_by_scenario", False))
+    except Exception:
+        multi_cuts = False
+    scen_list = []
+    try:
+        if isinstance(sp.get("scenarios"), list) and sp.get("scenarios"):
+            scen_list = list(sp.get("scenarios"))
+        elif isinstance(sp.get("scenario_files"), list) and sp.get("scenario_files"):
+            scen_list = list(sp.get("scenario_files"))
+    except Exception:
+        scen_list = []
+    if multi_cuts and scen_list:
+        S = len(scen_list)
+        mp.setdefault("theta_per_scenario", True)
+        mp["num_scenarios"] = S
+        # Pass weights if provided; else default uniform weights summing to 1
+        wts = sp.get("scenario_weights")
+        if not isinstance(wts, list) or len(wts) != S:
+            wts = [1.0 / float(S) for _ in range(S)]
+        mp["scenario_weights"] = wts
+
     def _print_cfg(mp_local: dict, sp_local: dict) -> None:
         print("Run configuration:")
         print(

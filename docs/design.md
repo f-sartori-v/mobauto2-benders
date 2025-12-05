@@ -52,8 +52,10 @@ Subproblem (assignment + waiting LP):
 Scenarios and aggregation:
 
 - Provide scenarios via a YAML list under `subproblem.params.scenarios` with `R_out`, `R_ret`.
-- `average_cuts_across_scenarios = true` produces one averaged cut (weighted by `scenario_weights` if provided).
-- Otherwise, one cut is generated per scenario and all are added to the master.
+- Multi-cut control:
+  - `multi_cuts_by_scenario: true` (default in configs) produces one cut per scenario.
+  - `multi_cuts_by_scenario: false` produces a single averaged cut across scenarios (weighted by `scenario_weights` if provided).
+  - Backward compatibility: legacy `average_cuts_across_scenarios: true` behaves like `multi_cuts_by_scenario: false`.
 - `ub_aggregation`: how to combine per-scenario UB values (`mean`|`sum`|`max`). Defaults to `mean`.
 
 Configuration (YAML)

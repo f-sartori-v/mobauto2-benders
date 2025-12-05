@@ -97,9 +97,17 @@ class ProblemMaster(MasterProblem):
         m.b = pyo.Var(m.Q, m.T, bounds=(0, Emax))
         m.gchg = pyo.Var(m.Q, m.T, within=pyo.NonNegativeReals)
         # Theta models recourse cost; keep nonnegative to avoid initial unboundedness
-        # Theta models recourse cost; optionally split by direction (OUT/RET) for stronger multi-cuts
-        disagg_dir = bool(self._p("disaggregate_theta_by_direction", self._p("theta_split_by_direction", False)))
-        if disagg_dir:
+        # Optionally: per-scenario thetas and/or split by direction.
+        use_theta_per_scen = bool(self._p("theta_per_scenario", False))
+        S = int(self._p("num_scenarios", 0) or 0)
+        if use_theta_per_scen and S <= 0:
+            use_theta_per_scen = False
+        # If using per-scenario thetas, keep single theta per scenario for simplicity; otherwise allow dir split
+        disagg_dir = False if use_theta_per_scen else bool(self._p("disaggregate_theta_by_direction", self._p("theta_split_by_direction", True)))
+        if use_theta_per_scen:
+            m.Scenarios = range(S)
+            m.theta_s = pyo.Var(m.Scenarios, within=pyo.NonNegativeReals)
+        elif disagg_dir:
             m.theta_out = pyo.Var(within=pyo.NonNegativeReals)
             m.theta_ret = pyo.Var(within=pyo.NonNegativeReals)
         else:
@@ -117,7 +125,14 @@ class ProblemMaster(MasterProblem):
             m.C_ex_out = pyo.Constraint(m.T, rule=lambda m, t: m.eOut[t] >= m.Yout[t] - 1)
             m.C_ex_ret = pyo.Constraint(m.T, rule=lambda m, t: m.eRet[t] >= m.Yret[t] - 1)
 
-        obj_expr = (m.theta_out + m.theta_ret) if disagg_dir else m.theta
+        # Build objective: combine theta terms depending on config
+        if use_theta_per_scen:
+            wts = list(self._p("scenario_weights", []) or [])
+            if not wts or len(wts) != S:
+                wts = [1.0 / float(max(1, S)) for _ in range(max(1, S))]
+            obj_expr = sum(float(wts[s]) * m.theta_s[s] for s in range(S))
+        else:
+            obj_expr = (m.theta_out + m.theta_ret) if disagg_dir else m.theta
         if eps_start > 0.0:
             obj_expr = obj_expr + eps_start * sum(m.yOUT[q, t] + m.yRET[q, t] for q in m.Q for t in m.T)
         if conc_pen > 0.0:
@@ -489,6 +504,12 @@ class ProblemMaster(MasterProblem):
         try:
             if hasattr(m, "theta"):
                 cand["theta"] = pyo.value(m.theta)
+            elif hasattr(m, "theta_s"):
+                # Sum across scenarios for a single comparable number
+                try:
+                    cand["theta"] = sum(float(pyo.value(m.theta_s[s])) for s in getattr(m, "Scenarios", []))
+                except Exception:
+                    cand["theta"] = 0.0
             else:
                 cand["theta"] = float(pyo.value(m.theta_out)) + float(pyo.value(m.theta_ret))
         except Exception:
@@ -668,11 +689,34 @@ class ProblemMaster(MasterProblem):
         try:
             if hasattr(m, "theta"):
                 lines.append(f"theta = {pyo.value(m.theta):.6g}")
-            else:
+            elif hasattr(m, "theta_out") and hasattr(m, "theta_ret"):
                 tot = float(pyo.value(m.theta_out)) + float(pyo.value(m.theta_ret))
                 lines.append(f"theta = {tot:.6g}")
                 lines.append(f"  - theta_out = {float(pyo.value(m.theta_out)):.6g}")
                 lines.append(f"  - theta_ret = {float(pyo.value(m.theta_ret)):.6g}")
+            elif hasattr(m, "theta_s"):
+                try:
+                    S = len(getattr(m, "Scenarios", []))
+                except Exception:
+                    S = 0
+                vals = []
+                for s in range(S):
+                    try:
+                        vals.append(float(pyo.value(m.theta_s[s])))
+                    except Exception:
+                        vals.append(0.0)
+                try:
+                    wts = list(self._p("scenario_weights", []) or [])
+                    if not wts or len(wts) != S:
+                        wts = [1.0 for _ in range(S)]
+                except Exception:
+                    wts = [1.0 for _ in range(S)]
+                tot = sum(w * v for w, v in zip(wts, vals))
+                lines.append(f"theta = {tot:.6g}")
+                for s, v in enumerate(vals):
+                    lines.append(f"  - theta_s[{s}] = {v:.6g}")
+            else:
+                lines.append("theta = (unavailable)")
         except Exception:
             lines.append("theta = (unavailable)")
         # Binary schedules
@@ -735,6 +779,11 @@ class ProblemMaster(MasterProblem):
         const_ret_meta = float(cut.metadata.get("const_ret", 0.0)) if hasattr(cut, "metadata") and ("const_ret" in cut.metadata) else None
         coeff_yOUT = cut.metadata.get("coeff_yOUT") if hasattr(cut, "metadata") else None
         coeff_yRET = cut.metadata.get("coeff_yRET") if hasattr(cut, "metadata") else None
+        # Optional: scenario index for per-scenario thetas
+        try:
+            scen_idx = int(cut.metadata.get("scenario_index")) if hasattr(cut, "metadata") and ("scenario_index" in cut.metadata) else None
+        except Exception:
+            scen_idx = None
 
         # Build RHS: theta >= const + sum(beta_out*yOUT) + sum(beta_ret*yRET)
         rhs = const
@@ -917,6 +966,7 @@ class ProblemMaster(MasterProblem):
                     lhs_value=lhs_out_val,
                     rhs_value=rhs_out_val,
                     cut_type="optimality:out",
+                    signature_scope=("dir:out", scen_idx),
                 )
                 added_ret = add_benders_cut(
                     iteration=-1,
@@ -925,11 +975,16 @@ class ProblemMaster(MasterProblem):
                     lhs_value=lhs_ret_val,
                     rhs_value=rhs_ret_val,
                     cut_type="optimality:ret",
+                    signature_scope=("dir:ret", scen_idx),
                 )
                 if not (added_out or added_ret):
                     return False
         else:
-            lhs = m.theta
+            # Choose theta variable: per-scenario if available, else single theta
+            if hasattr(m, "theta_s") and (scen_idx is not None):
+                lhs = m.theta_s[int(scen_idx)]
+            else:
+                lhs = m.theta
             rhs_scaled = rhs
             lhs_val = float(pyo.value(lhs))
             rhs_val = float(pyo.value(rhs_scaled))
@@ -947,6 +1002,7 @@ class ProblemMaster(MasterProblem):
                     lhs_value=lhs_val,
                     rhs_value=rhs_val,
                     cut_type=str(cut.cut_type).lower() if hasattr(cut, "cut_type") else "optimality",
+                    signature_scope=("scen", scen_idx),
                 )
                 if not ok:
                     return False
@@ -977,7 +1033,10 @@ class ProblemMaster(MasterProblem):
                 name_list.append(cname_ret)
         else:
             cname = f"benders_cut_{self._cut_idx}"
-            lhs = m.theta
+            if hasattr(m, "theta_s") and (scen_idx is not None):
+                lhs = m.theta_s[int(scen_idx)]
+            else:
+                lhs = m.theta
             rhs_scaled = rhs
             con = pyo.Constraint(expr=(lhs >= rhs_scaled))
             setattr(m.BendersCuts, cname, con)
