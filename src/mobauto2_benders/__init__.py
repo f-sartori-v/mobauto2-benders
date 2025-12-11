@@ -11,8 +11,11 @@ Fill in your problem-specific logic in `mobauto2_benders/problem/` by
 extending the abstract base classes.
 """
 
+from .runner import run
+
 __all__ = [
     "__version__",
+    "run",
 ]
 
 __version__ = "0.1.0"
