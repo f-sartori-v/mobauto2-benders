@@ -6,7 +6,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-yaml_path = PROJECT_DIR / "setups" / "pds.yaml"
+yaml_path = PROJECT_DIR / "setups" / "prob" / "base_plus100_out_noon.yaml"
 csv_path = SCRIPT_DIR / f"{yaml_path.stem}__direction_counts.csv"
 png_path = SCRIPT_DIR / f"{yaml_path.stem}_demand.png"
 
@@ -28,7 +28,7 @@ for col in ["OUT", "RET"]:
     if col not in summary.columns:
         summary[col] = 0
 
-base_minutes = 5 * 60
+base_minutes = 7 * 60
 summary["clock_time"] = summary["time_bin"].apply(
     lambda m: f"{(base_minutes + m)//60}:{(base_minutes + m)%60:02d}"
 )
@@ -42,7 +42,7 @@ plt.figure(figsize=(12, 6))
 plt.bar([i - width/2 for i in x], summary["OUT"], width=width, label="to-Hub")
 plt.bar([i + width/2 for i in x], summary["RET"], width=width, label="from-Hub")
 
-plt.xticks(list(x), summary["clock_time"], rotation=45)
+plt.xticks(list(x), summary["clock_time"], rotation=0)
 plt.xlabel("Time")
 plt.ylim(0, 30)
 plt.yticks(range(0, 31, 5))

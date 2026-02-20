@@ -364,6 +364,7 @@ class BendersSolver:
         no_cut_streak = 0
         last_mp_gap: Optional[float] = None
         last_mp_term: Optional[str] = None
+<<<<<<< HEAD
         # Master schedule parameters tied to global BD gap
         mp_gap_min = 0.001
         mp_gap_max = 0.05
@@ -375,11 +376,26 @@ class BendersSolver:
         mw_enabled = bool(sp_params.get("use_magnanti_wong", self.cfg.subproblem.use_magnanti_wong))
         mw_alpha = float(sp_params.get("mw_core_alpha", self.cfg.subproblem.mw_core_alpha) or 0.10)
         mw_eps = float(sp_params.get("mw_core_eps", getattr(self.cfg.subproblem, "mw_core_eps", 1e-3)) or 1e-3)
+=======
+        deep_mp_every = 5
+        quick_mp_time = 2.0
+        quick_mp_gap = 0.05
+        deep_mp_time = 20.0
+        deep_mp_gap = 0.01
+        # MW config (default enabled)
+        mw_enabled = bool(getattr(self.cfg.solver, "mw_enabled", True))
+        mw_alpha = float(getattr(self.cfg.solver, "mw_core_alpha", 0.10) or 0.10)
+        mw_eps = float(getattr(self.cfg.solver, "mw_core_eps", 1e-3) or 1e-3)
+>>>>>>> 0aaca8e (update: implement MW improvements.)
         if not (0.0 < mw_alpha <= 1.0):
             mw_alpha = 0.10
         if mw_eps <= 0.0:
             mw_eps = 1e-3
+<<<<<<< HEAD
         _vprint(f"[MW] enabled={mw_enabled} alpha={mw_alpha:.3g} eps={mw_eps:.3g}")
+=======
+        print(f"[MW] enabled={mw_enabled} alpha={mw_alpha:.3g} eps={mw_eps:.3g}")
+>>>>>>> 0aaca8e (update: implement MW improvements.)
 
         def _calc_pax_totals_from_diag(diag: dict | None) -> tuple[Optional[float], Optional[float]]:
             if not isinstance(diag, dict):
@@ -1077,7 +1093,11 @@ class BendersSolver:
                             vmin = min(vals)
                             vmax = max(vals)
                             vmean = sum(vals) / float(len(vals))
+<<<<<<< HEAD
                             _vprint(f"[MW] core updated (t=0..): min={vmin:.3g} max={vmax:.3g} mean={vmean:.3g}")
+=======
+                            print(f"[MW] core updated (t=0..): min={vmin:.3g} max={vmax:.3g} mean={vmean:.3g}")
+>>>>>>> 0aaca8e (update: implement MW improvements.)
                     except Exception:
                         pass
 
@@ -1086,12 +1106,20 @@ class BendersSolver:
                     if isinstance(getattr(self.subproblem, "params", None), dict):
                         if self._mw_core_out is not None and self._mw_core_ret is not None:
                             self.subproblem.params["mw_core_point"] = {"Yout": list(self._mw_core_out), "Yret": list(self._mw_core_ret)}
+<<<<<<< HEAD
+=======
+                        self.subproblem.params["use_magnanti_wong"] = mw_enabled
+>>>>>>> 0aaca8e (update: implement MW improvements.)
                 except Exception:
                     pass
             else:
                 try:
                     if isinstance(getattr(self.subproblem, "params", None), dict):
+<<<<<<< HEAD
                         pass
+=======
+                        self.subproblem.params["use_magnanti_wong"] = mw_enabled
+>>>>>>> 0aaca8e (update: implement MW improvements.)
                 except Exception:
                     pass
 

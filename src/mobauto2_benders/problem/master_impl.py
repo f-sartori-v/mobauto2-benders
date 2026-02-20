@@ -484,10 +484,17 @@ class ProblemMaster(MasterProblem):
                         except Exception:
                             pass
                 if n_out + n_ret > 0:
+<<<<<<< HEAD
                     self._vprint(f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}")
                     use_ws = True
                 else:
                     self._vprint("[MIPSTART] no x vars found; skipping warm start")
+=======
+                    print(f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}")
+                    use_ws = True
+                else:
+                    print("[MIPSTART] no x vars found; skipping warm start")
+>>>>>>> 0aaca8e (update: implement MW improvements.)
             except Exception:
                 use_ws = False
             finally:
@@ -524,10 +531,17 @@ class ProblemMaster(MasterProblem):
                             m.yRET[q, t].value = pv
                             n_ret += 1
                 if n_out + n_ret > 0:
+<<<<<<< HEAD
                     self._vprint(f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}")
                     use_ws = True
                 else:
                     self._vprint("[MIPSTART] no x vars found; skipping warm start")
+=======
+                    print(f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}")
+                    use_ws = True
+                else:
+                    print("[MIPSTART] no x vars found; skipping warm start")
+>>>>>>> 0aaca8e (update: implement MW improvements.)
             except Exception:
                 use_ws = False
         # Diagnostics: write LP and enable solver logs
