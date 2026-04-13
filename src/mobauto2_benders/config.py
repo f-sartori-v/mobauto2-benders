@@ -110,6 +110,10 @@ class SubproblemSection:
     p: float = 0.0
     fill_first_epsilon: float = 0.0
     unused_capacity_penalty: float = 0.0
+    degenerate_cut_probe_top_k: int = 6
+    degenerate_cut_probe_top_k_out: int | None = None
+    degenerate_cut_probe_top_k_ret: int | None = None
+    degenerate_cut_zero_tol: float = 1e-9
 
 
 @dataclass(slots=True)
@@ -423,6 +427,10 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
             "p": sub_params.get("p"),
             "fill_first_epsilon": sub_params.get("fill_first_epsilon", 0.0),
             "unused_capacity_penalty": sub_params.get("unused_capacity_penalty", 0.0),
+            "degenerate_cut_probe_top_k": sub_params.get("degenerate_cut_probe_top_k", 6),
+            "degenerate_cut_probe_top_k_out": sub_params.get("degenerate_cut_probe_top_k_out"),
+            "degenerate_cut_probe_top_k_ret": sub_params.get("degenerate_cut_probe_top_k_ret"),
+            "degenerate_cut_zero_tol": sub_params.get("degenerate_cut_zero_tol", 1e-9),
         },
         "solver": {
             "max_iterations": run.get("max_iterations", 100),
@@ -683,6 +691,10 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "p",
             "fill_first_epsilon",
             "unused_capacity_penalty",
+            "degenerate_cut_probe_top_k",
+            "degenerate_cut_probe_top_k_out",
+            "degenerate_cut_probe_top_k_ret",
+            "degenerate_cut_zero_tol",
         },
         "subproblem",
     )
@@ -726,6 +738,30 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         unused_capacity_penalty=_ensure_float(
             _disallow_expr(sub_raw.get("unused_capacity_penalty", 0.0), "subproblem.unused_capacity_penalty"),
             "subproblem.unused_capacity_penalty",
+        ),
+        degenerate_cut_probe_top_k=_ensure_int(
+            _disallow_expr(sub_raw.get("degenerate_cut_probe_top_k", 6), "subproblem.degenerate_cut_probe_top_k"),
+            "subproblem.degenerate_cut_probe_top_k",
+        ),
+        degenerate_cut_probe_top_k_out=(
+            _ensure_int(
+                _disallow_expr(sub_raw.get("degenerate_cut_probe_top_k_out"), "subproblem.degenerate_cut_probe_top_k_out"),
+                "subproblem.degenerate_cut_probe_top_k_out",
+            )
+            if sub_raw.get("degenerate_cut_probe_top_k_out") is not None
+            else None
+        ),
+        degenerate_cut_probe_top_k_ret=(
+            _ensure_int(
+                _disallow_expr(sub_raw.get("degenerate_cut_probe_top_k_ret"), "subproblem.degenerate_cut_probe_top_k_ret"),
+                "subproblem.degenerate_cut_probe_top_k_ret",
+            )
+            if sub_raw.get("degenerate_cut_probe_top_k_ret") is not None
+            else None
+        ),
+        degenerate_cut_zero_tol=_ensure_float(
+            _disallow_expr(sub_raw.get("degenerate_cut_zero_tol", 1e-9), "subproblem.degenerate_cut_zero_tol"),
+            "subproblem.degenerate_cut_zero_tol",
         ),
     )
 

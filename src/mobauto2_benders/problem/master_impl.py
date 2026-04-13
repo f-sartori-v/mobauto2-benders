@@ -31,6 +31,9 @@ class ProblemMaster(MasterProblem):
         self._warm_start: dict[tuple[str, int, int], float] | None = None
         # Optional: MIP start values from previous iteration
         self._last_solution: dict[str, float] | None = None
+        # Best-incumbent snapshot for final reporting
+        self._report_candidate: Candidate | None = None
+        self._report_realized_departure_min_map: dict[tuple[int, int], float] | None = None
 
     def _p(self, key: str, default: Any | None = None) -> Any:
         if self.params is None:
@@ -94,6 +97,8 @@ class ProblemMaster(MasterProblem):
         # Reset per-run cut signatures
         self._cut_signatures = set()
         self._cut_best_const = {}
+        self._report_candidate = None
+        self._report_realized_departure_min_map = None
         Q = int(self._p("Q"))
         # Time discretization: prefer minutes + slot_resolution + trip_duration_minutes
         import math
@@ -313,21 +318,13 @@ class ProblemMaster(MasterProblem):
             m.atL[q, T - 1].fix(1)
             m.atM[q, T - 1].fix(0)
             m.inTrip[q, T - 1].fix(0)
-            if first_action == "IDL":
-                m.yOUT[q, 0].fix(0)
-                m.yRET[q, 0].fix(0)
-                m.c[q, 0].fix(0)
-            elif first_action == "CHR":
-                m.yOUT[q, 0].fix(0)
-                m.yRET[q, 0].fix(0)
+            # Slot 0 is the demand accumulation bucket and is never a departure slot.
+            # Preserve the legacy initial location shorthand but keep starts fixed off at t=0.
+            m.yOUT[q, 0].fix(0)
+            m.yRET[q, 0].fix(0)
+            if first_action == "CHR":
                 m.c[q, 0].fix(1)
-            elif first_action == "OUT":
-                m.yOUT[q, 0].fix(1)
-                m.yRET[q, 0].fix(0)
-                m.c[q, 0].fix(0)
-            elif first_action == "RET":
-                m.yOUT[q, 0].fix(0)
-                m.yRET[q, 0].fix(1)
+            else:
                 m.c[q, 0].fix(0)
 
         # Optional FIFO symmetry-breaking across vehicles (can restrict starts unintentionally)
@@ -484,17 +481,10 @@ class ProblemMaster(MasterProblem):
                         except Exception:
                             pass
                 if n_out + n_ret > 0:
-<<<<<<< HEAD
                     self._vprint(f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}")
                     use_ws = True
                 else:
                     self._vprint("[MIPSTART] no x vars found; skipping warm start")
-=======
-                    print(f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}")
-                    use_ws = True
-                else:
-                    print("[MIPSTART] no x vars found; skipping warm start")
->>>>>>> 0aaca8e (update: implement MW improvements.)
             except Exception:
                 use_ws = False
             finally:
@@ -531,17 +521,10 @@ class ProblemMaster(MasterProblem):
                             m.yRET[q, t].value = pv
                             n_ret += 1
                 if n_out + n_ret > 0:
-<<<<<<< HEAD
                     self._vprint(f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}")
                     use_ws = True
                 else:
                     self._vprint("[MIPSTART] no x vars found; skipping warm start")
-=======
-                    print(f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}")
-                    use_ws = True
-                else:
-                    print("[MIPSTART] no x vars found; skipping warm start")
->>>>>>> 0aaca8e (update: implement MW improvements.)
             except Exception:
                 use_ws = False
         # Diagnostics: write LP and enable solver logs
@@ -881,6 +864,10 @@ class ProblemMaster(MasterProblem):
                     offenders.append((f"yRET[{int(q)},{int(t)}]", v_ret))
                 else:
                     cand[f"yRET[{int(q)},{int(t)}]"] = pv_ret
+                try:
+                    cand[f"c[{int(q)},{int(t)}]"] = float(m.c[q, t].value or 0.0)
+                except Exception:
+                    pass
         if offenders:
             offenders.sort(key=lambda kv: abs(kv[1] - 0.5), reverse=True)
             top = offenders[:5]
@@ -913,17 +900,104 @@ class ProblemMaster(MasterProblem):
             pass
         return cand
 
+    def set_report_solution(
+        self,
+        candidate: Candidate | None,
+        realized_departure_min_map: dict[tuple[int, int], float] | None = None,
+    ) -> None:
+        self._report_candidate = dict(candidate) if isinstance(candidate, dict) else None
+        self._report_realized_departure_min_map = (
+            dict(realized_departure_min_map) if isinstance(realized_departure_min_map, dict) else None
+        )
+
     # Pretty-print the current master solution (if solved)
     def format_solution(self) -> str:
         assert self.m is not None
         m = self.m
         Q = list(m.Q)
         T = list(m.T)
+        report_candidate = self._report_candidate if isinstance(self._report_candidate, dict) else None
+        realized_map = (
+            self._report_realized_departure_min_map
+            if isinstance(self._report_realized_departure_min_map, dict)
+            else None
+        )
         lines: list[str] = []
         lines.append(f"Q={len(Q)} T={len(T)}")
+
+        def _candidate_value(name: str, default: float = 0.0) -> float:
+            if report_candidate is None:
+                return default
+            try:
+                return float(report_candidate.get(name, default))
+            except Exception:
+                return default
+
+        def _trip_slots() -> int:
+            import math
+
+            slot_res = int(self._p("slot_resolution", 1))
+            trip_dur_min = self._p("trip_duration_minutes", self._p("trip_duration"))
+            if trip_dur_min is not None:
+                return int(math.ceil(float(trip_dur_min) / max(1, slot_res)))
+            return int(self._p("trip_slots", 0))
+
+        def _is_service_start(q: int, t: int) -> bool:
+            if int(t) < 1:
+                yout0 = _candidate_value(f"yOUT[{int(q)},{int(t)}]") if report_candidate is not None else float(m.yOUT[q, t].value or 0.0)
+                yret0 = _candidate_value(f"yRET[{int(q)},{int(t)}]") if report_candidate is not None else float(m.yRET[q, t].value or 0.0)
+                if yout0 >= 0.5 or yret0 >= 0.5:
+                    raise AssertionError(
+                        f"Invalid service start slot q={int(q)} t={int(t)}; slot 0 is not a departure slot"
+                    )
+                return False
+            if report_candidate is not None:
+                return (
+                    _candidate_value(f"yOUT[{int(q)},{int(t)}]") >= 0.5
+                    or _candidate_value(f"yRET[{int(q)},{int(t)}]") >= 0.5
+                )
+            try:
+                return (
+                    float(m.yOUT[q, t].value or 0.0) >= 0.5
+                    or float(m.yRET[q, t].value or 0.0) >= 0.5
+                )
+            except Exception:
+                return False
+
+        def _is_charge(q: int, t: int) -> bool:
+            if report_candidate is not None:
+                return _candidate_value(f"c[{int(q)},{int(t)}]") >= 0.5
+            try:
+                return float(m.c[q, t].value or 0.0) >= 0.5
+            except Exception:
+                return False
+
+        def _is_in_trip(q: int, t: int) -> bool:
+            if report_candidate is None:
+                try:
+                    return float(m.inTrip[q, t].value or 0.0) >= 0.5
+                except Exception:
+                    return False
+            trip_slots = max(1, _trip_slots())
+            tau_min = max(int(T[0]), int(t) - trip_slots + 1)
+            for tau in range(tau_min, int(t)):
+                if _is_service_start(int(q), int(tau)):
+                    return True
+            return False
+
+        def _format_hhmm(min_from_day_start: float | int | None) -> str:
+            if min_from_day_start is None:
+                return "--"
+            total = int(round(float(min_from_day_start)))
+            hh = total // 60
+            mm = total % 60
+            return f"{hh:02d}:{mm:02d}"
+
         # Theta
         try:
-            if hasattr(m, "theta"):
+            if report_candidate is not None and "__theta" in report_candidate:
+                lines.append(f"theta = {_candidate_value('__theta'):.6g}")
+            elif hasattr(m, "theta"):
                 lines.append(f"theta = {pyo.value(m.theta):.6g}")
             elif hasattr(m, "theta_out") and hasattr(m, "theta_ret"):
                 tot = float(pyo.value(m.theta_out)) + float(pyo.value(m.theta_ret))
@@ -968,26 +1042,41 @@ class ProblemMaster(MasterProblem):
 
         # Compact per-shuttle timeline with labels: OUT, INT, RET, CHR, IDL
         def lbl(q: int, t: int) -> str:
-            yout = m.yOUT[q, t].value or 0.0
-            yret = m.yRET[q, t].value or 0.0
-            intr = m.inTrip[q, t].value or 0.0
-            chg = m.c[q, t].value or 0.0
-            if yout >= 0.5:
+            if report_candidate is not None:
+                yout = _candidate_value(f"yOUT[{int(q)},{int(t)}]")
+                yret = _candidate_value(f"yRET[{int(q)},{int(t)}]")
+                intr = 1.0 if _is_in_trip(int(q), int(t)) else 0.0
+                chg = _candidate_value(f"c[{int(q)},{int(t)}]")
+            else:
+                yout = m.yOUT[q, t].value or 0.0
+                yret = m.yRET[q, t].value or 0.0
+                intr = m.inTrip[q, t].value or 0.0
+                chg = m.c[q, t].value or 0.0
+            if float(yout) >= 0.5:
                 return "OUT"
-            if yret >= 0.5:
+            if float(yret) >= 0.5:
                 return "RET"
-            if intr >= 0.5:
+            if float(intr) >= 0.5:
                 return "INT"
-            if chg >= 0.5:
+            if float(chg) >= 0.5:
                 return "CHR"
             return "IDL"
 
         lines.append("Timeline (per shuttle):")
-        header = "       " + " ".join(f"{t:>3d}" for t in T)
+        colw = 5
+        header = "       " + " ".join(f"{t:>{colw}d}" for t in T)
         lines.append(header)
         for q in Q:
-            seq = " ".join(f"{lbl(q, t):>3s}" for t in T)
+            seq = " ".join(f"{lbl(q, t):>{colw}s}" for t in T)
             lines.append(f"  q={q}: {seq}")
+            if realized_map:
+                dep_seq = []
+                for t in T:
+                    if _is_service_start(int(q), int(t)):
+                        dep_seq.append(_format_hhmm(realized_map.get((int(q), int(t)))))
+                    else:
+                        dep_seq.append("--")
+                lines.append("  dep: " + " ".join(f"{v:>{colw}s}" for v in dep_seq))
 
         # Also show battery levels over time
         def rowf(var, q):
@@ -995,9 +1084,9 @@ class ProblemMaster(MasterProblem):
             for t in T:
                 v = var[q, t].value
                 if v is None:
-                    vals.append("  -")
+                    vals.append(f"{'-':>{colw}s}")
                 else:
-                    vals.append(f"{float(v):>3.0f}")
+                    vals.append(f"{float(v):>{colw}.0f}")
             return " ".join(vals)
 
         lines.append("Battery (per shuttle):")
@@ -1010,6 +1099,28 @@ class ProblemMaster(MasterProblem):
     def _add_cut(self, cut: Cut, force: bool = False) -> bool:
         assert self.m is not None
         m = self.m
+        anti_trivial_min_total = None
+        try:
+            anti_trivial_min_total = int(cut.metadata.get("anti_trivial_min_total_starts")) if hasattr(cut, "metadata") and ("anti_trivial_min_total_starts" in cut.metadata) else None
+        except Exception:
+            anti_trivial_min_total = None
+        if anti_trivial_min_total is not None:
+            lhs = sum(m.yOUT[q, t] for q in m.Q for t in m.T) + sum(m.yRET[q, t] for q in m.Q for t in m.T)
+            lhs_val = float(pyo.value(lhs, exception=False) or 0.0)
+            rhs_val = float(anti_trivial_min_total)
+            eps_cut = float(self._p("eps_cut", 1e-8))
+            if lhs_val >= rhs_val - eps_cut:
+                return False
+            sig = ("anti_trivial_idle", int(anti_trivial_min_total))
+            if (not force) and sig in self._cut_signatures:
+                return False
+            cname = f"benders_cut_anti_idle_{self._cut_idx}"
+            con = pyo.Constraint(expr=(lhs >= rhs_val))
+            setattr(m.BendersCuts, cname, con)
+            self._cut_signatures.add(sig)
+            self._cut_idx += 1
+            self._vprint(f"[BENDERS] Added anti-trivial fallback cut #{self._cut_idx - 1}: total_starts>={anti_trivial_min_total}")
+            return True
         const = float(cut.metadata.get("const", 0.0)) if hasattr(cut, "metadata") else 0.0
         const_out_meta = float(cut.metadata.get("const_out", 0.0)) if hasattr(cut, "metadata") and ("const_out" in cut.metadata) else None
         const_ret_meta = float(cut.metadata.get("const_ret", 0.0)) if hasattr(cut, "metadata") and ("const_ret" in cut.metadata) else None

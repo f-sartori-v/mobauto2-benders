@@ -119,6 +119,10 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     sp["p"] = cfg.subproblem.p
     sp["fill_first_epsilon"] = float(cfg.subproblem.fill_first_epsilon)
     sp["unused_capacity_penalty"] = float(cfg.subproblem.unused_capacity_penalty)
+    sp["degenerate_cut_probe_top_k"] = int(cfg.subproblem.degenerate_cut_probe_top_k)
+    _set_if_not_none(sp, "degenerate_cut_probe_top_k_out", cfg.subproblem.degenerate_cut_probe_top_k_out)
+    _set_if_not_none(sp, "degenerate_cut_probe_top_k_ret", cfg.subproblem.degenerate_cut_probe_top_k_ret)
+    sp["degenerate_cut_zero_tol"] = float(cfg.subproblem.degenerate_cut_zero_tol)
     # tolerances
     sp["eps_cut"] = float(cfg.tolerances.eps_cut)
 
@@ -130,6 +134,16 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     _set_if_not_none(sp, "scenarios", cfg.data.scenarios)
 
     sp["slot_resolution"] = int(time.slot_resolution)
+    sp["T_minutes"] = int(time.T_minutes) if time.T_minutes is not None else None
+    _set_if_not_none(sp, "T", time.T)
+    _set_if_not_none(sp, "trip_duration_minutes", time.trip_duration_minutes)
+    _set_if_not_none(sp, "trip_duration", time.trip_duration)
+    _set_if_not_none(sp, "trip_slots", time.trip_slots)
+    sp["Q"] = int(fleet.Q)
+    _set_if_not_none(sp, "binit", fleet.binit)
+    _set_if_not_none(sp, "initial_actions", fleet.initial_actions)
+    sp.update(_energy_params_for_resolution(cfg, int(time.slot_resolution)))
+    sp["eps_feas"] = float(cfg.tolerances.eps_feas)
     sp["log_level"] = str(cfg.run.log_level)
 
     if overrides:

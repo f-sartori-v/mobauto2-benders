@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import math
+import copy
 from dataclasses import dataclass
 from typing import Optional, Iterable, Mapping, Any
 
@@ -364,7 +365,6 @@ class BendersSolver:
         no_cut_streak = 0
         last_mp_gap: Optional[float] = None
         last_mp_term: Optional[str] = None
-<<<<<<< HEAD
         # Master schedule parameters tied to global BD gap
         mp_gap_min = 0.001
         mp_gap_max = 0.05
@@ -376,26 +376,11 @@ class BendersSolver:
         mw_enabled = bool(sp_params.get("use_magnanti_wong", self.cfg.subproblem.use_magnanti_wong))
         mw_alpha = float(sp_params.get("mw_core_alpha", self.cfg.subproblem.mw_core_alpha) or 0.10)
         mw_eps = float(sp_params.get("mw_core_eps", getattr(self.cfg.subproblem, "mw_core_eps", 1e-3)) or 1e-3)
-=======
-        deep_mp_every = 5
-        quick_mp_time = 2.0
-        quick_mp_gap = 0.05
-        deep_mp_time = 20.0
-        deep_mp_gap = 0.01
-        # MW config (default enabled)
-        mw_enabled = bool(getattr(self.cfg.solver, "mw_enabled", True))
-        mw_alpha = float(getattr(self.cfg.solver, "mw_core_alpha", 0.10) or 0.10)
-        mw_eps = float(getattr(self.cfg.solver, "mw_core_eps", 1e-3) or 1e-3)
->>>>>>> 0aaca8e (update: implement MW improvements.)
         if not (0.0 < mw_alpha <= 1.0):
             mw_alpha = 0.10
         if mw_eps <= 0.0:
             mw_eps = 1e-3
-<<<<<<< HEAD
         _vprint(f"[MW] enabled={mw_enabled} alpha={mw_alpha:.3g} eps={mw_eps:.3g}")
-=======
-        print(f"[MW] enabled={mw_enabled} alpha={mw_alpha:.3g} eps={mw_eps:.3g}")
->>>>>>> 0aaca8e (update: implement MW improvements.)
 
         def _calc_pax_totals_from_diag(diag: dict | None) -> tuple[Optional[float], Optional[float]]:
             if not isinstance(diag, dict):
@@ -600,8 +585,13 @@ class BendersSolver:
 
         best_lb: Optional[float] = None
         best_ub: Optional[float] = None
+        best_candidate: dict[str, float] | None = None
+        best_diag: dict[str, Any] | None = None
+        best_pax_served: Optional[float] = None
+        best_pax_total: Optional[float] = None
         prev_best_lb: Optional[float] = None
         prev_best_ub: Optional[float] = None
+        lower_bound_semantics_valid = True
         # Stall detection on gap improvement
         stall_max = int(getattr(self.cfg.solver, "stall_max_no_improve_iters", 0) or 0)
         stall_min_abs = float(getattr(self.cfg.solver, "stall_min_abs_improve", 0.0) or 0.0)
@@ -610,6 +600,31 @@ class BendersSolver:
         prev_gap: Optional[float] = None
 
         last_diag: dict | None = None
+
+        def _report_diag() -> dict[str, Any] | None:
+            if isinstance(best_diag, dict):
+                return best_diag
+            if isinstance(last_diag, dict):
+                return last_diag
+            return None
+
+        def _set_master_report_snapshot() -> None:
+            setter = getattr(self.master, "set_report_solution", None)
+            if not callable(setter):
+                return
+            realized_map: dict[tuple[int, int], float] | None = None
+            diag = _report_diag()
+            if isinstance(diag, dict):
+                try:
+                    raw_map = diag.get("realized_departure_min_map", {})
+                    if isinstance(raw_map, dict):
+                        realized_map = dict(raw_map)
+                except Exception:
+                    realized_map = None
+            try:
+                setter(best_candidate, realized_map)
+            except Exception:
+                pass
 
         def _extract_sp_diag(diag: dict | None) -> dict[str, Any]:
             if not isinstance(diag, dict):
@@ -625,14 +640,14 @@ class BendersSolver:
             }
 
         def _make_result(status: SolveStatus, iterations: int) -> BendersRunResult:
-            extra = _extract_sp_diag(last_diag)
+            extra = _extract_sp_diag(_report_diag())
             return BendersRunResult(
                 status=status,
                 iterations=iterations,
                 best_lower_bound=best_lb,
                 best_upper_bound=best_ub,
-                pax_served=last_pax_served,
-                pax_total=last_pax_total,
+                pax_served=best_pax_served if best_pax_served is not None else last_pax_served,
+                pax_total=best_pax_total if best_pax_total is not None else last_pax_total,
                 subproblem_obj=extra.get("subproblem_obj"),
                 sp_wait_cost_slots=extra.get("sp_wait_cost_slots"),
                 sp_fill_eps_cost=extra.get("sp_fill_eps_cost"),
@@ -661,6 +676,7 @@ class BendersSolver:
                         )
                     # If the master has a formatter for the current solution, print it
                     try:
+                        _set_master_report_snapshot()
                         fmt = getattr(self.master, "format_solution", None)
                         if callable(fmt):
                             print("\nBest Master Solution:")
@@ -669,7 +685,7 @@ class BendersSolver:
                         pass
                     # Optional diagnostics from last evaluated subproblem (if available)
                     try:
-                        _print_sp_diagnostics(last_diag)
+                        _print_sp_diagnostics(_report_diag())
                     except Exception:
                         pass
                 except Exception:
@@ -734,7 +750,7 @@ class BendersSolver:
             if no_cut_streak < 2:
                 try:
                     g_bd = None
-                    if best_lb is not None and best_ub is not None:
+                    if lower_bound_semantics_valid and best_lb is not None and best_ub is not None:
                         gap = float(best_ub) - float(best_lb)
                         if gap < 0.0:
                             gap = 0.0
@@ -984,9 +1000,9 @@ class BendersSolver:
                     bb_source = "cplex_log"
                 elif bb_reason is None:
                     bb_reason = "not_in_solver_or_log"
-            if mp_best_bound is not None:
+            if lower_bound_semantics_valid and mp_best_bound is not None:
                 best_lb = float(mp_best_bound) if best_lb is None else max(best_lb, float(mp_best_bound))
-            else:
+            elif lower_bound_semantics_valid:
                 reason = f" reason={bb_reason}" if bb_reason is not None else ""
                 log.warning("[CHECK] MP best bound unavailable; LB not updated.%s", reason)
                 _vprint(f"[MP] best_bound unavailable{reason}")
@@ -1093,11 +1109,7 @@ class BendersSolver:
                             vmin = min(vals)
                             vmax = max(vals)
                             vmean = sum(vals) / float(len(vals))
-<<<<<<< HEAD
                             _vprint(f"[MW] core updated (t=0..): min={vmin:.3g} max={vmax:.3g} mean={vmean:.3g}")
-=======
-                            print(f"[MW] core updated (t=0..): min={vmin:.3g} max={vmax:.3g} mean={vmean:.3g}")
->>>>>>> 0aaca8e (update: implement MW improvements.)
                     except Exception:
                         pass
 
@@ -1106,22 +1118,23 @@ class BendersSolver:
                     if isinstance(getattr(self.subproblem, "params", None), dict):
                         if self._mw_core_out is not None and self._mw_core_ret is not None:
                             self.subproblem.params["mw_core_point"] = {"Yout": list(self._mw_core_out), "Yret": list(self._mw_core_ret)}
-<<<<<<< HEAD
-=======
                         self.subproblem.params["use_magnanti_wong"] = mw_enabled
->>>>>>> 0aaca8e (update: implement MW improvements.)
                 except Exception:
                     pass
             else:
                 try:
                     if isinstance(getattr(self.subproblem, "params", None), dict):
-<<<<<<< HEAD
                         pass
-=======
-                        self.subproblem.params["use_magnanti_wong"] = mw_enabled
->>>>>>> 0aaca8e (update: implement MW improvements.)
                 except Exception:
                     pass
+
+            try:
+                if isinstance(getattr(self.subproblem, "params", None), dict):
+                    self.subproblem.params["debug_current_iteration"] = int(it)
+                    remaining_time = max(1.0, float(self.cfg.solver.time_limit_s) - (time.time() - t0))
+                    self.subproblem.params["solve_time_limit_s"] = float(remaining_time)
+            except Exception:
+                pass
 
             _vprint("Evaluating Subproblem (SP) at candidate...")
             sp_t0 = time.perf_counter()
@@ -1132,6 +1145,7 @@ class BendersSolver:
             sp_total_obj = None
             sp_recourse_obj = None
             sp_first_stage = None
+            is_new_best_incumbent = False
             if sres.upper_bound is not None:
                 try:
                     fcost_fn = getattr(self.master, "first_stage_cost", None)
@@ -1141,6 +1155,8 @@ class BendersSolver:
                 sp_recourse_obj = float(sres.upper_bound)
                 sp_first_stage = float(fcost)
                 sp_total_obj = float(sp_recourse_obj) + float(sp_first_stage)
+                prev_ub = best_ub
+                is_new_best_incumbent = prev_ub is None or float(sp_total_obj) < float(prev_ub) - 1e-9
                 # Use sp_total_obj consistently for UB updates
                 best_ub = sp_total_obj if best_ub is None else min(best_ub, sp_total_obj)
             # Keep last diagnostics for end-of-run reporting
@@ -1148,6 +1164,13 @@ class BendersSolver:
                 last_diag = dict(getattr(sres, "diagnostics", {}) or {})
             except Exception:
                 last_diag = None
+            try:
+                current_cut_lb_valid = bool(last_diag.get("cut_valid_lower_bound", True)) if isinstance(last_diag, dict) else True
+            except Exception:
+                current_cut_lb_valid = True
+            if not current_cut_lb_valid:
+                lower_bound_semantics_valid = False
+                best_lb = None
             rep.sp_feasible = bool(sres.is_feasible) if sres.is_feasible is not None else None
             rep.sp_recourse = sp_recourse_obj
             rep.candidate_ub = sp_total_obj
@@ -1157,6 +1180,17 @@ class BendersSolver:
                 served, total = (None, None)
             rep.pax_served = served
             rep.pax_total = total
+            if sres.upper_bound is not None and is_new_best_incumbent:
+                try:
+                    best_candidate = copy.deepcopy(dict(mres.candidate))
+                except Exception:
+                    best_candidate = dict(mres.candidate)
+                try:
+                    best_diag = copy.deepcopy(last_diag) if isinstance(last_diag, dict) else None
+                except Exception:
+                    best_diag = dict(last_diag) if isinstance(last_diag, dict) else None
+                best_pax_served = served
+                best_pax_total = total
             try:
                 pen_pax = last_diag.get("penalty_pax") if isinstance(last_diag, dict) else None
                 rep.penalty_pax = float(pen_pax) if pen_pax is not None else None
@@ -1176,6 +1210,28 @@ class BendersSolver:
                 _ub_print = "-"
             # Clarify that SP result is recourse-only
             _vprint(f"SP result: recourse={_ub_print} feasible={sres.is_feasible}")
+            try:
+                if isinstance(last_diag, dict):
+                    _vprint(
+                        "[SP PIPELINE] iter=%s build=%.3fs solve=%.3fs extract=%.3fs post=%.3fs cutgen=%.3fs mode=%s lb_valid=%s tl_inc=%s vars=%s bin=%s cons=%s lp=%s"
+                        % (
+                            str(it),
+                            float(last_diag.get("timing_build_s", 0.0) or 0.0),
+                            float(last_diag.get("timing_solve_s", 0.0) or 0.0),
+                            float(last_diag.get("timing_extract_s", 0.0) or 0.0),
+                            float(last_diag.get("timing_postprocess_s", 0.0) or 0.0),
+                            float(last_diag.get("timing_cutgen_s", 0.0) or 0.0),
+                            str(last_diag.get("cut_generation_mode", "-")),
+                            str(bool(last_diag.get("cut_valid_lower_bound", True))),
+                            str(bool(last_diag.get("time_limited_incumbent", False))),
+                            str(last_diag.get("model_num_variables", "-")),
+                            str(last_diag.get("model_num_binary_variables", "-")),
+                            str(last_diag.get("model_num_constraints", "-")),
+                            str(last_diag.get("exported_lp_path", "-")),
+                        )
+                    )
+            except Exception:
+                pass
             if sp_recourse_obj is not None:
                 _vprint(
                     "[CHECK] SP: recourse=%.6g first=%.6g sp_total=%.6g"
@@ -1187,14 +1243,14 @@ class BendersSolver:
                 )
             # Correctness checks (warnings only)
             try:
-                if mp_total_inc is not None and sp_total_obj is not None:
+                if lower_bound_semantics_valid and mp_total_inc is not None and sp_total_obj is not None:
                     if float(mp_total_inc) > float(sp_total_obj) + 1e-6:
                         log.warning(
                             "[CHECK FAIL] MP total exceeds SP total at same y: mp_total=%.6g sp_total=%.6g (objective mismatch or theta overestimates)",
                             float(mp_total_inc),
                             float(sp_total_obj),
                         )
-                if best_lb is not None and best_ub is not None:
+                if lower_bound_semantics_valid and best_lb is not None and best_ub is not None:
                     if float(best_lb) > float(best_ub) + 1e-6:
                         log.warning(
                             "[CHECK FAIL] LB exceeds UB: LB=%.6g UB=%.6g",
@@ -1208,7 +1264,7 @@ class BendersSolver:
                         else:
                             best_lb = None
                             log.warning("[CHECK] LB invalid; cleared LB (no previous valid value).")
-                if prev_best_lb is not None and best_lb is not None:
+                if lower_bound_semantics_valid and prev_best_lb is not None and best_lb is not None:
                     if float(best_lb) + 1e-6 < float(prev_best_lb):
                         log.warning(
                             "[CHECK FAIL] LB decreased: prev=%.6g now=%.6g",
@@ -1399,7 +1455,7 @@ class BendersSolver:
                 print(format_report_line(rep))
 
             # Check gap if we have both bounds
-            if best_lb is not None and best_ub is not None:
+            if lower_bound_semantics_valid and best_lb is not None and best_ub is not None:
                 gap = float(best_ub) - float(best_lb)
                 if gap < 0.0:
                     gap = 0.0
@@ -1415,6 +1471,7 @@ class BendersSolver:
                     print(f"Total solve time: {elapsed:.3f} seconds")
                     # If the master has a formatter for the current solution, print it
                     try:
+                        _set_master_report_snapshot()
                         fmt = getattr(self.master, "format_solution", None)
                         if callable(fmt):
                             print("\nBest Master Solution:")
@@ -1423,7 +1480,7 @@ class BendersSolver:
                         pass
                     # Additional matrices from subproblem diagnostics (if available)
                     try:
-                        _print_sp_diagnostics(last_diag)
+                        _print_sp_diagnostics(_report_diag())
                     except Exception:
                         pass
                     # Summary timing
@@ -1467,6 +1524,8 @@ class BendersSolver:
                     except Exception:
                         pass
                     return _make_result(SolveStatus.OPTIMAL, it)
+            elif not lower_bound_semantics_valid and best_ub is not None:
+                _vprint("[CHECK] Bounds are heuristic only; LB/gap optimality logic disabled for current cut mode.")
                 # Stall stopping: if gap does not improve sufficiently for several iterations
                 if stall_max > 0:
                     improved = False
@@ -1500,13 +1559,14 @@ class BendersSolver:
                             print(
                                 f"Best bounds: LB={best_lb:.6g} UB={best_ub:.6g} gap={_gap:.6g} rel={_rel:.3g}"
                             )
+                        _set_master_report_snapshot()
                         fmt = getattr(self.master, "format_solution", None)
                         if callable(fmt):
                             print("\nBest Master Solution:")
                             print(fmt())
                         # Optional diagnostics from last evaluated subproblem (if available)
                         try:
-                            _print_sp_diagnostics(last_diag)
+                            _print_sp_diagnostics(_report_diag())
                         except Exception:
                             pass
                     except Exception:
@@ -1552,13 +1612,14 @@ class BendersSolver:
                 gap = abs(best_ub - best_lb)
                 rel_gap = gap / max(1.0, abs(best_ub))
                 print(f"Best bounds: LB={best_lb:.6g} UB={best_ub:.6g} gap={gap:.6g} rel={rel_gap:.3g}")
+            _set_master_report_snapshot()
             fmt = getattr(self.master, "format_solution", None)
             if callable(fmt):
                 print("\nBest Master Solution:")
                 print(fmt())
             # Diagnostics from last evaluated subproblem, if any
             try:
-                _print_sp_diagnostics(last_diag)
+                _print_sp_diagnostics(_report_diag())
             except Exception:
                 pass
         except Exception:

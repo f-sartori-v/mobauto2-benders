@@ -15,9 +15,9 @@ run:
 
 data:
   # Demand source (preferred): file with requests or R_out/R_ret arrays
-  demand_file: #setups/prob/base.yaml
+  demand_file: setups/prob/base.yaml
   # Optional scenario files for multi-scenario runs
-  scenario_files: [setups/prob/base.yaml, setups/prob/base_plus100_out_noon.yaml, setups/prob/base_ret_peak_adv.yaml, setups/prob/base_vol20_pm60.yaml]
+  scenario_files: #[setups/prob/base.yaml, setups/prob/base_plus100_out_noon.yaml, setups/prob/base_ret_peak_adv.yaml, setups/prob/base_vol20_pm60.yaml]
   # Optional weights aligned with scenario_files
   scenario_weights: null
   # Optional inline demand arrays (single scenario)
@@ -34,7 +34,7 @@ model:
     trip_duration_minutes: 30
   fleet:
     # Number of shuttles
-    Q: 3
+    Q: 2
     # Initial battery level per shuttle (length Q)
     initial_battery: [150.0, 150.0, 150.0]
     # Forced first action per shuttle at t=0: IDL, CHR, OUT, RET
@@ -97,12 +97,16 @@ subproblem:
   fill_first_epsilon: 1.0e-6
   # Penalty per unit of unused seat-capacity
   unused_capacity_penalty: 0.5
+  # Restricted fallback probing when proxy cuts are degenerate
+  degenerate_cut_probe_top_k: 6
+  # Treat slopes with max abs value below this threshold as zero
+  degenerate_cut_zero_tol: 1.0e-9
 
 solver:
   # Benders loop settings
   max_iterations: 100
   tolerance: 0.001
-  time_limit_s: 3600
+  time_limit_s: 120
   # Optional stall-based early stopping
   stall_max_no_improve_iters: 0
   stall_min_abs_improve: 1.0
