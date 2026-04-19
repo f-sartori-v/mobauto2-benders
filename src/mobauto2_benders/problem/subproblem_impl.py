@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Tuple, Iterable, Optional, Mapping
+from bisect import bisect_right
 import time
 from pathlib import Path
 import json
@@ -218,6 +219,11 @@ class ProblemSubproblem(Subproblem):
             doc = _load_doc(p)
             return _aggregate_requests(doc, Tlen)
 
+        def _load_exact_arrivals_from_file(path_like: Any) -> tuple[list[float] | None, list[float] | None]:
+            p = Path(str(path_like))
+            doc = _load_doc(p)
+            return _extract_exact_arrival_minutes(doc)
+
         # (legacy) aggregate_requests_to_R removed; using _aggregate_requests instead
 
         # Capacities induced by master decisions: C_*[tau] = S * sum_q y*_{q,tau}
@@ -259,16 +265,20 @@ class ProblemSubproblem(Subproblem):
             scenarios = list(params.get("scenario_files"))
         # Normalize single-scenario lists to single-demand path
         single_scenario_override: tuple[list[float], list[float]] | None = None
+        single_scenario_arrivals: tuple[list[float] | None, list[float] | None] | None = None
         if scenarios and len(scenarios) == 1:
             s0 = scenarios[0]
             if isinstance(s0, (str, Path)):
                 R_out0, R_ret0 = _load_demand_from_file(s0, T)
+                single_scenario_arrivals = _load_exact_arrivals_from_file(s0)
             elif isinstance(s0, dict) and ("requests" in s0 or "req_matrix" in s0 or "R_out" in s0 or "R_ret" in s0):
                 R_out0, R_ret0 = _aggregate_requests(s0, T)
+                single_scenario_arrivals = _extract_exact_arrival_minutes(s0)
             else:
                 # Best effort
                 R_out0 = list(getattr(s0, "R_out", [0.0] * T))
                 R_ret0 = list(getattr(s0, "R_ret", [0.0] * T))
+                single_scenario_arrivals = (None, None)
             R_out0 = (R_out0 + [0.0] * T)[:T]
             R_ret0 = (R_ret0 + [0.0] * T)[:T]
             single_scenario_override = (R_out0, R_ret0)
@@ -712,14 +722,17 @@ class ProblemSubproblem(Subproblem):
             for idx_s, s in enumerate(scenarios):
                 if isinstance(s, (str, Path)):
                     R_out, R_ret = _load_demand_from_file(s, T)
+                    arrival_minutes_out, arrival_minutes_ret = _load_exact_arrivals_from_file(s)
                     scen_label = str(s)
                 elif isinstance(s, dict) and ("requests" in s or "req_matrix" in s or "R_out" in s or "R_ret" in s):
                     R_out, R_ret = _aggregate_requests(s, T)
+                    arrival_minutes_out, arrival_minutes_ret = _extract_exact_arrival_minutes(s)
                     scen_label = str(s.get("name") or s.get("label") or "scenario")
                 else:
                     # Best effort
                     R_out = list(getattr(s, "R_out", [0.0] * T))
                     R_ret = list(getattr(s, "R_ret", [0.0] * T))
+                    arrival_minutes_out, arrival_minutes_ret = (None, None)
                     scen_label = str(getattr(s, "name", "scenario"))
                 R_out = (R_out + [0.0] * T)[:T]
                 R_ret = (R_ret + [0.0] * T)[:T]
@@ -737,6 +750,7 @@ class ProblemSubproblem(Subproblem):
                     trip_slots=params.get("trip_slots"), Q=int(params.get("Q", len(q_idx) if q_idx else 0) or 0),
                     binit=params.get("binit"), initial_actions=params.get("initial_actions"),
                     Emax=params.get("Emax"), L=params.get("L"), delta_chg=params.get("delta_chg"),
+                    arrival_minutes_out=arrival_minutes_out, arrival_minutes_ret=arrival_minutes_ret,
                     eps_feas=float(params.get("eps_feas", 1e-7)),
                     debug_timing=debug_timing,
                     debug_solver_tee=bool(params.get("debug_solver_tee", False)),
@@ -869,6 +883,8 @@ class ProblemSubproblem(Subproblem):
                         "total_demand": float(duals.get("total_demand", 0.0)),
                         "realized_departures": list(duals.get("realized_departures", [])),
                         "realized_departure_min_map": dict(duals.get("realized_departure_min_map", {})),
+                        "refined_departure_diagnostics": list(duals.get("refined_departure_diagnostics", [])),
+                        "refined_departure_diagnostics_focus": list(duals.get("refined_departure_diagnostics_focus", [])),
                         "effective_pre_service": list(duals.get("effective_pre_service", [])),
                         "battery_trajectory": duals.get("battery_trajectory", {}),
                         "timing_sp_solve_s": rec["sp_solve_time"],
@@ -1188,6 +1204,9 @@ class ProblemSubproblem(Subproblem):
                         "coeff_yOUT": c_out_map,
                         "theta_lb": float(theta_lb_s),
                         "coeff_yRET": c_ret_map,
+                        "recourse_total": float(target_val),
+                        "recourse_out": float(duals.get("ub_out", 0.0)),
+                        "recourse_ret": float(duals.get("ub_ret", 0.0)),
                         "scenario_index": int(idx_s),
                         "cut_valid_lower_bound": bool(cut_lb_valid),
                     },
@@ -1211,6 +1230,8 @@ class ProblemSubproblem(Subproblem):
                     "total_demand": float(duals.get("total_demand", 0.0)),
                     "realized_departures": list(duals.get("realized_departures", [])),
                     "realized_departure_min_map": dict(duals.get("realized_departure_min_map", {})),
+                    "refined_departure_diagnostics": list(duals.get("refined_departure_diagnostics", [])),
+                    "refined_departure_diagnostics_focus": list(duals.get("refined_departure_diagnostics_focus", [])),
                     "effective_pre_service": list(duals.get("effective_pre_service", [])),
                     "battery_trajectory": duals.get("battery_trajectory", {}),
                     "timing_sp_solve_s": sp_solve_time,
@@ -1283,6 +1304,9 @@ class ProblemSubproblem(Subproblem):
                         "const_ret": const_ret_avg,
                         "coeff_yOUT": avg_out,
                         "coeff_yRET": avg_ret,
+                        "recourse_total": float(ub_val_agg),
+                        "recourse_out": float(sum(weights[i] * scenario_records[i]["duals"].get("ub_out", 0.0) for i in range(len(scenario_records)))),
+                        "recourse_ret": float(sum(weights[i] * scenario_records[i]["duals"].get("ub_ret", 0.0) for i in range(len(scenario_records)))),
                         "cut_valid_lower_bound": bool(agg_cut_lb_valid),
                     },
                 )
@@ -1333,13 +1357,17 @@ class ProblemSubproblem(Subproblem):
             # Single-demand case from params (prefer external file if given)
             if single_scenario_override is not None:
                 R_out, R_ret = single_scenario_override
+                arrival_minutes_out, arrival_minutes_ret = single_scenario_arrivals or (None, None)
             elif params.get("demand_file"):
                 R_out, R_ret = _load_demand_from_file(params.get("demand_file"), T)
+                arrival_minutes_out, arrival_minutes_ret = _load_exact_arrivals_from_file(params.get("demand_file"))
             elif ("requests" in params) or ("req_matrix" in params) or ("R_out" in params) or ("R_ret" in params):
                 R_out, R_ret = _aggregate_requests(params, T)
+                arrival_minutes_out, arrival_minutes_ret = _extract_exact_arrival_minutes(params)
             else:
                 R_out = [0.0] * T
                 R_ret = [0.0] * T
+                arrival_minutes_out, arrival_minutes_ret = (None, None)
             if len(R_out) != T:
                 R_out = (R_out + [0.0] * T)[:T]
             if len(R_ret) != T:
@@ -1358,6 +1386,7 @@ class ProblemSubproblem(Subproblem):
                 trip_slots=params.get("trip_slots"), Q=int(params.get("Q", len(q_idx) if q_idx else 0) or 0),
                 binit=params.get("binit"), initial_actions=params.get("initial_actions"),
                 Emax=params.get("Emax"), L=params.get("L"), delta_chg=params.get("delta_chg"),
+                arrival_minutes_out=arrival_minutes_out, arrival_minutes_ret=arrival_minutes_ret,
                 eps_feas=float(params.get("eps_feas", 1e-7)),
                 debug_timing=debug_timing,
                 debug_solver_tee=bool(params.get("debug_solver_tee", False)),
@@ -1419,6 +1448,8 @@ class ProblemSubproblem(Subproblem):
                     "total_demand": float(duals.get("total_demand", 0.0)),
                     "realized_departures": list(duals.get("realized_departures", [])),
                     "realized_departure_min_map": dict(duals.get("realized_departure_min_map", {})),
+                    "refined_departure_diagnostics": list(duals.get("refined_departure_diagnostics", [])),
+                    "refined_departure_diagnostics_focus": list(duals.get("refined_departure_diagnostics_focus", [])),
                     "effective_pre_service": list(duals.get("effective_pre_service", [])),
                     "battery_trajectory": duals.get("battery_trajectory", {}),
                     "slot_resolution": int(params.get("slot_resolution", 1)),
@@ -1448,6 +1479,8 @@ class ProblemSubproblem(Subproblem):
                     "total_demand": float(duals.get("total_demand", 0.0)),
                     "realized_departures": list(duals.get("realized_departures", [])),
                     "realized_departure_min_map": dict(duals.get("realized_departure_min_map", {})),
+                    "refined_departure_diagnostics": list(duals.get("refined_departure_diagnostics", [])),
+                    "refined_departure_diagnostics_focus": list(duals.get("refined_departure_diagnostics_focus", [])),
                     "effective_pre_service": list(duals.get("effective_pre_service", [])),
                     "battery_trajectory": duals.get("battery_trajectory", {}),
                     "slot_resolution": int(params.get("slot_resolution", 1)),
@@ -1634,6 +1667,9 @@ class ProblemSubproblem(Subproblem):
                     "const_ret": float(const_ret),
                     "coeff_yOUT": c_out_map,
                     "coeff_yRET": c_ret_map,
+                    "recourse_total": float(target_val),
+                    "recourse_out": float(duals.get("ub_out", 0.0)),
+                    "recourse_ret": float(duals.get("ub_ret", 0.0)),
                     # diagnostics
                     "theta_lb": float(theta_lb),
                     "cut_valid_lower_bound": bool(cut_lb_valid),
@@ -1657,6 +1693,8 @@ class ProblemSubproblem(Subproblem):
                 "total_demand": float(duals.get("total_demand", 0.0)),
                 "realized_departures": list(duals.get("realized_departures", [])),
                 "realized_departure_min_map": dict(duals.get("realized_departure_min_map", {})),
+                "refined_departure_diagnostics": list(duals.get("refined_departure_diagnostics", [])),
+                "refined_departure_diagnostics_focus": list(duals.get("refined_departure_diagnostics_focus", [])),
                 "effective_pre_service": list(duals.get("effective_pre_service", [])),
                 "battery_trajectory": duals.get("battery_trajectory", {}),
                 "slot_resolution": int(params.get("slot_resolution", 1)),
@@ -1806,6 +1844,135 @@ def _demand_release_min(t: int, slot_res: int) -> int:
 def _wait_slots_from_minute(t: int, dep_min: int, slot_res: int) -> float:
     release_min = _demand_release_min(int(t), int(slot_res))
     return float(max(0, int(dep_min) - release_min)) / float(max(1, int(slot_res)))
+
+
+def _slot_index_from_minute(arrival_min: float, slot_res: int, T: int) -> int | None:
+    try:
+        minute = float(arrival_min)
+    except Exception:
+        return None
+    if minute < 0.0:
+        return None
+    if T <= 0:
+        return None
+    slot = int(math.floor(minute / float(max(1, int(slot_res)))))
+    return max(0, min(int(T) - 1, slot))
+
+
+def _extract_exact_arrival_minutes(container: Any) -> tuple[list[float] | None, list[float] | None]:
+    if container is None:
+        return None, None
+    if isinstance(container, dict):
+        if "requests" in container:
+            container = container.get("requests") or []
+        elif "req_matrix" in container:
+            container = container.get("req_matrix") or []
+        else:
+            return None, None
+    if not isinstance(container, list):
+        return None, None
+
+    out_minutes: list[float] = []
+    ret_minutes: list[float] = []
+    if container and isinstance(container[0], dict):
+        for req in container:
+            try:
+                minute = float(req.get("time", -1))
+            except Exception:
+                continue
+            if minute < 0.0:
+                continue
+            direction = req.get("dir")
+            if isinstance(direction, str):
+                dd = direction.upper()
+                if dd == "OUT":
+                    out_minutes.append(minute)
+                elif dd == "RET":
+                    ret_minutes.append(minute)
+            else:
+                try:
+                    if int(direction) == 0:
+                        out_minutes.append(minute)
+                    else:
+                        ret_minutes.append(minute)
+                except Exception:
+                    continue
+        return out_minutes, ret_minutes
+    for row in container:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        direction, raw_minute = row[0], row[1]
+        try:
+            minute = float(raw_minute)
+        except Exception:
+            continue
+        if minute < 0.0:
+            continue
+        if isinstance(direction, str):
+            dd = direction.upper()
+            if dd == "OUT":
+                out_minutes.append(minute)
+            elif dd == "RET":
+                ret_minutes.append(minute)
+        else:
+            try:
+                if int(direction) == 0:
+                    out_minutes.append(minute)
+                else:
+                    ret_minutes.append(minute)
+            except Exception:
+                continue
+    return out_minutes, ret_minutes
+
+
+def _eligible_arrivals_by_slot_and_cutoff(
+    R: list[float],
+    arrival_minutes: list[float] | None,
+    T: int,
+    slot_res: int,
+    cutoffs_by_slot: Mapping[int, Iterable[int]],
+) -> dict[tuple[int, int], float]:
+    eligible: dict[tuple[int, int], float] = {}
+    if arrival_minutes is None:
+        for t, cutoffs in cutoffs_by_slot.items():
+            full_available_min = (int(t) + 1) * int(slot_res)
+            demand = float(R[t]) if 0 <= int(t) < len(R) else 0.0
+            for cutoff in cutoffs:
+                eligible[(int(t), int(cutoff))] = demand if int(cutoff) >= full_available_min else 0.0
+        return eligible
+
+    arrivals_by_slot: list[list[float]] = [[] for _ in range(max(0, int(T)))]
+    for minute in arrival_minutes:
+        slot = _slot_index_from_minute(minute, slot_res, T)
+        if slot is None:
+            continue
+        arrivals_by_slot[slot].append(float(minute))
+    for arrs in arrivals_by_slot:
+        arrs.sort()
+
+    for t, cutoffs in cutoffs_by_slot.items():
+        arrs = arrivals_by_slot[int(t)] if 0 <= int(t) < len(arrivals_by_slot) else []
+        for cutoff in cutoffs:
+            eligible[(int(t), int(cutoff))] = float(bisect_right(arrs, float(cutoff)))
+    return eligible
+
+
+def _direction_eligible_arrivals_by_minute(
+    R: list[float],
+    arrival_minutes: list[float] | None,
+    T: int,
+    slot_res: int,
+    minute: float,
+) -> float:
+    cutoff = float(minute)
+    if arrival_minutes is not None:
+        clean = sorted(float(v) for v in arrival_minutes if v is not None)
+        return float(bisect_right(clean, cutoff))
+    total = 0.0
+    for t in range(min(int(T), len(R))):
+        if cutoff >= float((t + 1) * int(slot_res)):
+            total += float(R[t])
+    return total
 
 
 def _validate_realized_departure_minutes(
@@ -2028,6 +2195,27 @@ def solve_refined_lp_relaxation_cut(
             if release <= h <= release + W_minutes:
                 ret_arcs.append((int(t), int(q), int(tau), int(h)))
 
+    out_cutoffs_by_t: dict[int, set[int]] = {}
+    ret_cutoffs_by_t: dict[int, set[int]] = {}
+    for t, _q, _tau, h in out_arcs:
+        out_cutoffs_by_t.setdefault(int(t), set()).add(int(h))
+    for t, _q, _tau, h in ret_arcs:
+        ret_cutoffs_by_t.setdefault(int(t), set()).add(int(h))
+    eligible_out_prefix = _eligible_arrivals_by_slot_and_cutoff(
+        R_out,
+        getattr(P, "arrival_minutes_out", None),
+        int(P.T),
+        slot_res,
+        out_cutoffs_by_t,
+    )
+    eligible_ret_prefix = _eligible_arrivals_by_slot_and_cutoff(
+        R_ret,
+        getattr(P, "arrival_minutes_ret", None),
+        int(P.T),
+        slot_res,
+        ret_cutoffs_by_t,
+    )
+
     m.OutArcs = pyo.Set(initialize=out_arcs, dimen=4, ordered=False)
     m.RetArcs = pyo.Set(initialize=ret_arcs, dimen=4, ordered=False)
     m.x_OUT = pyo.Var(m.OutArcs, within=pyo.NonNegativeReals)
@@ -2085,6 +2273,27 @@ def solve_refined_lp_relaxation_cut(
             return pyo.Constraint.Skip
         return sum(mm.x_RET[t, q, tau, h] for (t, q, tau, h) in rel) <= float(P.S) * sum(mm.z_RET[q, tau, h] for h in ret_choice_map[(int(q), int(tau))])
     m.Cap_RET = pyo.Constraint(ret_events, rule=_cap_ret)
+
+    for t, cutoffs in out_cutoffs_by_t.items():
+        for cutoff in sorted(cutoffs):
+            rel = [(q, tau, h) for (tt, q, tau, h) in out_arcs if int(tt) == int(t) and int(h) <= int(cutoff)]
+            if not rel:
+                continue
+            eligible = float(eligible_out_prefix.get((int(t), int(cutoff)), 0.0))
+            m.add_component(
+                f"EligPrefixOut_{int(t)}_{int(cutoff)}",
+                pyo.Constraint(expr=sum(m.x_OUT[t, q, tau, h] for (q, tau, h) in rel) <= eligible),
+            )
+    for t, cutoffs in ret_cutoffs_by_t.items():
+        for cutoff in sorted(cutoffs):
+            rel = [(q, tau, h) for (tt, q, tau, h) in ret_arcs if int(tt) == int(t) and int(h) <= int(cutoff)]
+            if not rel:
+                continue
+            eligible = float(eligible_ret_prefix.get((int(t), int(cutoff)), 0.0))
+            m.add_component(
+                f"EligPrefixRet_{int(t)}_{int(cutoff)}",
+                pyo.Constraint(expr=sum(m.x_RET[t, q, tau, h] for (q, tau, h) in rel) <= eligible),
+            )
 
     build_stats = _model_size_stats(m)
     lp_path = None
@@ -2212,6 +2421,8 @@ def solve_refined_subproblem(
                 "served_ret_by_tau_k": [[] for _ in range(int(P.T))],
                 "realized_departures": [],
                 "realized_departure_min_map": {},
+                "refined_departure_diagnostics": [],
+                "refined_departure_diagnostics_focus": [],
                 "effective_pre_service": [],
                 "battery_trajectory": {},
                 "objective_value": float(P.p) * penalty_pax,
@@ -2319,6 +2530,27 @@ def solve_refined_subproblem(
                 if release <= h <= release + W_minutes:
                     ret_arcs.append((t, e.sid, h))
 
+    out_cutoffs_by_t: dict[int, set[int]] = {}
+    ret_cutoffs_by_t: dict[int, set[int]] = {}
+    for t, _sid, h in out_arcs:
+        out_cutoffs_by_t.setdefault(int(t), set()).add(int(h))
+    for t, _sid, h in ret_arcs:
+        ret_cutoffs_by_t.setdefault(int(t), set()).add(int(h))
+    eligible_out_prefix = _eligible_arrivals_by_slot_and_cutoff(
+        R_out,
+        getattr(P, "arrival_minutes_out", None),
+        int(P.T),
+        slot_res,
+        out_cutoffs_by_t,
+    )
+    eligible_ret_prefix = _eligible_arrivals_by_slot_and_cutoff(
+        R_ret,
+        getattr(P, "arrival_minutes_ret", None),
+        int(P.T),
+        slot_res,
+        ret_cutoffs_by_t,
+    )
+
     m.OutArcs = pyo.Set(initialize=out_arcs, dimen=3, ordered=False)
     m.RetArcs = pyo.Set(initialize=ret_arcs, dimen=3, ordered=False)
     m.x_OUT = pyo.Var(m.OutArcs, within=pyo.NonNegativeReals)
@@ -2366,6 +2598,27 @@ def solve_refined_subproblem(
         return sum(mm.x_RET[t, sid, h] for (t, h) in rel) <= float(P.S)
     m.Cap_ret_refined = pyo.Constraint([e.sid for e in ret_events], rule=_cap_ret)
 
+    for t, cutoffs in out_cutoffs_by_t.items():
+        for cutoff in sorted(cutoffs):
+            rel = [(sid, h) for (tt, sid, h) in out_arcs if int(tt) == int(t) and int(h) <= int(cutoff)]
+            if not rel:
+                continue
+            eligible = float(eligible_out_prefix.get((int(t), int(cutoff)), 0.0))
+            m.add_component(
+                f"EligPrefixOut_{int(t)}_{int(cutoff)}",
+                pyo.Constraint(expr=sum(m.x_OUT[t, sid, h] for (sid, h) in rel) <= eligible),
+            )
+    for t, cutoffs in ret_cutoffs_by_t.items():
+        for cutoff in sorted(cutoffs):
+            rel = [(sid, h) for (tt, sid, h) in ret_arcs if int(tt) == int(t) and int(h) <= int(cutoff)]
+            if not rel:
+                continue
+            eligible = float(eligible_ret_prefix.get((int(t), int(cutoff)), 0.0))
+            m.add_component(
+                f"EligPrefixRet_{int(t)}_{int(cutoff)}",
+                pyo.Constraint(expr=sum(m.x_RET[t, sid, h] for (sid, h) in rel) <= eligible),
+            )
+
     build_stats = _model_size_stats(m)
     lp_path = None
     lp_export_time = 0.0
@@ -2412,6 +2665,8 @@ def solve_refined_subproblem(
                 "infeasible": True,
                 "infeasibility_reason": "Refined timing/battery schedule is infeasible.",
                 "first_violation": first,
+                "refined_departure_diagnostics": [],
+                "refined_departure_diagnostics_focus": [],
                 "timing_build_s": float(t_build1 - t_build0),
                 "timing_solve_s": float(t_solve1 - t_solve0),
                 "timing_extract_s": 0.0,
@@ -2451,6 +2706,7 @@ def solve_refined_subproblem(
     realized_departure_min_map: dict[tuple[int, int], float] = {}
     effective_pre_service: list[dict[str, Any]] = []
     battery_trajectory: dict[str, list[dict[str, Any]]] = {}
+    refined_departure_diagnostics: list[dict[str, Any]] = []
     wait_cost_slots = 0.0
     fill_eps_cost = 0.0
     ub_out = 0.0
@@ -2484,6 +2740,56 @@ def solve_refined_subproblem(
         served = sum(x_ret_vals[arc] for arc in ret_arcs_by_sid.get(e.sid, []))
         served_ret_by_tau[e.tau] += served
         served_ret_by_tau_k[e.tau][e.layer_index] = served
+
+    for e in out_events:
+        dep = float(dep_by_sid[e.sid])
+        boarded = float(sum(x_out_vals[arc] for arc in out_arcs_by_sid.get(e.sid, [])))
+        eligible = _direction_eligible_arrivals_by_minute(
+            R_out,
+            getattr(P, "arrival_minutes_out", None),
+            int(P.T),
+            slot_res,
+            dep,
+        )
+        refined_departure_diagnostics.append({
+            "vehicle_id": int(e.q),
+            "direction": "OUT",
+            "slot": int(e.tau),
+            "departure_min": dep,
+            "boarded": boarded,
+            "eligible_arrivals": eligible,
+            "violation": bool(boarded > eligible + 1.0e-9),
+        })
+    for e in ret_events:
+        dep = float(dep_by_sid[e.sid])
+        boarded = float(sum(x_ret_vals[arc] for arc in ret_arcs_by_sid.get(e.sid, [])))
+        eligible = _direction_eligible_arrivals_by_minute(
+            R_ret,
+            getattr(P, "arrival_minutes_ret", None),
+            int(P.T),
+            slot_res,
+            dep,
+        )
+        refined_departure_diagnostics.append({
+            "vehicle_id": int(e.q),
+            "direction": "RET",
+            "slot": int(e.tau),
+            "departure_min": dep,
+            "boarded": boarded,
+            "eligible_arrivals": eligible,
+            "violation": bool(boarded > eligible + 1.0e-9),
+        })
+    refined_departure_diagnostics.sort(
+        key=lambda rec: (str(rec.get("direction", "")), float(rec.get("departure_min", 0.0)), int(rec.get("vehicle_id", 0)), int(rec.get("slot", 0)))
+    )
+    focus_counts = {"OUT": 0, "RET": 0}
+    refined_departure_diagnostics_focus: list[dict[str, Any]] = []
+    for rec in refined_departure_diagnostics:
+        direction = str(rec.get("direction", ""))
+        if focus_counts.get(direction, 0) >= 2:
+            continue
+        refined_departure_diagnostics_focus.append(dict(rec))
+        focus_counts[direction] = focus_counts.get(direction, 0) + 1
 
     for (t, sid, h) in out_arcs:
         val = x_out_vals[(t, sid, h)]
@@ -2564,6 +2870,8 @@ def solve_refined_subproblem(
             "served_ret_by_tau_k": served_ret_by_tau_k,
             "realized_departures": realized_departures,
             "realized_departure_min_map": realized_departure_min_map,
+            "refined_departure_diagnostics": refined_departure_diagnostics,
+            "refined_departure_diagnostics_focus": refined_departure_diagnostics_focus,
             "effective_pre_service": effective_pre_service,
             "battery_trajectory": battery_trajectory,
             "ub_out": ub_out + float(P.p) * float(sum(u_out_vals)),
@@ -2611,6 +2919,8 @@ class SPParams:
     Emax: float | None = None
     L: float | None = None
     delta_chg: float | None = None
+    arrival_minutes_out: list[float] | None = None
+    arrival_minutes_ret: list[float] | None = None
     eps_feas: float = 1e-7
     debug_timing: bool = False
     debug_solver_tee: bool = False

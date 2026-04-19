@@ -34,6 +34,7 @@ class ProblemMaster(MasterProblem):
         # Best-incumbent snapshot for final reporting
         self._report_candidate: Candidate | None = None
         self._report_realized_departure_min_map: dict[tuple[int, int], float] | None = None
+        self._last_cut_attempt: dict[str, Any] | None = None
 
     def _p(self, key: str, default: Any | None = None) -> Any:
         if self.params is None:
@@ -99,6 +100,7 @@ class ProblemMaster(MasterProblem):
         self._cut_best_const = {}
         self._report_candidate = None
         self._report_realized_departure_min_map = None
+        self._last_cut_attempt = None
         Q = int(self._p("Q"))
         # Time discretization: prefer minutes + slot_resolution + trip_duration_minutes
         import math
@@ -1132,6 +1134,89 @@ class ProblemMaster(MasterProblem):
         except Exception:
             scen_idx = None
 
+        iteration = int(self._p("iteration", -1) or -1)
+
+        def _active_start_id(limit: int = 12) -> str:
+            starts: list[str] = []
+            try:
+                for q in m.Q:
+                    for t in m.T:
+                        yout = float(m.yOUT[q, t].value or 0.0)
+                        yret = float(m.yRET[q, t].value or 0.0)
+                        if yout >= 0.5:
+                            starts.append(f"OUT[{int(q)},{int(t)}]")
+                        if yret >= 0.5:
+                            starts.append(f"RET[{int(q)},{int(t)}]")
+            except Exception:
+                return "candidate:unavailable"
+            if len(starts) > limit:
+                return "|".join(starts[:limit]) + f"|...(+{len(starts) - limit})"
+            return "|".join(starts) if starts else "candidate:idle"
+
+        def _theta_snapshot() -> tuple[float | None, float | None, float | None]:
+            try:
+                theta_out_val = float(pyo.value(m.theta_out, exception=False)) if hasattr(m, "theta_out") else None
+            except Exception:
+                theta_out_val = None
+            try:
+                theta_ret_val = float(pyo.value(m.theta_ret, exception=False)) if hasattr(m, "theta_ret") else None
+            except Exception:
+                theta_ret_val = None
+            try:
+                if hasattr(m, "theta"):
+                    theta_total_val = float(pyo.value(m.theta, exception=False))
+                else:
+                    theta_total_val = (float(theta_out_val or 0.0) + float(theta_ret_val or 0.0))
+            except Exception:
+                theta_total_val = None
+            return theta_out_val, theta_ret_val, theta_total_val
+
+        def _raw_cut_value(constant: float | None, coeffs: Any, prefix: str) -> float:
+            total = float(constant or 0.0)
+            if isinstance(coeffs, dict):
+                for (q, t), v in coeffs.items():
+                    try:
+                        if prefix == "yOUT":
+                            total += float(v) * float(m.yOUT[int(q), int(t)].value or 0.0)
+                        else:
+                            total += float(v) * float(m.yRET[int(q), int(t)].value or 0.0)
+                    except Exception:
+                        continue
+            return total
+
+        theta_out_cur, theta_ret_cur, theta_total_cur = _theta_snapshot()
+        raw_rhs_out_total = _raw_cut_value(const_out_meta, coeff_yOUT, "yOUT") if const_out_meta is not None else None
+        raw_rhs_ret_total = _raw_cut_value(const_ret_meta, coeff_yRET, "yRET") if const_ret_meta is not None else None
+        raw_rhs_total = _raw_cut_value(const, coeff_yOUT, "yOUT")
+        raw_rhs_total += sum(
+            float(v) * float(m.yRET[int(q), int(t)].value or 0.0)
+            for (q, t), v in (coeff_yRET.items() if isinstance(coeff_yRET, dict) else [])
+        )
+        attempt_diag: dict[str, Any] = {
+            "iteration": iteration,
+            "candidate_id": _active_start_id(),
+            "cut_name": getattr(cut, "name", None),
+            "cut_type": str(getattr(cut, "cut_type", "")),
+            "theta_out": theta_out_cur,
+            "theta_ret": theta_ret_cur,
+            "theta_total": theta_total_cur,
+            "recourse_out": (float(cut.metadata.get("recourse_out")) if hasattr(cut, "metadata") and ("recourse_out" in cut.metadata) else None),
+            "recourse_ret": (float(cut.metadata.get("recourse_ret")) if hasattr(cut, "metadata") and ("recourse_ret" in cut.metadata) else None),
+            "recourse_total": (float(cut.metadata.get("recourse_total")) if hasattr(cut, "metadata") and ("recourse_total" in cut.metadata) else None),
+            "raw_rhs_out": raw_rhs_out_total,
+            "raw_rhs_ret": raw_rhs_ret_total,
+            "raw_rhs_total": raw_rhs_total,
+            "aggregate_cut_logging_gap": (
+                float(raw_rhs_total) - float(cut.metadata.get("recourse_total"))
+                if hasattr(cut, "metadata") and ("recourse_total" in cut.metadata)
+                else None
+            ),
+            "violation_tolerance_master": float(self._p("eps_cut", 1e-8)),
+            "violation_tolerance_filter_rel": None,
+            "skip_reason": None,
+        }
+        self._last_cut_attempt = attempt_diag
+
         # Build RHS: theta >= const + sum(beta_out*yOUT) + sum(beta_ret*yRET)
         rhs = const
 
@@ -1280,6 +1365,7 @@ class ProblemMaster(MasterProblem):
         scale = 1.0
         disagg_dir = hasattr(m, "theta_out") and hasattr(m, "theta_ret")
         added_any = True
+        attempt_diag["scale"] = float(scale)
         if disagg_dir and (const_adj_out is not None) and (const_adj_ret is not None):
             # Build separate RHS for OUT/RET
             if aggregate:
@@ -1303,18 +1389,42 @@ class ProblemMaster(MasterProblem):
             rhs_out_val = float(rhs_out_val)
             lhs_ret_val = float(lhs_ret_val)
             rhs_ret_val = float(rhs_ret_val)
+            attempt_diag.update({
+                "transformed_rhs_out_before_scaling": float(rhs_out_val),
+                "transformed_rhs_ret_before_scaling": float(rhs_ret_val),
+                "transformed_rhs_total_before_scaling": float(rhs_out_val + rhs_ret_val),
+                "transformed_rhs_out_after_scaling": float(rhs_out_val),
+                "transformed_rhs_ret_after_scaling": float(rhs_ret_val),
+                "transformed_rhs_total_after_scaling": float(rhs_out_val + rhs_ret_val),
+                "lhs_out": float(lhs_out_val),
+                "lhs_ret": float(lhs_ret_val),
+                "lhs_total": float(lhs_out_val + lhs_ret_val),
+                "const_out_adjusted": float(const_adj_out),
+                "const_ret_adjusted": float(const_adj_ret),
+            })
             # Tightness + violation checks
             eps_cut = float(self._p("eps_cut", 1e-8))
+            attempt_diag["violation_tolerance_master"] = float(eps_cut)
             if ub_est_out is not None and abs(rhs_out_val - float(ub_est_out)) > eps_cut * max(1.0, abs(float(ub_est_out))):
                 self._vprint("[CUT DEBUG] Tightness failed (OUT). ub=%.6g rhs=%.6g" % (float(ub_est_out), rhs_out_val))
+                attempt_diag["skip_reason"] = "tightness_failed_out"
                 return False
             if ub_est_ret is not None and abs(rhs_ret_val - float(ub_est_ret)) > eps_cut * max(1.0, abs(float(ub_est_ret))):
                 self._vprint("[CUT DEBUG] Tightness failed (RET). ub=%.6g rhs=%.6g" % (float(ub_est_ret), rhs_ret_val))
+                attempt_diag["skip_reason"] = "tightness_failed_ret"
                 return False
             viol_out = rhs_out_val - lhs_out_val
             viol_ret = rhs_ret_val - lhs_ret_val
+            attempt_diag["violation_out"] = float(viol_out)
+            attempt_diag["violation_ret"] = float(viol_ret)
             if (viol_out <= eps_cut * max(1.0, abs(rhs_out_val))) and (viol_ret <= eps_cut * max(1.0, abs(rhs_ret_val))):
                 self._vprint("[CUT DEBUG] Not violated (dir). viol_out=%.6g viol_ret=%.6g" % (viol_out, viol_ret))
+                attempt_diag["skip_reason"] = "not_violated_directional"
+                if attempt_diag.get("aggregate_cut_logging_gap") is not None and float(attempt_diag["aggregate_cut_logging_gap"]) < -float(eps_cut):
+                    attempt_diag["mismatch_explanation"] = (
+                        "Raw cut line at y is below recorded SP recourse, but skip logic compares transformed directional RHS "
+                        "against current theta_out/theta_ret. A negative raw recourse gap does not imply the cut is violated in theta-space."
+                    )
                 return False
             if aggregate:
                 slopes_out = {("Yout", int(t)): float(v) for t, v in agg_out.items()}
@@ -1322,11 +1432,14 @@ class ProblemMaster(MasterProblem):
             else:
                 slopes_out = {("yOUT", int(q), int(t)): float(v) for (q, t), v in agg_out.items()}  # type: ignore[misc]
                 slopes_ret = {("yRET", int(q), int(t)): float(v) for (q, t), v in agg_ret.items()}  # type: ignore[misc]
+            attempt_diag["slopes_out"] = dict(slopes_out)
+            attempt_diag["slopes_ret"] = dict(slopes_ret)
             added_out = True
             added_ret = True
             if not force:
+                filter_out_diag: dict[str, Any] = {}
                 added_out = add_benders_cut(
-                    iteration=-1,
+                    iteration=iteration,
                     const=float(const_adj_out),
                     slopes=slopes_out,
                     lhs_value=lhs_out_val,
@@ -1336,9 +1449,11 @@ class ProblemMaster(MasterProblem):
                     cuts_in_model=self._cut_idx,
                     signature_set=self._cut_signatures,
                     slope_const_map=self._cut_best_const,
+                    diagnostics=filter_out_diag,
                 )
+                filter_ret_diag: dict[str, Any] = {}
                 added_ret = add_benders_cut(
-                    iteration=-1,
+                    iteration=iteration,
                     const=float(const_adj_ret),
                     slopes=slopes_ret,
                     lhs_value=lhs_ret_val,
@@ -1348,8 +1463,14 @@ class ProblemMaster(MasterProblem):
                     cuts_in_model=self._cut_idx,
                     signature_set=self._cut_signatures,
                     slope_const_map=self._cut_best_const,
+                    diagnostics=filter_ret_diag,
                 )
+                attempt_diag["filter_out"] = filter_out_diag
+                attempt_diag["filter_ret"] = filter_ret_diag
+                if filter_out_diag.get("violation_threshold") is not None:
+                    attempt_diag["violation_tolerance_filter_rel"] = float(filter_out_diag["violation_threshold"])
                 if not (added_out or added_ret):
+                    attempt_diag["skip_reason"] = "filtered_out"
                     return False
         else:
             # Choose theta variable: per-scenario if available, else single theta
@@ -1364,14 +1485,29 @@ class ProblemMaster(MasterProblem):
                 return False
             lhs_val = float(lhs_val)
             rhs_val = float(rhs_val)
+            attempt_diag.update({
+                "transformed_rhs_before_scaling": float(rhs_val),
+                "transformed_rhs_after_scaling": float(rhs_val),
+                "lhs_total": float(lhs_val),
+                "const_adjusted": float(const_adj),
+            })
             # Tightness + violation checks
             eps_cut = float(self._p("eps_cut", 1e-8))
+            attempt_diag["violation_tolerance_master"] = float(eps_cut)
             if abs(rhs_val - float(ub_est)) > eps_cut * max(1.0, abs(float(ub_est))):
                 self._vprint("[CUT DEBUG] Tightness failed. ub=%.6g rhs=%.6g" % (float(ub_est), rhs_val))
+                attempt_diag["skip_reason"] = "tightness_failed"
                 return False
             viol = rhs_val - lhs_val
+            attempt_diag["violation_total"] = float(viol)
             if viol <= eps_cut * max(1.0, abs(rhs_val)):
                 self._vprint("[CUT DEBUG] Not violated. viol=%.6g" % (viol,))
+                attempt_diag["skip_reason"] = "not_violated"
+                if attempt_diag.get("aggregate_cut_logging_gap") is not None and float(attempt_diag["aggregate_cut_logging_gap"]) < -float(eps_cut):
+                    attempt_diag["mismatch_explanation"] = (
+                        "Raw cut line at y is below recorded SP recourse, but skip logic compares transformed RHS against theta. "
+                        "The candidate can still be nonviolated if theta already dominates the proposed cut."
+                    )
                 return False
             if aggregate:
                 slopes_all = {("Yout", int(t)): float(v) for t, v in agg_out.items()}
@@ -1382,8 +1518,9 @@ class ProblemMaster(MasterProblem):
             if lhs_val is None or rhs_val is None:
                 return False
             if not force:
+                filter_diag: dict[str, Any] = {}
                 ok = add_benders_cut(
-                    iteration=-1,
+                    iteration=iteration,
                     const=float(const_adj),
                     slopes=slopes_all,
                     lhs_value=lhs_val,
@@ -1393,8 +1530,13 @@ class ProblemMaster(MasterProblem):
                     cuts_in_model=self._cut_idx,
                     signature_set=self._cut_signatures,
                     slope_const_map=self._cut_best_const,
+                    diagnostics=filter_diag,
                 )
+                attempt_diag["filter_total"] = filter_diag
+                if filter_diag.get("violation_threshold") is not None:
+                    attempt_diag["violation_tolerance_filter_rel"] = float(filter_diag["violation_threshold"])
                 if not ok:
+                    attempt_diag["skip_reason"] = str(filter_diag.get("skip_reason", "filtered_out"))
                     return False
 
         # Duplicate check handled by add_benders_cut
@@ -1508,6 +1650,7 @@ class ProblemMaster(MasterProblem):
         except Exception:
             pass
         self._cut_idx += 1
+        attempt_diag["decision"] = "added"
         # Track last cut info for cross-iteration checks
         self._last_cut_const = (const_adj_out + const_adj_ret) if (const_adj_out is not None and const_adj_ret is not None) else const_adj
         self._last_cut_nnz = nnz
@@ -1600,4 +1743,7 @@ class ProblemMaster(MasterProblem):
 
     def last_cut_meta(self) -> tuple[str | None, int | None]:
         return getattr(self, "_last_cut_type", None), getattr(self, "_last_cut_nnz", None)
+
+    def last_cut_attempt(self) -> dict[str, Any] | None:
+        return dict(self._last_cut_attempt) if isinstance(self._last_cut_attempt, dict) else None
 

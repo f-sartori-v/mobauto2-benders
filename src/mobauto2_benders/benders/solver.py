@@ -125,6 +125,7 @@ def add_benders_cut(
     cuts_in_model: int | None = None,
     signature_set: set[tuple] | None = None,
     slope_const_map: dict[tuple, float] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> bool:
     """Common filter for adding a Benders cut.
 
@@ -134,6 +135,17 @@ def add_benders_cut(
     """
     viol = float(rhs_value) - float(lhs_value)
     thr = VIOL_TOL_REL * (abs(float(rhs_value)) + 1.0)
+    if diagnostics is not None:
+        diagnostics.update({
+            "iteration": int(iteration),
+            "cut_type": str(cut_type),
+            "lhs_value": float(lhs_value),
+            "rhs_value": float(rhs_value),
+            "violation": float(viol),
+            "violation_threshold": float(thr),
+            "const": float(const),
+            "cuts_in_model": cuts_in_model,
+        })
     def _dbg(msg: str) -> None:
         global _debug_cut_count, _debug_suppressed_notice_done
         if not DEBUG_CUTS:
@@ -187,10 +199,16 @@ def add_benders_cut(
                 log.info("... (%d coefficient(s) omitted)", nnz - kmax)
 
     if not _slopes_dict:
+        if diagnostics is not None:
+            diagnostics["decision"] = "skip"
+            diagnostics["skip_reason"] = "invalid_slopes"
         log.info("[BENDERS] skip reason=invalid_slopes signature=None cuts_in_model=%s", str(cuts_in_model))
         return False
     # If effectively empty (all slopes ~0 and const ~0), skip
     if abs(float(const)) <= COEFF_ZERO_TOL and all(abs(float(v)) <= COEFF_ZERO_TOL for v in _slopes_dict.values()):
+        if diagnostics is not None:
+            diagnostics["decision"] = "skip"
+            diagnostics["skip_reason"] = "numerically_empty"
         log.info("[BENDERS] skip reason=numerically_empty signature=None cuts_in_model=%s", str(cuts_in_model))
         return False
 
@@ -200,6 +218,11 @@ def add_benders_cut(
             slope_sig = make_slope_signature(_slopes_dict, scope=signature_scope)
             prev_const = slope_const_map.get(slope_sig)
             if prev_const is not None and float(const) <= float(prev_const) + 1e-9:
+                if diagnostics is not None:
+                    diagnostics["decision"] = "skip"
+                    diagnostics["skip_reason"] = "dominated_by_slope"
+                    diagnostics["slope_signature"] = slope_sig
+                    diagnostics["previous_const"] = float(prev_const)
                 log.info("[BENDERS] skip reason=dominated_by_slope signature=%s cuts_in_model=%s", str(slope_sig), str(cuts_in_model))
                 return False
             slope_const_map[slope_sig] = float(const)
@@ -210,6 +233,9 @@ def add_benders_cut(
     if cuts_in_model == 0:
         sigset = signature_set if signature_set is not None else _get_default_signature_set()
         sig = make_cut_signature(const, _slopes_dict, scope=signature_scope)
+        if diagnostics is not None:
+            diagnostics["decision"] = "add"
+            diagnostics["signature"] = sig
         log.info("[BENDERS] signature=%s sigset_size=%s", str(sig), str(len(sigset)))
         sigset.add(sig)
         nnz = len(sig[-1]) if isinstance(sig, tuple) and len(sig) > 0 else "-"
@@ -217,6 +243,9 @@ def add_benders_cut(
         return True
 
     if viol < thr:
+        if diagnostics is not None:
+            diagnostics["decision"] = "skip"
+            diagnostics["skip_reason"] = "numerically_small"
         _dbg(
             f"[BENDERS] cut skipped: small violation (it={iteration} type={cut_type} lhs={float(lhs_value):.6g} rhs={float(rhs_value):.6g} viol={viol:.3g} thr={thr:.3g})"
         )
@@ -225,8 +254,13 @@ def add_benders_cut(
 
     sigset = signature_set if signature_set is not None else _get_default_signature_set()
     sig = make_cut_signature(const, _slopes_dict, scope=signature_scope)
+    if diagnostics is not None:
+        diagnostics["signature"] = sig
     log.info("[BENDERS] signature=%s sigset_size=%s", str(sig), str(len(sigset)))
     if sig in sigset:
+        if diagnostics is not None:
+            diagnostics["decision"] = "skip"
+            diagnostics["skip_reason"] = "duplicate_by_signature"
         nnz = len(sig[-1]) if isinstance(sig, tuple) and len(sig) > 0 else "-"
         _dbg(f"[BENDERS] cut skipped: duplicate (it={iteration} type={cut_type} nnz={nnz})")
         log.info(
@@ -237,6 +271,8 @@ def add_benders_cut(
         return False
 
     sigset.add(sig)
+    if diagnostics is not None:
+        diagnostics["decision"] = "add"
     nnz = len(sig[-1]) if isinstance(sig, tuple) and len(sig) > 0 else "-"
     _dbg(f"[BENDERS] cut added (it={iteration} type={cut_type} nnz={nnz})")
     return True
@@ -1299,7 +1335,7 @@ class BendersSolver:
                             line_val += float(v) * _cand_val("yRET", int(q), int(tau))
                     diff = float(line_val) - float(sres.upper_bound)
                     _vprint(
-                        f"[CUT TIGHTNESS] line(y)={line_val:.6g}  SP_ub={float(sres.upper_bound):.6g}  diff={diff:.3g}"
+                        f"[CUT TIGHTNESS] raw_line(y)={line_val:.6g}  SP_ub={float(sres.upper_bound):.6g}  diff={diff:.3g}"
                     )
             except Exception:
                 pass
@@ -1362,7 +1398,75 @@ class BendersSolver:
             else:
                 if cut_names:
                     _vprint("Master updated: no new cuts (all skipped / duplicates)")
+                    try:
+                        attempt = getattr(self.master, "last_cut_attempt", lambda: None)()
+                    except Exception:
+                        attempt = None
+                    if isinstance(attempt, dict):
+                        _vprint(
+                            "[CUT ATTEMPT] it=%s cand=%s theta_out=%s theta_ret=%s theta_total=%s rec_out=%s rec_ret=%s rec_total=%s raw_rhs_out=%s raw_rhs_ret=%s raw_rhs_total=%s raw_gap=%s lhs_out=%s lhs_ret=%s lhs_total=%s rhs_out=%s rhs_ret=%s rhs_total=%s tol_master=%s tol_filter=%s skip=%s"
+                            % (
+                                str(attempt.get("iteration")),
+                                str(attempt.get("candidate_id")),
+                                str(attempt.get("theta_out")),
+                                str(attempt.get("theta_ret")),
+                                str(attempt.get("theta_total")),
+                                str(attempt.get("recourse_out")),
+                                str(attempt.get("recourse_ret")),
+                                str(attempt.get("recourse_total")),
+                                str(attempt.get("raw_rhs_out")),
+                                str(attempt.get("raw_rhs_ret")),
+                                str(attempt.get("raw_rhs_total")),
+                                str(attempt.get("aggregate_cut_logging_gap")),
+                                str(attempt.get("lhs_out")),
+                                str(attempt.get("lhs_ret")),
+                                str(attempt.get("lhs_total")),
+                                str(attempt.get("transformed_rhs_out_after_scaling", attempt.get("transformed_rhs_after_scaling"))),
+                                str(attempt.get("transformed_rhs_ret_after_scaling")),
+                                str(attempt.get("transformed_rhs_total_after_scaling", attempt.get("transformed_rhs_after_scaling"))),
+                                str(attempt.get("violation_tolerance_master")),
+                                str(attempt.get("violation_tolerance_filter_rel")),
+                                str(attempt.get("skip_reason")),
+                            )
+                        )
+                        if attempt.get("filter_out") is not None or attempt.get("filter_ret") is not None or attempt.get("filter_total") is not None:
+                            _vprint(
+                                "[CUT FILTER] out=%s ret=%s total=%s"
+                                % (
+                                    str(attempt.get("filter_out")),
+                                    str(attempt.get("filter_ret")),
+                                    str(attempt.get("filter_total")),
+                                )
+                            )
+                        if attempt.get("mismatch_explanation"):
+                            log.warning(
+                                "[CUT MISMATCH] it=%s cand=%s raw_gap=%s skip_reason=%s explanation=%s",
+                                str(attempt.get("iteration")),
+                                str(attempt.get("candidate_id")),
+                                str(attempt.get("aggregate_cut_logging_gap")),
+                                str(attempt.get("skip_reason")),
+                                str(attempt.get("mismatch_explanation")),
+                            )
                 no_cut_streak += 1
+            try:
+                attempt = getattr(self.master, "last_cut_attempt", lambda: None)()
+            except Exception:
+                attempt = None
+            if isinstance(attempt, dict) and cut_names:
+                _vprint(
+                    "[CUT SUMMARY] it=%s cand=%s decision=%s skip=%s theta_total=%s rec_total=%s raw_rhs_total=%s rhs_total=%s lhs_total=%s"
+                    % (
+                        str(attempt.get("iteration")),
+                        str(attempt.get("candidate_id")),
+                        str(attempt.get("decision")),
+                        str(attempt.get("skip_reason")),
+                        str(attempt.get("theta_total")),
+                        str(attempt.get("recourse_total")),
+                        str(attempt.get("raw_rhs_total")),
+                        str(attempt.get("transformed_rhs_total_after_scaling", attempt.get("transformed_rhs_after_scaling"))),
+                        str(attempt.get("lhs_total")),
+                    )
+                )
             rep.cuts_added = added
             rep.cuts_total = cuts_after
             if added > 0:

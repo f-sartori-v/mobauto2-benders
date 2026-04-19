@@ -27,7 +27,7 @@ data:
 model:
   time:
     # Total horizon length in minutes (T_minutes) or discrete slots (T)
-    T_minutes: 660
+    T_minutes: 220
     # Minutes per slot
     slot_resolution: 30
     # Trip duration in minutes (converted internally to slots)
