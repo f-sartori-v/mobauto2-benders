@@ -114,8 +114,8 @@ def build_manifest(
             "master_version": _solver_version(cfg.solver.master_solver),
             "max_iterations": cfg.solver.max_iterations,
             "tolerance": cfg.solver.tolerance,
-            "time_limit_s": cfg.solver.time_limit_s,
-            "mipgap": cfg.master.mipgap,
+            "total_time_limit_s": cfg.solver.total_time_limit_s,
+            "per_iteration_mipgap": cfg.master.per_iteration_mipgap,
         },
         # Swept per D2/D3: every table must state the pair it was produced with.
         "swept_parameters": {

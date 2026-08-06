@@ -47,10 +47,10 @@ master:
   use_fifo_symmetry: true
   symmetry_breaking: true
   use_mip_start: true
-  solve_time_limit_s: 60
-  mipgap: 0.05
+  per_iteration_time_limit_s: 60
+  per_iteration_mipgap: 0.05
   cplex_options:
-    CPXPARAM_MIP_Strategy_Symmetry: 5
+    CPXPARAM_Preprocessing_Symmetry: 5
     CPXPARAM_Threads: 1
   solver_backend: cplex_direct
   aggregate_cuts_by_tau: true
@@ -74,7 +74,7 @@ subproblem:
 solver:
   max_iterations: 4
   tolerance: 0.001
-  time_limit_s: 300
+  total_time_limit_s: 300
   stall_max_no_improve_iters: 0
   stall_min_abs_improve: 1.0
   stall_min_rel_improve: 0.002

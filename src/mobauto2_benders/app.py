@@ -89,10 +89,13 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     mp["eps_bin"] = float(cfg.tolerances.eps_bin)
     mp["eps_cut"] = float(cfg.tolerances.eps_cut)
     mp["use_mip_start"] = bool(cfg.master.use_mip_start)
-    if cfg.master.solve_time_limit_s is not None:
-        mp["solve_time_limit_s"] = int(cfg.master.solve_time_limit_s)
-    if cfg.master.mipgap is not None:
-        mp["mipgap"] = float(cfg.master.mipgap)
+    # These are the starting values for the master's per-iteration controls. The
+    # Benders loop's gap-tied schedule overwrites both every iteration, bounded by
+    # the same two config values (see BendersSolver: mp_gap_max, mp_tl_cap).
+    if cfg.master.per_iteration_time_limit_s is not None:
+        mp["solve_time_limit_s"] = int(cfg.master.per_iteration_time_limit_s)
+    if cfg.master.per_iteration_mipgap is not None:
+        mp["mipgap"] = float(cfg.master.per_iteration_mipgap)
     if cfg.master.cplex_options:
         mp["cplex_options"] = dict(cfg.master.cplex_options)
     if cfg.master.solver_backend:
@@ -197,7 +200,7 @@ def _print_cfg(cfg, mp: dict, sp: dict) -> None:
     print("Run configuration:")
     print(
         f"  solver: iterations={cfg.solver.max_iterations} tol={cfg.solver.tolerance} "
-        f"time_limit_s={cfg.solver.time_limit_s} seed={cfg.run.seed}"
+        f"total_time_limit_s={cfg.solver.total_time_limit_s} seed={cfg.run.seed}"
     )
     T_minutes = mp.get("T_minutes")
     slot_res = mp.get("slot_resolution", 1)
@@ -301,6 +304,17 @@ def _maybe_print_summary(result: BendersRunResult, sp: dict) -> None:
         f"\nResult: status={result.status} iterations={result.iterations} "
         f"best_lb={result.best_lower_bound} best_ub={result.best_upper_bound}"
     )
+    # A run whose master solves stopped on the clock is not bit-reproducible, and
+    # must not be quoted as if it were. Measured: a binding per-iteration limit moved
+    # the LB 8% between two runs of one config; a non-binding one reproduced exactly.
+    truncated = getattr(result, "clock_truncated_master_solves", None)
+    if truncated:
+        print(
+            f"NOT REPRODUCIBLE: {truncated} master solve(s) stopped on the clock, not "
+            "the gap. Bounds from this run vary with machine load. For a comparable "
+            "number, raise master.per_iteration_time_limit_s and solver.total_time_limit_s "
+            "until the master always terminates on the gap (configs/baseline_d9.yaml)."
+        )
 
 
 def _map_candidate_to_warm_start(

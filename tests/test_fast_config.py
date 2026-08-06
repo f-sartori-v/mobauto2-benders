@@ -76,3 +76,127 @@ class TestConfigSchema(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTimeLimitKeysAreDistinguishable(unittest.TestCase):
+    """Three limits decide when a run stops and two of them used to be inert.
+
+    `solver.time_limit_s` (whole loop) and `master.solve_time_limit_s` (one master
+    solve) differed by one word, and `master.mipgap` read like the convergence
+    criterion when that is `solver.tolerance`. Worse, the Benders loop overwrote
+    both master values on every iteration from hardcoded constants, so setting
+    them in a config did nothing at all.
+
+    The old names now fail loudly rather than being silently ignored.
+    """
+
+    def _load_with(self, section: str, key: str, value):
+        import yaml, tempfile, os
+        from mobauto2_benders.config import load_config
+
+        raw = yaml.safe_load((CONFIGS / "baseline_d9.yaml").read_text(encoding="utf-8"))
+        raw[section][key] = value
+        fd, tmp = tempfile.mkstemp(suffix=".yaml")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(raw, fh)
+            return load_config(tmp)
+        finally:
+            os.unlink(tmp)
+
+    def test_old_master_time_limit_name_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._load_with("master", "solve_time_limit_s", 30)
+        self.assertIn("per_iteration_time_limit_s", str(ctx.exception))
+
+    def test_old_master_mipgap_name_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._load_with("master", "mipgap", 0.05)
+        self.assertIn("per_iteration_mipgap", str(ctx.exception))
+
+    def test_old_solver_time_limit_name_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._load_with("solver", "time_limit_s", 120)
+        self.assertIn("total_time_limit_s", str(ctx.exception))
+
+    def test_shipped_config_exposes_all_three_limits(self):
+        cfg = load_cfg("baseline_d9.yaml")
+        self.assertIsNotNone(cfg.master.per_iteration_time_limit_s)
+        self.assertIsNotNone(cfg.master.per_iteration_mipgap)
+        self.assertGreater(cfg.solver.total_time_limit_s, 0)
+        self.assertGreater(cfg.solver.tolerance, 0.0)
+
+
+class TestMasterScheduleRespectsConfigCeilings(unittest.TestCase):
+    """The gap-tied schedule may tighten the master's controls, never loosen them
+    past what the config asked for. Before this was wired, the config values were
+    parsed, threaded down and discarded -- the same defect class as D19."""
+
+    def test_schedule_ceilings_come_from_config(self):
+        from mobauto2_benders.config import load_config
+        import yaml, tempfile, os
+
+        raw = yaml.safe_load((CONFIGS / "baseline_d9.yaml").read_text(encoding="utf-8"))
+        raw["master"]["per_iteration_time_limit_s"] = 7
+        raw["master"]["per_iteration_mipgap"] = 0.02
+        fd, tmp = tempfile.mkstemp(suffix=".yaml")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(raw, fh)
+            cfg = load_config(tmp)
+        finally:
+            os.unlink(tmp)
+
+        # The schedule computes mp_tl = 2 + 5/mp_gap, which at gap 0.02 is 252s --
+        # far above the 7s ceiling, so the cap is what must survive.
+        self.assertEqual(cfg.master.per_iteration_time_limit_s, 7)
+        self.assertAlmostEqual(cfg.master.per_iteration_mipgap, 0.02)
+
+
+class TestCplexOptionNames(unittest.TestCase):
+    """CPXPARAM_* options were silently dropped under solver_backend=cplex_direct.
+
+    Pyomo's CPLEXDirect splits an option key on '_' and walks
+    cplex.Cplex().parameters, so 'CPXPARAM_Threads' would resolve
+    parameters.CPXPARAM.Threads and raise. The old code skipped every CPXPARAM_*
+    key to avoid that, which meant a config asking for one thread quietly used
+    all of them -- and the baselines cite reproducibility as the reason for the
+    setting.
+
+    The drop also hid a second mistake: the shipped name
+    CPXPARAM_MIP_Strategy_Symmetry does not exist. CPLEX calls that parameter
+    preprocessing.symmetry.
+    """
+
+    def test_cpxparam_names_translate_to_direct_paths(self):
+        from mobauto2_benders.problem.master_impl import _cplex_direct_option_name
+        self.assertEqual(_cplex_direct_option_name("CPXPARAM_Threads"), "threads")
+        self.assertEqual(
+            _cplex_direct_option_name("CPXPARAM_Preprocessing_Symmetry"),
+            "preprocessing_symmetry",
+        )
+
+    def test_non_cpxparam_keys_pass_through(self):
+        from mobauto2_benders.problem.master_impl import _cplex_direct_option_name
+        self.assertEqual(_cplex_direct_option_name("timelimit"), "timelimit")
+
+    def test_unresolvable_parameter_name_is_rejected(self):
+        from mobauto2_benders.problem.master_impl import _validate_cplex_options
+        try:
+            import cplex  # noqa: F401
+        except Exception:
+            self.skipTest("CPLEX not available")
+        with self.assertRaises(ValueError) as ctx:
+            _validate_cplex_options({"CPXPARAM_MIP_Strategy_Symmetry": 5}, "cplex_direct")
+        self.assertIn("CPXPARAM_MIP_Strategy_Symmetry", str(ctx.exception))
+
+    def test_shipped_configs_use_resolvable_names(self):
+        from mobauto2_benders.problem.master_impl import _validate_cplex_options
+        try:
+            import cplex  # noqa: F401
+        except Exception:
+            self.skipTest("CPLEX not available")
+        for path in sorted(CONFIGS.glob("*.yaml")):
+            with self.subTest(config=path.name):
+                cfg = load_cfg(path.name)
+                _validate_cplex_options(cfg.master.cplex_options, cfg.master.solver_backend)

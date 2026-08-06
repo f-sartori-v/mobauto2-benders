@@ -90,8 +90,14 @@ class MasterSection:
     use_fifo_symmetry: bool = False
     symmetry_breaking: bool = False
     use_mip_start: bool = False
-    solve_time_limit_s: int | None = None
-    mipgap: float | None = None
+    # Ceiling on ONE master MIP solve, per Benders iteration. Not the run budget:
+    # that is solver.total_time_limit_s. The gap-tied schedule in the Benders loop
+    # picks a per-iteration limit and this value caps it.
+    per_iteration_time_limit_s: int | None = None
+    # Ceiling on the master MIP gap, per Benders iteration. Not the convergence
+    # criterion: that is solver.tolerance. The schedule tightens the gap on its own
+    # as the Benders gap closes; this is the loosest it is allowed to be.
+    per_iteration_mipgap: float | None = None
     cplex_options: dict[str, Any] = field(default_factory=dict)
     solver_backend: str = "cplex_direct"
     aggregate_cuts_by_tau: bool = True
@@ -124,7 +130,9 @@ class SubproblemSection:
 class SolverSection:
     max_iterations: int
     tolerance: float
-    time_limit_s: int
+    # Wall-clock budget for the whole Benders loop. Checked between iterations, so
+    # a run overshoots by at most one master solve (see master.per_iteration_time_limit_s).
+    total_time_limit_s: int
     stall_max_no_improve_iters: int = 0
     stall_min_abs_improve: float = 0.0
     stall_min_rel_improve: float = 0.0
@@ -410,8 +418,8 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
             "use_fifo_symmetry": master_params.get("use_fifo_symmetry", False),
             "symmetry_breaking": master_params.get("symmetry_breaking", False),
             "use_mip_start": master_params.get("use_mip_start", False),
-            "solve_time_limit_s": master_params.get("solve_time_limit_s"),
-            "mipgap": master_params.get("mipgap"),
+            "per_iteration_time_limit_s": master_params.get("solve_time_limit_s"),
+            "per_iteration_mipgap": master_params.get("mipgap"),
             "cplex_options": master_params.get("cplex_options", {}),
             "solver_backend": master_params.get("solver_backend", "cplex_direct"),
             "aggregate_cuts_by_tau": master_params.get("aggregate_cuts_by_tau", True),
@@ -438,7 +446,7 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
         "solver": {
             "max_iterations": run.get("max_iterations", 100),
             "tolerance": run.get("tolerance", 1e-4),
-            "time_limit_s": run.get("time_limit_s", 600),
+            "total_time_limit_s": run.get("time_limit_s", 600),
             "stall_max_no_improve_iters": run.get("stall_max_no_improve_iters", 0),
             "stall_min_abs_improve": run.get("stall_min_abs_improve", 0.0),
             "stall_min_rel_improve": run.get("stall_min_rel_improve", 0.0),
@@ -632,14 +640,26 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
     master_raw = _as_mapping(data.get("master"), "master")
     if ("use_" + "lazy" + "_cuts") in master_raw:
         raise ValueError("lazy " + "cuts removed; delete key use_" + "lazy" + "_cuts")
+    # Renamed for clarity: both were confusable with the run-level budget and the
+    # convergence tolerance, and both were silently overwritten before they were wired.
+    if "solve_time_limit_s" in master_raw:
+        raise ValueError(
+            "master.solve_time_limit_s renamed to master.per_iteration_time_limit_s "
+            "(ceiling on one master solve; the run budget is solver.total_time_limit_s)"
+        )
+    if "mipgap" in master_raw:
+        raise ValueError(
+            "master.mipgap renamed to master.per_iteration_mipgap "
+            "(ceiling on the master MIP gap; the convergence criterion is solver.tolerance)"
+        )
     _check_unknown_keys(
         master_raw,
         {
             "use_fifo_symmetry",
             "symmetry_breaking",
             "use_mip_start",
-            "solve_time_limit_s",
-            "mipgap",
+            "per_iteration_time_limit_s",
+            "per_iteration_mipgap",
             "cplex_options",
             "solver_backend",
             "aggregate_cuts_by_tau",
@@ -654,20 +674,22 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         use_fifo_symmetry=_ensure_bool(master_raw.get("use_fifo_symmetry", False), "master.use_fifo_symmetry"),
         symmetry_breaking=_ensure_bool(master_raw.get("symmetry_breaking", False), "master.symmetry_breaking"),
         use_mip_start=_ensure_bool(master_raw.get("use_mip_start", False), "master.use_mip_start"),
-        solve_time_limit_s=(
+        per_iteration_time_limit_s=(
             _ensure_int(
-                _disallow_expr(master_raw.get("solve_time_limit_s"), "master.solve_time_limit_s"),
-                "master.solve_time_limit_s",
+                _disallow_expr(
+                    master_raw.get("per_iteration_time_limit_s"), "master.per_iteration_time_limit_s"
+                ),
+                "master.per_iteration_time_limit_s",
             )
-            if master_raw.get("solve_time_limit_s") is not None
+            if master_raw.get("per_iteration_time_limit_s") is not None
             else None
         ),
-        mipgap=(
+        per_iteration_mipgap=(
             _ensure_float(
-                _disallow_expr(master_raw.get("mipgap"), "master.mipgap"),
-                "master.mipgap",
+                _disallow_expr(master_raw.get("per_iteration_mipgap"), "master.per_iteration_mipgap"),
+                "master.per_iteration_mipgap",
             )
-            if master_raw.get("mipgap") is not None
+            if master_raw.get("per_iteration_mipgap") is not None
             else None
         ),
         cplex_options=_ensure_mapping(master_raw.get("cplex_options"), "master.cplex_options"),
@@ -767,12 +789,18 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
     )
 
     solver_raw = _as_mapping(data.get("solver"), "solver")
+    if "time_limit_s" in solver_raw:
+        raise ValueError(
+            "solver.time_limit_s renamed to solver.total_time_limit_s "
+            "(budget for the whole Benders loop; the per-iteration master ceiling is "
+            "master.per_iteration_time_limit_s)"
+        )
     _check_unknown_keys(
         solver_raw,
         {
             "max_iterations",
             "tolerance",
-            "time_limit_s",
+            "total_time_limit_s",
             "stall_max_no_improve_iters",
             "stall_min_abs_improve",
             "stall_min_rel_improve",
@@ -782,11 +810,14 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         },
         "solver",
     )
-    _require_keys(solver_raw, {"max_iterations", "tolerance", "time_limit_s", "master_solver", "subproblem_solver"}, "solver")
+    _require_keys(solver_raw, {"max_iterations", "tolerance", "total_time_limit_s", "master_solver", "subproblem_solver"}, "solver")
     solver_section = SolverSection(
         max_iterations=_ensure_int(_disallow_expr(solver_raw.get("max_iterations"), "solver.max_iterations"), "solver.max_iterations"),
         tolerance=_ensure_float(_disallow_expr(solver_raw.get("tolerance"), "solver.tolerance"), "solver.tolerance"),
-        time_limit_s=_ensure_int(_disallow_expr(solver_raw.get("time_limit_s"), "solver.time_limit_s"), "solver.time_limit_s"),
+        total_time_limit_s=_ensure_int(
+            _disallow_expr(solver_raw.get("total_time_limit_s"), "solver.total_time_limit_s"),
+            "solver.total_time_limit_s",
+        ),
         stall_max_no_improve_iters=_ensure_int(
             _disallow_expr(solver_raw.get("stall_max_no_improve_iters", 0), "solver.stall_max_no_improve_iters"),
             "solver.stall_max_no_improve_iters",

@@ -217,3 +217,84 @@ class ManifestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDemandOutsideHorizonIsReported(unittest.TestCase):
+    """Requests past the horizon were dropped with no warning and no count.
+
+    `_aggregate_requests` filtered with `if not (0 <= t < Tlen): continue`, so a
+    660-minute horizon fed an 830-minute instance counted 224 of 284 requests and
+    then printed "Pax served: 173/224". The denominator had already lost 21% of
+    demand, which understates unmet demand -- the metric weighted by p, and the
+    headline number of the whole study.
+
+    Relevant to D6: the horizon is to extend from 10h to 24h, at which point the
+    trap moves rather than disappearing.
+    """
+
+    def _evaluate_with_requests(self, requests, T_minutes=60, slot_resolution=30):
+        from mobauto2_benders.problem.subproblem_impl import ProblemSubproblem
+
+        T = T_minutes // slot_resolution
+        sp = ProblemSubproblem({
+            "T": T,
+            "T_minutes": T_minutes,
+            "slot_resolution": slot_resolution,
+            "trip_duration_minutes": slot_resolution,
+            "Q": 1,
+            "S": 15.0,
+            "Emax": 150.0,
+            "L": 30.0,
+            "delta_chg": 35.0,
+            "Wmax_minutes": slot_resolution,
+            "p": 50.0,
+            "lp_solver": "cplex_direct",
+            "scenarios": [{"requests": requests}],
+            "use_magnanti_wong": False,
+            "eps_cut": 1e-8,
+        })
+        candidate = {f"yOUT[0,{t}]": 0.0 for t in range(T)}
+        candidate.update({f"yRET[0,{t}]": 0.0 for t in range(T)})
+        with self.assertLogs("mobauto2_benders.problem.subproblem_impl", level="WARNING") as cm:
+            sp.evaluate(candidate)
+        return "\n".join(cm.output)
+
+    def test_requests_past_the_horizon_are_counted_and_warned(self):
+        requests = [
+            {"dir": "OUT", "time": 10},    # inside
+            {"dir": "OUT", "time": 700},   # past a 60-minute horizon
+            {"dir": "RET", "time": 900},   # past
+        ]
+        log = self._evaluate_with_requests(requests)
+        self.assertIn("[DEMAND]", log)
+        self.assertIn("after_horizon=2", log)
+        self.assertIn("900", log, "the warning should name the latest request time")
+
+
+class TestClockTruncationIsReported(unittest.TestCase):
+    """A time-limited master solve makes the whole run machine-dependent.
+
+    configs/baseline_d9.yaml has always listed this as a determinism requirement:
+    the per-iteration limit must be "high enough that the master always terminates
+    on mipgap, never on wall clock". Measured, the rule is right -- one config run
+    twice with a NON-binding limit reproduced to the last digit (LB
+    2422.5195186024557 both times), and the same config with a binding 15s limit
+    gave 2333.29, 2153.79 and 2175.87 across three runs.
+
+    The requirement was violated for the repo's whole history (CPXPARAM_Threads was
+    dropped, D24) and again by D22's remaining-budget clamp. A run that breaks it
+    must say so instead of looking reproducible.
+    """
+
+    def test_converged_reference_run_is_not_clock_truncated(self):
+        result, _ = _run_once()
+        truncated = getattr(result, "clock_truncated_master_solves", None)
+        self.assertIsNotNone(
+            truncated, "the run must report whether it was clock-truncated at all"
+        )
+        self.assertEqual(
+            truncated,
+            0,
+            "the soundness fixture must terminate on the gap, or every bound it "
+            "asserts is a sample rather than a measurement",
+        )
