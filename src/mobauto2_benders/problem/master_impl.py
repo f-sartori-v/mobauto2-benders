@@ -146,7 +146,12 @@ class ProblemMaster(MasterProblem):
             except Exception:
                 initial_actions = ["IDL"] * Q
             if len(initial_actions) < Q:
-                initial_actions = initial_actions + ["IDL"] * (Q - len(initial_actions))
+                # Same convention as binit above: the list is
+                # [z specific vehicles..., 1 value shared by the remaining Q-z].
+                # This padded with a literal "IDL" instead, so a fleet declared to
+                # start charging silently started idle from the second vehicle on.
+                fill = initial_actions[-1] if initial_actions else "IDL"
+                initial_actions = initial_actions + [fill] * (Q - len(initial_actions))
             elif len(initial_actions) > Q:
                 initial_actions = initial_actions[:Q]
         allowed_initial_actions = {"IDL", "CHR", "OUT", "RET"}
