@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import logging
 import re
 import unittest
 from pathlib import Path
@@ -25,14 +26,33 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "soundness.yaml"
 KNOWN_FEASIBLE_UB = 4190.74
 
 
+_CACHE: tuple | None = None
+
+
 def _run_once():
-    """Run the short Benders loop, returning (result, captured stdout)."""
+    """Run the short Benders loop once, returning (result, captured stdout).
+
+    Memoised: every assertion in this module examines the same solve, so running
+    it per TestCase class would multiply the only slow part of the suite.
+    """
+    global _CACHE
+    if _CACHE is not None:
+        return _CACHE
+
     from mobauto2_benders.app import run as app_run
 
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        result = app_run(FIXTURE, {"emit_cli_output": True})
-    return result, buf.getvalue()
+    # The solver logs progress at INFO to stderr. The assertions read stdout, so
+    # silencing it only removes noise from the test report.
+    prev = logging.getLogger("mobauto2_benders").level
+    logging.getLogger("mobauto2_benders").setLevel(logging.WARNING)
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = app_run(FIXTURE, {"emit_cli_output": True})
+        _CACHE = (result, buf.getvalue())
+    finally:
+        logging.getLogger("mobauto2_benders").setLevel(prev)
+    return _CACHE
 
 
 class SoundnessTests(unittest.TestCase):
@@ -142,6 +162,58 @@ class SoundnessTests(unittest.TestCase):
             self.skipTest("passenger totals unavailable")
         self.assertLessEqual(self.result.pax_served, self.result.pax_total)
 
+
+
+class ManifestTests(unittest.TestCase):
+    """Spec §0.4. The manifest must actually capture provenance.
+
+    Its two most important fields are which generator produced the cuts and
+    whether they support a lower bound -- the pair whose absence made the
+    invalid-bound problem impossible to scope retrospectively. A manifest that
+    records None for them looks complete and tells you nothing, so assert they
+    are populated rather than merely present.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.result, cls.output = _run_once()
+        except Exception as exc:  # pragma: no cover
+            raise unittest.SkipTest(f"solver unavailable: {exc}")
+
+    def test_result_carries_cut_provenance(self):
+        self.assertIsNotNone(self.result.cut_generation_mode)
+        self.assertIsNotNone(self.result.cut_valid_lower_bound)
+
+    def test_manifest_records_cut_provenance(self):
+        from pathlib import Path as _P
+        from mobauto2_benders.config import load_config
+        from mobauto2_benders.manifest import build_manifest
+
+        cfg = load_config(FIXTURE)
+        m = build_manifest(
+            cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1],
+            {
+                "cut_generation_mode": self.result.cut_generation_mode,
+                "cut_valid_lower_bound": self.result.cut_valid_lower_bound,
+            },
+        )
+        self.assertIsNotNone(m["cut_generation"]["mode_used"])
+        self.assertIsNotNone(m["cut_generation"]["valid_lower_bound"])
+
+    def test_manifest_records_swept_and_objective_parameters(self):
+        """D2/D3 sweep W_max and p; concurrency_penalty is active but absent
+        from the published formulation. All must be traceable from a result."""
+        from pathlib import Path as _P
+        from mobauto2_benders.config import load_config
+        from mobauto2_benders.manifest import build_manifest
+
+        cfg = load_config(FIXTURE)
+        m = build_manifest(cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1], {})
+        self.assertIsNotNone(m["swept_parameters"]["p"])
+        self.assertIsNotNone(m["swept_parameters"]["Wmax_minutes"])
+        self.assertIsNotNone(m["objective_terms"]["concurrency_penalty"])
+        self.assertIsNotNone(m["config"]["sha256"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -292,6 +292,12 @@ class BendersRunResult:
     sp_penalty_pax: Optional[float] = None
     sp_total_demand: Optional[float] = None
     sp_slot_resolution: Optional[int] = None
+    # Which generator actually produced the cuts, and whether they support a
+    # lower bound at all. Both were previously invisible: Magnanti-Wong failed
+    # silently to finite differences while still claiming a valid bound, and
+    # nothing in any output said so. The manifest records these.
+    cut_generation_mode: Optional[str] = None
+    cut_valid_lower_bound: Optional[bool] = None
 
 
 @dataclass(slots=True)
@@ -727,7 +733,11 @@ class BendersSolver:
 
         def _make_result(status: SolveStatus, iterations: int) -> BendersRunResult:
             extra = _extract_sp_diag(_report_diag())
+            _diag = _report_diag()
+            _mode = _diag.get("cut_generation_mode") if isinstance(_diag, dict) else None
             return BendersRunResult(
+                cut_generation_mode=_mode,
+                cut_valid_lower_bound=bool(lower_bound_semantics_valid),
                 status=status,
                 iterations=iterations,
                 best_lower_bound=best_lb,

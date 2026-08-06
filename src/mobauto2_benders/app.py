@@ -373,6 +373,30 @@ def _run_single(
     return result, master
 
 
+def _emit_manifest(cfg, config_path, result, master, emit_cli_output: bool) -> None:
+    """Write the run manifest (spec §0.4). Never fails a run.
+
+    A manifest that cannot be written must not take a completed solve with it,
+    but the failure has to be visible -- silently skipping provenance is how the
+    invalid-lower-bound problem became hard to scope after the fact.
+    """
+    from .manifest import build_manifest, write_manifest
+
+    try:
+        diag = {
+            "cut_generation_mode": getattr(result, "cut_generation_mode", None),
+            "cut_valid_lower_bound": getattr(result, "cut_valid_lower_bound", None),
+        }
+        repo_root = Path(__file__).resolve().parents[2]
+        out_dir = Path(cfg.run.report_dir) if cfg.run.report_dir else (repo_root / "manifests")
+        manifest = build_manifest(cfg, Path(config_path) if config_path else None, result, repo_root, diag)
+        path = write_manifest(manifest, out_dir, cfg.run.name)
+        if emit_cli_output:
+            print(f"\nManifest: {path}")
+    except Exception as exc:  # noqa: BLE001 - provenance must not break a solve
+        print(f"\n[WARN] could not write run manifest: {exc!r}")
+
+
 def run(config_path: str | Path | None = None, overrides: dict | None = None) -> BendersRunResult:
     """Run the Benders solver with a single canonical execution path.
 
@@ -447,6 +471,7 @@ def run(config_path: str | Path | None = None, overrides: dict | None = None) ->
         return last_result
 
     result, _master = _run_single(cfg, mp_base, sp_base, emit_cli_output)
+    _emit_manifest(cfg, config_path, result, _master, emit_cli_output)
     return result
 
 

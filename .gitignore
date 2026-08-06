@@ -89,3 +89,5 @@ configs/
 # Project-specific generated scenarios; keep only one example
 setups/*
 !setups/demo_cont_demand.yaml
+# Run manifests (provenance for individual runs; regenerated per run)
+manifests/
