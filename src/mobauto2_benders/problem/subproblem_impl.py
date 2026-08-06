@@ -89,141 +89,13 @@ class ProblemSubproblem(Subproblem):
         T = int(params.get("T", T_cand))
 
         # Helpers to read demand from files or inline and aggregate into R vectors
+        # Thin delegates: the real implementations are module level so the master
+        # can reuse them, D25 truncation counting included.
         def _load_doc(path: Path) -> Any:
-            if not path.exists():
-                raise FileNotFoundError(f"Demand file not found: {path}")
-            ext = path.suffix.lower()
-            if ext == ".json":
-                with path.open("r", encoding="utf-8") as f:
-                    return json.load(f)
-            if ext in {".yaml", ".yml"}:
-                if _yaml is None:
-                    raise RuntimeError("PyYAML is required to read YAML demand files. Install with 'pip install pyyaml'.")
-                with path.open("r", encoding="utf-8") as f:
-                    return _yaml.safe_load(f)
-            # Fallback: try JSON
-            with path.open("r", encoding="utf-8") as f:
-                return json.load(f)
+            return load_demand_doc(path)
 
         def _aggregate_requests(container: Any, Tlen: int) -> tuple[list[float], list[float]]:
-            R_out = [0.0 for _ in range(Tlen)]
-            R_ret = [0.0 for _ in range(Tlen)]
-            # Requests outside the horizon used to be dropped without a trace, so
-            # "Pax served: 173/224" counted a denominator that had already lost 60
-            # requests and understated unmet demand -- a headline metric weighted by p.
-            dropped = {"after_horizon": 0, "negative_time": 0, "array_tail": 0}
-            last_minute = [0.0]
-
-            def _slot_idx_from_minutes(tmin: float) -> int:
-                # Map continuous minutes to slot index via floor:
-                # [0,res)->0, [res,2res)->1, ...
-                res = max(1, slot_res)
-                return max(0, int(math.floor(float(tmin) / res)))
-
-            def _report_dropped() -> None:
-                total = sum(dropped.values())
-                if total <= 0:
-                    return
-                parts = [f"{k}={v}" for k, v in dropped.items() if v]
-                msg = (
-                    f"[DEMAND] {total} request(s) discarded outside the horizon "
-                    f"({', '.join(parts)}); horizon is {Tlen} slots of {max(1, slot_res)} min "
-                    f"= {Tlen * max(1, slot_res)} min, latest request at {last_minute[0]:.0f} min. "
-                    "Served/total counts below exclude them."
-                )
-                try:
-                    import logging as _logging
-                    _logging.getLogger(__name__).warning(msg)
-                except Exception:
-                    pass
-                try:
-                    self._vprint(msg)
-                except Exception:
-                    pass
-
-            if container is None:
-                return R_out, R_ret
-            # Direct arrays
-            if isinstance(container, dict) and ("R_out" in container or "R_ret" in container):
-                rout = list(container.get("R_out", [0.0] * Tlen))
-                rret = list(container.get("R_ret", [0.0] * Tlen))
-                for arr in (rout, rret):
-                    if len(arr) > Tlen:
-                        try:
-                            dropped["array_tail"] += int(sum(float(x) for x in arr[Tlen:]))
-                        except Exception:
-                            pass
-                if len(rout) != Tlen:
-                    rout = (rout + [0.0] * Tlen)[:Tlen]
-                if len(rret) != Tlen:
-                    rret = (rret + [0.0] * Tlen)[:Tlen]
-                _report_dropped()
-                return [float(x) for x in rout], [float(x) for x in rret]
-            # Pull list from mapping under 'requests' or 'req_matrix'
-            if isinstance(container, dict):
-                container = container.get("requests") or container.get("req_matrix") or []
-            # List of dicts [{dir,time}, ...]
-            if isinstance(container, list) and container and isinstance(container[0], dict):
-                for r in container:
-                    d = r.get("dir")
-                    try:
-                        tmin = float(r.get("time", -1))
-                    except Exception:
-                        continue
-                    if tmin < 0:
-                        dropped["negative_time"] += 1
-                        continue
-                    last_minute[0] = max(last_minute[0], float(tmin))
-                    # Floor-based slot mapping
-                    t = _slot_idx_from_minutes(tmin)
-                    if not (0 <= t < Tlen):
-                        dropped["after_horizon"] += 1
-                        continue
-                    if isinstance(d, str):
-                        dd = d.upper()
-                        if dd == "OUT":
-                            R_out[t] += 1.0
-                        elif dd == "RET":
-                            R_ret[t] += 1.0
-                    else:
-                        if int(d) == 0:
-                            R_out[t] += 1.0
-                        else:
-                            R_ret[t] += 1.0
-                _report_dropped()
-                return R_out, R_ret
-            # Matrix [[dir,time], ...]
-            if isinstance(container, list):
-                for row in container:
-                    if not isinstance(row, (list, tuple)) or len(row) < 2:
-                        continue
-                    d, tt = row[0], row[1]
-                    try:
-                        tmin = float(tt)
-                    except Exception:
-                        continue
-                    if tmin < 0:
-                        dropped["negative_time"] += 1
-                        continue
-                    last_minute[0] = max(last_minute[0], float(tmin))
-                    t = _slot_idx_from_minutes(tmin)
-                    if not (0 <= t < Tlen):
-                        dropped["after_horizon"] += 1
-                        continue
-                    if isinstance(d, str):
-                        dd = d.upper()
-                        if dd == "OUT":
-                            R_out[t] += 1.0
-                        elif dd == "RET":
-                            R_ret[t] += 1.0
-                    else:
-                        if int(d) == 0:
-                            R_out[t] += 1.0
-                        else:
-                            R_ret[t] += 1.0
-                _report_dropped()
-                return R_out, R_ret
-            return R_out, R_ret
+            return aggregate_requests(container, Tlen, slot_res, self._vprint)
 
         def _ok(lhs: float | None, rhs: float | None, eps: float) -> bool:
             if lhs is None or rhs is None:
@@ -1488,6 +1360,153 @@ class ProblemSubproblem(Subproblem):
                 "cut_valid_lower_bound": bool(cut_lb_valid),
             }
             return SubproblemResult(is_feasible=True, cut=cut, upper_bound=ub_val, diagnostics=diagnostics)
+
+
+# Demand aggregation lives at module level because the master needs the same
+# post-truncation R vectors to build its recourse lower bound. Duplicating the
+# truncation rule there would be how the two copies drift apart -- exactly what
+# happened to initial_battery and initial_actions (D23).
+def load_demand_doc(path: Path) -> Any:
+    if not path.exists():
+        raise FileNotFoundError(f"Demand file not found: {path}")
+    ext = path.suffix.lower()
+    if ext == ".json":
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    if ext in {".yaml", ".yml"}:
+        if _yaml is None:
+            raise RuntimeError("PyYAML is required to read YAML demand files. Install with 'pip install pyyaml'.")
+        with path.open("r", encoding="utf-8") as f:
+            return _yaml.safe_load(f)
+    # Fallback: try JSON
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+def aggregate_requests(
+    container: Any,
+    Tlen: int,
+    slot_res: int,
+    on_warning: Any = None,
+) -> tuple[list[float], list[float]]:
+    R_out = [0.0 for _ in range(Tlen)]
+    R_ret = [0.0 for _ in range(Tlen)]
+    # Requests outside the horizon used to be dropped without a trace, so
+    # "Pax served: 173/224" counted a denominator that had already lost 60
+    # requests and understated unmet demand -- a headline metric weighted by p.
+    dropped = {"after_horizon": 0, "negative_time": 0, "array_tail": 0}
+    last_minute = [0.0]
+
+    def _slot_idx_from_minutes(tmin: float) -> int:
+        # Map continuous minutes to slot index via floor:
+        # [0,res)->0, [res,2res)->1, ...
+        res = max(1, slot_res)
+        return max(0, int(math.floor(float(tmin) / res)))
+
+    def _report_dropped() -> None:
+        total = sum(dropped.values())
+        if total <= 0:
+            return
+        parts = [f"{k}={v}" for k, v in dropped.items() if v]
+        msg = (
+            f"[DEMAND] {total} request(s) discarded outside the horizon "
+            f"({', '.join(parts)}); horizon is {Tlen} slots of {max(1, slot_res)} min "
+            f"= {Tlen * max(1, slot_res)} min, latest request at {last_minute[0]:.0f} min. "
+            "Served/total counts below exclude them."
+        )
+        try:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(msg)
+        except Exception:
+            pass
+        try:
+            if on_warning is not None:
+                on_warning(msg)
+        except Exception:
+            pass
+
+    if container is None:
+        return R_out, R_ret
+    # Direct arrays
+    if isinstance(container, dict) and ("R_out" in container or "R_ret" in container):
+        rout = list(container.get("R_out", [0.0] * Tlen))
+        rret = list(container.get("R_ret", [0.0] * Tlen))
+        for arr in (rout, rret):
+            if len(arr) > Tlen:
+                try:
+                    dropped["array_tail"] += int(sum(float(x) for x in arr[Tlen:]))
+                except Exception:
+                    pass
+        if len(rout) != Tlen:
+            rout = (rout + [0.0] * Tlen)[:Tlen]
+        if len(rret) != Tlen:
+            rret = (rret + [0.0] * Tlen)[:Tlen]
+        _report_dropped()
+        return [float(x) for x in rout], [float(x) for x in rret]
+    # Pull list from mapping under 'requests' or 'req_matrix'
+    if isinstance(container, dict):
+        container = container.get("requests") or container.get("req_matrix") or []
+    # List of dicts [{dir,time}, ...]
+    if isinstance(container, list) and container and isinstance(container[0], dict):
+        for r in container:
+            d = r.get("dir")
+            try:
+                tmin = float(r.get("time", -1))
+            except Exception:
+                continue
+            if tmin < 0:
+                dropped["negative_time"] += 1
+                continue
+            last_minute[0] = max(last_minute[0], float(tmin))
+            # Floor-based slot mapping
+            t = _slot_idx_from_minutes(tmin)
+            if not (0 <= t < Tlen):
+                dropped["after_horizon"] += 1
+                continue
+            if isinstance(d, str):
+                dd = d.upper()
+                if dd == "OUT":
+                    R_out[t] += 1.0
+                elif dd == "RET":
+                    R_ret[t] += 1.0
+            else:
+                if int(d) == 0:
+                    R_out[t] += 1.0
+                else:
+                    R_ret[t] += 1.0
+        _report_dropped()
+        return R_out, R_ret
+    # Matrix [[dir,time], ...]
+    if isinstance(container, list):
+        for row in container:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                continue
+            d, tt = row[0], row[1]
+            try:
+                tmin = float(tt)
+            except Exception:
+                continue
+            if tmin < 0:
+                dropped["negative_time"] += 1
+                continue
+            last_minute[0] = max(last_minute[0], float(tmin))
+            t = _slot_idx_from_minutes(tmin)
+            if not (0 <= t < Tlen):
+                dropped["after_horizon"] += 1
+                continue
+            if isinstance(d, str):
+                dd = d.upper()
+                if dd == "OUT":
+                    R_out[t] += 1.0
+                elif dd == "RET":
+                    R_ret[t] += 1.0
+            else:
+                if int(d) == 0:
+                    R_out[t] += 1.0
+                else:
+                    R_ret[t] += 1.0
+        _report_dropped()
+        return R_out, R_ret
+    return R_out, R_ret
 
 
 def _cand_float(candidate: Candidate | None, name: str, default: float = 0.0) -> float:

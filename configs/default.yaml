@@ -77,7 +77,7 @@ master:
   # This is NOT the run budget -- that is solver.total_time_limit_s below.
   # The Benders loop runs a gap-tied schedule that picks a per-iteration limit;
   # this caps it. Test phase: 30. Simulation phase: 600.
-  per_iteration_time_limit_s: 120
+  per_iteration_time_limit_s: 15
   # Ceiling on the master MIP gap, per Benders iteration.
   # This is NOT the convergence criterion -- that is solver.tolerance below.
   # The schedule tightens the gap on its own (down to 0.001) as the Benders gap
