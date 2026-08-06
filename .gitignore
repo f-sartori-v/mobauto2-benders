@@ -81,7 +81,6 @@ data/
 outputs/
 logs/
 Report/
-tests/
 aux_py/
 setups/
 docs/

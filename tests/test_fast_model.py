@@ -1,0 +1,132 @@
+"""Master model structure. Builds Pyomo models but never calls a solver."""
+from __future__ import annotations
+
+import unittest
+
+import pyomo.environ as pyo
+
+from _helpers import build_master, constraint_names, master_params
+
+
+class TestSymmetryBreaking(unittest.TestCase):
+    """Guards the defect that made the master stop being a relaxation.
+
+    Ordering vehicles by cumulative departures at EVERY time prefix removes
+    feasible schedules that are not symmetric duplicates, so the master's bound
+    could exceed the true optimum. Ordering by TOTAL departures is valid: any
+    schedule can be relabelled by sorting vehicles on total trips.
+    """
+
+    def test_uses_total_ordering_not_prefix_ordering(self):
+        pm = build_master(master_params())
+        names = constraint_names(pm.m)
+        self.assertIn("C_sym_break_tot", names)
+        self.assertNotIn("C_sym_break_pref", names, "prefix ordering is invalid")
+        self.assertNotIn("C3_fifo", names, "duplicate FIFO block should be gone")
+
+    def test_symmetry_rows_scale_with_fleet_not_horizon(self):
+        """Total ordering needs Q-1 rows. Prefix ordering needed T*(Q-1), so a
+        row count that grows with T is the signature of the invalid form."""
+        params = master_params()
+        pm = build_master(params)
+        rows = len(pm.m.C_sym_break_tot)
+        self.assertEqual(rows, int(params["Q"]) - 1)
+
+    def test_heterogeneous_fleet_is_refused(self):
+        """Symmetry breaking is only valid for a homogeneous fleet in an
+        identical initial state. The audit noted this precondition was never
+        checked; it must now fail loudly rather than cut off the optimum."""
+        params = master_params()
+        params["binit"] = [150.0, 90.0]
+        with self.assertRaises(ValueError) as ctx:
+            build_master(params)
+        self.assertIn("homogeneous", str(ctx.exception).lower())
+
+    def test_heterogeneous_initial_actions_refused(self):
+        params = master_params()
+        params["initial_actions"] = ["IDL", "CHR"]
+        with self.assertRaises(ValueError):
+            build_master(params)
+
+
+class TestChargeBeforeIdleFlag(unittest.TestCase):
+    def test_on_by_default(self):
+        pm = build_master(master_params())
+        self.assertIn("C_no_recharge_after_idle", constraint_names(pm.m))
+
+    def test_can_be_disabled(self):
+        params = master_params()
+        params["charge_before_idle"] = False
+        pm = build_master(params)
+        self.assertNotIn("C_no_recharge_after_idle", constraint_names(pm.m))
+
+
+class TestReturnLegConstraintAbsent(unittest.TestCase):
+    """AUDIT_v3 M1 recommends b[q,t] >= L*yRET[q,t] for a tighter relaxation.
+
+    Measured, it is harmful: master phase 18.2s -> 49s over 10 iterations and a
+    worse bound at the same budget. It is sound but does not pay for itself.
+    This test is a tripwire so it is not re-added from the audit text without
+    re-measuring -- delete the test deliberately if the measurement changes.
+    """
+
+    def test_c5_ret_not_present(self):
+        pm = build_master(master_params())
+        self.assertNotIn("C5_ret", constraint_names(pm.m))
+
+
+class TestNoPerCellConstraintNames(unittest.TestCase):
+    """M4: constraints are declared indexed, not one component per (q,t).
+
+    Per-cell components are named like C4_bal_0_7. Their absence is what makes
+    the model inspectable and keeps component counts flat.
+    """
+
+    def test_build_phase_uses_indexed_constraints(self):
+        pm = build_master(master_params())
+        offenders = [
+            n for n in constraint_names(pm.m)
+            if any(n.startswith(p) for p in ("C4_bal_", "C4_chg1_", "C2a_locL_", "C2a_locM_", "C1b_intrip_eq_"))
+        ]
+        self.assertEqual(offenders, [], f"per-cell components remain: {offenders[:5]}")
+
+
+class TestCutAggregationGuard(unittest.TestCase):
+    """D10 / spec §2.7: collapsing (q,tau) -> tau is only valid when the cut
+    coefficients agree across q. On the production path they do, by construction.
+    A per-vehicle formulation must fail loudly rather than emit an invalid cut."""
+
+    def test_q_varying_coefficients_are_rejected(self):
+        from mobauto2_benders.benders.types import Cut, CutType
+
+        params = master_params()
+        params["aggregate_cuts_by_tau"] = True
+        pm = build_master(params)
+        # Give the model a solution to anchor against.
+        for q in pm.m.Q:
+            for t in pm.m.T:
+                if not pm.m.yOUT[q, t].fixed:
+                    pm.m.yOUT[q, t].set_value(0)
+                if not pm.m.yRET[q, t].fixed:
+                    pm.m.yRET[q, t].set_value(0)
+        for t in pm.m.T:
+            pm.m.Yout[t].set_value(0)
+            pm.m.Yret[t].set_value(0)
+
+        bad = Cut(
+            name="bad_cut",
+            cut_type=CutType.OPTIMALITY,
+            metadata={
+                "const": 0.0,
+                # same tau, different value per q -> aggregation would be invalid
+                "coeff_yOUT": {(0, 1): -10.0, (1, 1): -20.0},
+                "coeff_yRET": {},
+            },
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            pm.add_cut_force(bad)
+        self.assertIn("varies across q", str(ctx.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()
