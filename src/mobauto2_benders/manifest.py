@@ -18,6 +18,10 @@ The manifest therefore records, alongside the usual provenance:
   - cut_valid_lower_bound: whether those cuts support a lower bound at all
   - concurrency_penalty: active in the objective, absent from the published
     formulation, so any table quoting a result must state it
+  - clock_truncated_master_solves / bit_reproducible: whether the run's numbers
+    can be reproduced at all, or are one draw from a machine-load dependent
+    distribution. Same failure shape as the two defects above -- a run that
+    stopped on the clock looks exactly like one that converged.
 """
 from __future__ import annotations
 
@@ -95,6 +99,7 @@ def build_manifest(
     gap = None
     if lb is not None and ub is not None:
         gap = abs(ub - lb) / max(1.0, abs(ub))
+    _truncated = getattr(result, "clock_truncated_master_solves", None)
 
     return {
         "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -115,7 +120,20 @@ def build_manifest(
             "max_iterations": cfg.solver.max_iterations,
             "tolerance": cfg.solver.tolerance,
             "total_time_limit_s": cfg.solver.total_time_limit_s,
+            "per_iteration_time_limit_s": cfg.master.per_iteration_time_limit_s,
             "per_iteration_mipgap": cfg.master.per_iteration_mipgap,
+        },
+        # Whether this run's numbers can be reproduced at all. A master solve that
+        # stopped on the clock rather than on the gap explored a machine-load
+        # dependent number of nodes, and every later iteration inherits the
+        # difference: measured, a binding limit moved the LB 8% between two runs of
+        # one config, while a non-binding one reproduced to the last digit.
+        # Without this field the manifest cannot say whether an archived result was
+        # a measurement or one draw from a distribution.
+        "reproducibility": {
+            "clock_truncated_master_solves": _truncated,
+            "bit_reproducible": (None if _truncated is None else _truncated == 0),
+            "cplex_options": dict(cfg.master.cplex_options or {}),
         },
         # Swept per D2/D3: every table must state the pair it was produced with.
         "swept_parameters": {

@@ -215,6 +215,44 @@ class ManifestTests(unittest.TestCase):
         self.assertIsNotNone(m["objective_terms"]["concurrency_penalty"])
         self.assertIsNotNone(m["config"]["sha256"])
 
+    def test_manifest_records_whether_the_run_is_reproducible(self):
+        """A run that stopped on the clock looks exactly like one that converged.
+
+        Same failure shape as the two defects the manifest was built for: without
+        a recorded flag, deciding retrospectively which archived numbers were
+        measurements and which were single draws is guesswork. Measured, the
+        difference is not small -- a binding per-iteration limit moved the LB 8%
+        between two runs of one config.
+        """
+        from pathlib import Path as _P
+        from mobauto2_benders.config import load_config
+        from mobauto2_benders.manifest import build_manifest
+
+        cfg = load_config(FIXTURE)
+        m = build_manifest(cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1], {})
+        rep = m["reproducibility"]
+        self.assertIsNotNone(rep["clock_truncated_master_solves"])
+        self.assertEqual(rep["clock_truncated_master_solves"], 0)
+        self.assertTrue(rep["bit_reproducible"])
+        # The settings that decide it must travel with the verdict.
+        self.assertIsNotNone(m["solver"]["per_iteration_time_limit_s"])
+        self.assertIsNotNone(m["solver"]["total_time_limit_s"])
+
+    def test_manifest_marks_a_clock_truncated_run_as_not_reproducible(self):
+        """The flag must follow the run, not the config."""
+        from pathlib import Path as _P
+        from copy import copy
+        from mobauto2_benders.config import load_config
+        from mobauto2_benders.manifest import build_manifest
+
+        truncated = copy(self.result)
+        truncated.clock_truncated_master_solves = 3
+
+        cfg = load_config(FIXTURE)
+        m = build_manifest(cfg, _P(FIXTURE), truncated, _P(__file__).resolve().parents[1], {})
+        self.assertEqual(m["reproducibility"]["clock_truncated_master_solves"], 3)
+        self.assertFalse(m["reproducibility"]["bit_reproducible"])
+
 if __name__ == "__main__":
     unittest.main()
 
