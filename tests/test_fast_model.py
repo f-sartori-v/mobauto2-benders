@@ -5,7 +5,7 @@ import unittest
 
 import pyomo.environ as pyo
 
-from _helpers import build_master, constraint_names, master_params
+from _helpers import CONFIGS, build_master, constraint_names, master_params
 
 
 class TestSymmetryBreaking(unittest.TestCase):
@@ -128,9 +128,6 @@ class TestCutAggregationGuard(unittest.TestCase):
         self.assertIn("varies across q", str(ctx.exception))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestFleetListPaddingConvention(unittest.TestCase):
     """Per-vehicle lists are [z specific vehicles..., 1 value shared by the rest].
@@ -185,3 +182,113 @@ class TestFleetListPaddingConvention(unittest.TestCase):
         pm = build_master(self._params(binit=[10.0, 20.0], initial_actions=["IDL", "CHR"]))
         self.assertEqual(self._initial_battery(pm)[1:], [20.0] * 4)
         self.assertEqual(self._starts_charging(pm)[1:], [1] * 4)
+
+
+class TestRecourseLowerBound(unittest.TestCase):
+    """Valid inequality anchoring theta to installed capacity, per prefix.
+
+    Demand arriving in slot t can only be served by a departure in
+    [t+1, t+W_slots], so demand accumulated to j only reaches capacity installed
+    to j+W_slots. Without it the master answered "cost 0.22, no vehicles" for the
+    first five iterations, because nothing tied theta to capacity except the cuts,
+    which arrive one at a time.
+
+    Off by default. M1 was valid too and cost 2.7x master time for a worse bound,
+    so validity alone does not earn a place in the model.
+    """
+
+    def _params(self, on, res=30, q=2):
+        import yaml, tempfile, os
+        from mobauto2_benders.config import load_config
+        from mobauto2_benders.app import _prepare_params
+
+        raw = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))
+        raw["model"]["time"]["slot_resolution"] = res
+        raw["model"]["fleet"]["Q"] = q
+        raw["model"]["fleet"]["initial_battery"] = [150.0]
+        raw["model"]["fleet"]["initial_actions"] = ["IDL"]
+        raw["master"]["recourse_lower_bound"] = on
+        fd, tmp = tempfile.mkstemp(suffix=".yaml")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(raw, fh)
+            cfg = load_config(tmp)
+            mp, _ = _prepare_params(cfg, {})
+        finally:
+            os.unlink(tmp)
+        if mp.get("T") is None:
+            mp["T"] = max(1, int(mp["T_minutes"]) // int(mp["slot_resolution"]))
+        return mp
+
+    def test_on_in_the_shipped_default_config(self):
+        """D29 flipped this on. Read the shipped config rather than the schema
+        default, so a config that forgets the key is caught too."""
+        from mobauto2_benders.config import load_config
+        from mobauto2_benders.app import _prepare_params
+
+        cfg = load_config(str(CONFIGS / "default.yaml"))
+        mp, _ = _prepare_params(cfg, {})
+        if mp.get("T") is None:
+            mp["T"] = max(1, int(mp["T_minutes"]) // int(mp["slot_resolution"]))
+        pm = build_master(mp)
+        self.assertIn("C_recourse_lb_out", constraint_names(pm.m))
+
+    def test_can_be_disabled(self):
+        pm = build_master(self._params(False))
+        self.assertNotIn("C_recourse_lb_out", constraint_names(pm.m))
+        self.assertNotIn("C_recourse_lb_ret", constraint_names(pm.m))
+
+    def test_frozen_baselines_pin_it_off(self):
+        """The D9 baselines diff against archived logs, so their model must not
+        move when a default changes. Pinned explicitly, not inherited."""
+        from mobauto2_benders.config import load_config
+
+        for name in ("baseline_d9.yaml", "baseline_d9_multi.yaml"):
+            with self.subTest(config=name):
+                cfg = load_config(str(CONFIGS / name))
+                self.assertFalse(cfg.master.recourse_lower_bound)
+
+    def test_one_row_per_slot_per_direction(self):
+        params = self._params(True)
+        pm = build_master(params)
+        self.assertEqual(len(pm.m.C_recourse_lb_out), int(params["T"]))
+        self.assertEqual(len(pm.m.C_recourse_lb_ret), int(params["T"]))
+
+    def test_uses_post_truncation_demand(self):
+        """A total larger than the subproblem's would demand more unserved
+        passengers than can occur, and the inequality would cut off the optimum
+        rather than bound it. This is why aggregation is shared, not reimplemented."""
+        params = self._params(True)
+        rlb = params["recourse_bound_data"]
+        self.assertEqual(sum(rlb["R_out"]) + sum(rlb["R_ret"]), 300.0)
+        self.assertEqual(len(rlb["R_out"]), int(params["T"]))
+
+    def test_window_scales_with_resolution(self):
+        """W_slots = ceil(W_max_min / delta): 2 at 30-min slots, 4 at 15-min."""
+        self.assertEqual(self._params(True, res=30)["recourse_bound_data"]["W_slots"], 2)
+        self.assertEqual(self._params(True, res=15)["recourse_bound_data"]["W_slots"], 4)
+
+    def test_empty_master_is_no_longer_costless(self):
+        """The defect it targets: with no cuts, the master used to answer 0."""
+        pm = build_master(self._params(True))
+        con = pm.m.C_recourse_lb_out[int(pm.m.T.last() if hasattr(pm.m.T, "last") else 0)]
+        self.assertIsNotNone(con)
+
+    def test_late_capacity_cannot_pay_for_early_demand(self):
+        """The whole point of the prefix form: a departure at slot 40 must not
+        appear on the right-hand side of an early-j row. The aggregate version of
+        this inequality let it, which is why it was rejected in favour of this."""
+        params = self._params(True)
+        pm = build_master(params)
+        T = int(params["T"])
+        W = int(params["recourse_bound_data"]["W_slots"])
+        j = 1
+        body = str(pm.m.C_recourse_lb_out[j].body) + str(pm.m.C_recourse_lb_out[j].upper) \
+            + str(pm.m.C_recourse_lb_out[j].lower)
+        for late in range(j + W + 1, T):
+            self.assertNotIn(f"yOUT[0,{late}]", body,
+                             f"slot {late} must not appear in the row for j={j}")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from .config import DEFAULT_CONFIG_PATH, load_config, resolve_energy_params
@@ -46,6 +47,54 @@ def _apply_run_overrides(cfg, overrides: dict | None) -> None:
 def _set_if_not_none(target: dict, key: str, value) -> None:
     if value is not None:
         target[key] = value
+
+
+def _recourse_bound_data(cfg, slot_resolution: int) -> dict | None:
+    """Data the master needs for the recourse lower bound on theta.
+
+    Model building must stay pure (spec non-negotiable 2), so the demand vectors
+    are aggregated here and passed in rather than read inside build_master. They
+    must be the SAME post-truncation vectors the subproblem uses: a total larger
+    than the subproblem's would demand more unserved passengers than can actually
+    occur, and the inequality would cut off the optimum instead of bounding it.
+    That is why aggregation is shared rather than reimplemented.
+
+    Returns None when the bound cannot be stated: multi-scenario runs need the
+    expectation over scenarios, which this form does not express.
+    """
+    if cfg.data.scenario_files or cfg.data.scenarios:
+        return None
+    T_minutes = cfg.model.time.T_minutes
+    T = cfg.model.time.T
+    if T is None:
+        if T_minutes is None:
+            return None
+        T = max(1, int(T_minutes) // max(1, int(slot_resolution)))
+    T = int(T)
+
+    from .problem.subproblem_impl import aggregate_requests, load_demand_doc
+
+    container: object | None = None
+    if cfg.data.R_out is not None or cfg.data.R_ret is not None:
+        container = {"R_out": cfg.data.R_out or [], "R_ret": cfg.data.R_ret or []}
+    elif cfg.data.demand_file:
+        container = load_demand_doc(Path(str(cfg.data.demand_file)))
+    if container is None:
+        return None
+
+    R_out, R_ret = aggregate_requests(container, T, int(slot_resolution))
+    Wmax_slots = cfg.subproblem.Wmax_slots
+    if Wmax_slots is None:
+        if cfg.subproblem.Wmax_minutes is None:
+            return None
+        Wmax_slots = math.ceil(float(cfg.subproblem.Wmax_minutes) / max(1, int(slot_resolution)))
+    return {
+        "R_out": [float(x) for x in R_out],
+        "R_ret": [float(x) for x in R_ret],
+        "p": float(cfg.subproblem.p),
+        "S": float(cfg.subproblem.S),
+        "W_slots": int(Wmax_slots),
+    }
 
 
 def _energy_params_for_resolution(cfg, slot_resolution: int) -> dict[str, float | int]:
@@ -105,6 +154,11 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     mp["theta_per_scenario"] = bool(cfg.master.theta_per_scenario)
     mp["write_lp_after_cut"] = bool(cfg.master.write_lp_after_cut)
     mp["charge_before_idle"] = bool(cfg.master.charge_before_idle)
+    mp["recourse_lower_bound"] = bool(cfg.master.recourse_lower_bound)
+    if cfg.master.recourse_lower_bound:
+        _rlb = _recourse_bound_data(cfg, int(time.slot_resolution))
+        if _rlb is not None:
+            mp["recourse_bound_data"] = _rlb
 
     mp["solver"] = cfg.solver.master_solver
     mp["solver_tee"] = bool(cfg.solver.solver_tee)
@@ -442,6 +496,14 @@ def run(config_path: str | Path | None = None, overrides: dict | None = None) ->
             mp["slot_resolution"] = int(res)
             sp["slot_resolution"] = int(res)
             mp.update(_energy_params_for_resolution(cfg, int(res)))
+            # The demand vectors and W_slots are resolution-dependent, so they must be
+            # rebuilt here rather than inherited from mp_base's base resolution.
+            if mp.get("recourse_lower_bound"):
+                _rlb = _recourse_bound_data(cfg, int(res))
+                if _rlb is not None:
+                    mp["recourse_bound_data"] = _rlb
+                else:
+                    mp.pop("recourse_bound_data", None)
             if cfg.model.energy.delta_chg is not None and not isinstance(cfg.model.energy.delta_chg, str):
                 try:
                     if "delta_chg" in mp:

@@ -502,6 +502,75 @@ class ProblemMaster(MasterProblem):
             m.gchg[q, T - 1].fix(0)
             # Allow charging label at the last slot if desired (battery won't change as gchg[T-1]=0)
 
+        # Recourse lower bound on theta, per prefix of the horizon.
+        #
+        # Demand arriving in slot t can only be served by a departure in
+        # [t+1, t+W_slots] (spec 2.5), so demand accumulated up to j can only reach
+        # capacity installed up to j+W_slots:
+        #
+        #   served_d([0,j]) <= S * sum_{tau <= j+W} sum_q y_d[q,tau]
+        #
+        # Unserved from a subset is a lower bound on total unserved, and waiting cost
+        # is non-negative, so for every j:
+        #
+        #   theta >= p*(Rout_cum[j] - S*Yout_cum[j+W]) + p*(Rret_cum[j] - S*Yret_cum[j+W])
+        #
+        # Slack automatically when the right-hand side is negative, since theta >= 0.
+        #
+        # Why per prefix rather than one aggregate row: the aggregate version is the
+        # j = T-1 member of this family, and it lets a shuttle departing late "pay"
+        # for morning demand. The prefix form is what encodes that it cannot.
+        #
+        # Valid, but validity is not usefulness -- M1 was valid too and cost 2.7x
+        # master time for a worse bound. Off by default; earn it by measurement.
+        rlb = self._p("recourse_bound_data") if bool(self._p("recourse_lower_bound", False)) else None
+        if rlb:
+            R_out_v = [float(x) for x in rlb.get("R_out", [])]
+            R_ret_v = [float(x) for x in rlb.get("R_ret", [])]
+            p_pen = float(rlb.get("p", 0.0))
+            S_cap = float(rlb.get("S", 0.0))
+            W_sl = int(rlb.get("W_slots", 0))
+            if p_pen > 0.0 and S_cap > 0.0 and len(R_out_v) >= T and len(R_ret_v) >= T:
+                cum_out = [0.0] * T
+                cum_ret = [0.0] * T
+                acc_o = acc_r = 0.0
+                for t in range(T):
+                    acc_o += R_out_v[t]
+                    acc_r += R_ret_v[t]
+                    cum_out[t] = acc_o
+                    cum_ret[t] = acc_r
+
+                def _cap_upto(mm, var, tau_max):
+                    return sum(var[q, tau] for q in mm.Q for tau in range(tau_max + 1))
+
+                if hasattr(m, "theta_out") and hasattr(m, "theta_ret"):
+                    # Direction-split theta is the default. Bounding each direction
+                    # separately is strictly tighter than bounding their sum.
+                    def _c_rlb_out_rule(mm, j):
+                        tmax = min(T - 1, int(j) + W_sl)
+                        return mm.theta_out >= p_pen * (
+                            cum_out[int(j)] - S_cap * _cap_upto(mm, mm.yOUT, tmax)
+                        )
+
+                    def _c_rlb_ret_rule(mm, j):
+                        tmax = min(T - 1, int(j) + W_sl)
+                        return mm.theta_ret >= p_pen * (
+                            cum_ret[int(j)] - S_cap * _cap_upto(mm, mm.yRET, tmax)
+                        )
+
+                    m.C_recourse_lb_out = pyo.Constraint(m.T, rule=_c_rlb_out_rule)
+                    m.C_recourse_lb_ret = pyo.Constraint(m.T, rule=_c_rlb_ret_rule)
+                elif hasattr(m, "theta"):
+                    def _c_recourse_lb_rule(mm, j):
+                        tmax = min(T - 1, int(j) + W_sl)
+                        return mm.theta >= p_pen * (
+                            cum_out[int(j)] - S_cap * _cap_upto(mm, mm.yOUT, tmax)
+                        ) + p_pen * (
+                            cum_ret[int(j)] - S_cap * _cap_upto(mm, mm.yRET, tmax)
+                        )
+
+                    m.C_recourse_lb = pyo.Constraint(m.T, rule=_c_recourse_lb_rule)
+
         # Container block to store explicit Benders cuts incrementally
         m.BendersCuts = pyo.Block(concrete=True)
 

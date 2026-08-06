@@ -106,6 +106,11 @@ class MasterSection:
     write_lp_after_cut: bool = False
     # Canonical ordering: charge before idling at the depot (M2). On by default.
     charge_before_idle: bool = True
+    # Valid inequality anchoring theta to installed capacity per prefix of the
+    # horizon. ON by default since D29: measured at equal iterations it improves
+    # the lower bound 26-90% AND cuts master time 38-68% on the reproducible
+    # cells. Unlike M1, it is not a trade-off.
+    recourse_lower_bound: bool = True
 
 
 @dataclass(slots=True)
@@ -667,6 +672,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "theta_per_scenario",
             "write_lp_after_cut",
             "charge_before_idle",
+            "recourse_lower_bound",
         },
         "master",
     )
@@ -702,6 +708,9 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         theta_per_scenario=_ensure_bool(master_raw.get("theta_per_scenario", False), "master.theta_per_scenario"),
         write_lp_after_cut=_ensure_bool(master_raw.get("write_lp_after_cut", False), "master.write_lp_after_cut"),
         charge_before_idle=_ensure_bool(master_raw.get("charge_before_idle", True), "master.charge_before_idle"),
+        recourse_lower_bound=_ensure_bool(
+            master_raw.get("recourse_lower_bound", True), "master.recourse_lower_bound"
+        ),
     )
 
     sub_raw = _as_mapping(data.get("subproblem"), "subproblem")

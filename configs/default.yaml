@@ -97,6 +97,12 @@ master:
   cut_coeff_threshold: 0.001
   # Debug: write LP after each new cut
   write_lp_after_cut: false
+  # Anchor theta to installed capacity, per prefix of the horizon (D29).
+  # Demand up to slot j can only be served by departures up to j+W_slots, so
+  # theta >= p*(R_cum[j] - S*Y_cum[j+W]) per direction. Without it the master
+  # answers "cost 0.22, no vehicles" for the first five iterations; with it its
+  # bound starts at ~1569 instead of 0.
+  recourse_lower_bound: true
 
 subproblem:
   # Multi-cuts vs averaged cut across scenarios
