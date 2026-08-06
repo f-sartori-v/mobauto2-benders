@@ -84,6 +84,8 @@ Report/
 tests/
 aux_py/
 setups/
+docs/
+configs/
 
 # Project-specific generated scenarios; keep only one example
 setups/*

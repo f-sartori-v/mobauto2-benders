@@ -65,7 +65,11 @@ class ProblemSubproblem(Subproblem):
         # Resolution in minutes per slot (copied from master params via config or set here)
         slot_res = int(params.get("slot_resolution", params.get("resolution", 1)))
         time_step_min = int(params.get("time_step_minutes", 1) or 1)
-        temporal_refinement = bool(params.get("enable_temporal_refinement", True))
+        # D9: the elastic/minute-level relaxation is deprecated from the default path.
+        # Beyond selecting the subproblem model, this flag also gates mw_enabled,
+        # use_dual_slopes and cut_lb_valid below -- with it True, cuts carry no valid
+        # lower bound and the solver discards best_lb entirely.
+        temporal_refinement = bool(params.get("enable_temporal_refinement", False))
         refined_cut_mode = str(
             params.get(
                 "refined_cut_generation_mode",
