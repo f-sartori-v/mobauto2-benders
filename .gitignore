@@ -91,3 +91,6 @@ setups/*
 !setups/demo_cont_demand.yaml
 # Run manifests (provenance for individual runs; regenerated per run)
 manifests/
+
+# CPLEX scratch log written into the working dir
+cplex.log
