@@ -32,6 +32,9 @@ class RunSection:
     log_file: str | None = None
     report_dir: str | None = None
     seed: int | None = None
+    # Write a symbolic LP and a solver log for every master solve. Debugging aid,
+    # off by default: it produces two files per iteration (M5).
+    emit_reports: bool = False
 
 
 @dataclass(slots=True)
@@ -95,6 +98,8 @@ class MasterSection:
     cut_coeff_threshold: float = 0.0
     theta_per_scenario: bool = False
     write_lp_after_cut: bool = False
+    # Canonical ordering: charge before idling at the depot (M2). On by default.
+    charge_before_idle: bool = True
 
 
 @dataclass(slots=True)
@@ -109,7 +114,6 @@ class SubproblemSection:
     Wmax_slots: int | None = None
     p: float = 0.0
     fill_first_epsilon: float = 0.0
-    unused_capacity_penalty: float = 0.0
     degenerate_cut_probe_top_k: int = 6
     degenerate_cut_probe_top_k_out: int | None = None
     degenerate_cut_probe_top_k_ret: int | None = None
@@ -426,7 +430,6 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
             "Wmax_slots": sub_params.get("Wmax_slots"),
             "p": sub_params.get("p"),
             "fill_first_epsilon": sub_params.get("fill_first_epsilon", 0.0),
-            "unused_capacity_penalty": sub_params.get("unused_capacity_penalty", 0.0),
             "degenerate_cut_probe_top_k": sub_params.get("degenerate_cut_probe_top_k", 6),
             "degenerate_cut_probe_top_k_out": sub_params.get("degenerate_cut_probe_top_k_out"),
             "degenerate_cut_probe_top_k_ret": sub_params.get("degenerate_cut_probe_top_k_ret"),
@@ -481,7 +484,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         raise ValueError("Unsupported schema version; expected mobauto2_benders_config v2")
 
     run_raw = _as_mapping(data.get("run"), "run")
-    _check_unknown_keys(run_raw, {"name", "log_level", "log_file", "report_dir", "seed"}, "run")
+    _check_unknown_keys(run_raw, {"name", "log_level", "log_file", "report_dir", "seed", "emit_reports"}, "run")
     run_name = run_raw.get("name")
     run = RunSection(
         name=(_ensure_str(run_name, "run.name") if run_name is not None else None),
@@ -489,6 +492,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         log_file=run_raw.get("log_file"),
         report_dir=run_raw.get("report_dir"),
         seed=(_ensure_int(run_raw.get("seed"), "run.seed") if "seed" in run_raw and run_raw.get("seed") is not None else None),
+        emit_reports=_ensure_bool(run_raw.get("emit_reports", False), "run.emit_reports"),
     )
 
     data_raw = _as_mapping(data.get("data"), "data")
@@ -642,6 +646,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "cut_coeff_threshold",
             "theta_per_scenario",
             "write_lp_after_cut",
+            "charge_before_idle",
         },
         "master",
     )
@@ -674,6 +679,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         ),
         theta_per_scenario=_ensure_bool(master_raw.get("theta_per_scenario", False), "master.theta_per_scenario"),
         write_lp_after_cut=_ensure_bool(master_raw.get("write_lp_after_cut", False), "master.write_lp_after_cut"),
+        charge_before_idle=_ensure_bool(master_raw.get("charge_before_idle", True), "master.charge_before_idle"),
     )
 
     sub_raw = _as_mapping(data.get("subproblem"), "subproblem")
@@ -690,7 +696,6 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "Wmax_slots",
             "p",
             "fill_first_epsilon",
-            "unused_capacity_penalty",
             "degenerate_cut_probe_top_k",
             "degenerate_cut_probe_top_k_out",
             "degenerate_cut_probe_top_k_ret",
@@ -734,10 +739,6 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         fill_first_epsilon=_ensure_float(
             _disallow_expr(sub_raw.get("fill_first_epsilon", 0.0), "subproblem.fill_first_epsilon"),
             "subproblem.fill_first_epsilon",
-        ),
-        unused_capacity_penalty=_ensure_float(
-            _disallow_expr(sub_raw.get("unused_capacity_penalty", 0.0), "subproblem.unused_capacity_penalty"),
-            "subproblem.unused_capacity_penalty",
         ),
         degenerate_cut_probe_top_k=_ensure_int(
             _disallow_expr(sub_raw.get("degenerate_cut_probe_top_k", 6), "subproblem.degenerate_cut_probe_top_k"),

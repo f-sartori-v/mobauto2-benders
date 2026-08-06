@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Optional, Iterable, Mapping, Any
 
 from ..config import RootConfig
-from .core import CorePoint
 from .master import MasterProblem
 from .subproblem import Subproblem
 from .types import SolveStatus, SubproblemResult
@@ -293,6 +292,12 @@ class BendersRunResult:
     sp_penalty_pax: Optional[float] = None
     sp_total_demand: Optional[float] = None
     sp_slot_resolution: Optional[int] = None
+    # Which generator actually produced the cuts, and whether they support a
+    # lower bound at all. Both were previously invisible: Magnanti-Wong failed
+    # silently to finite differences while still claiming a valid bound, and
+    # nothing in any output said so. The manifest records these.
+    cut_generation_mode: Optional[str] = None
+    cut_valid_lower_bound: Optional[bool] = None
 
 
 @dataclass(slots=True)
@@ -459,6 +464,29 @@ class BendersSolver:
                 return None, None
 
         # Helper: print diagnostics from the most recent subproblem evaluation
+        def _report_y(dir_: str, q: int, tau: int) -> float:
+            """Departure indicator for the solution the end-of-run report describes.
+
+            Prefers the incumbent snapshot (best_candidate) so the passenger tables
+            agree with the timeline and the reported objective. Falls back to the
+            live model only when no incumbent was recorded, e.g. a run that ended
+            before the first improving solution.
+            """
+            key = f"yOUT[{int(q)},{int(tau)}]" if dir_.upper() == "OUT" else f"yRET[{int(q)},{int(tau)}]"
+            if isinstance(best_candidate, dict) and key in best_candidate:
+                try:
+                    return float(best_candidate[key])
+                except Exception:
+                    pass
+            mm = getattr(self.master, "m", None)
+            if mm is None:
+                return 0.0
+            try:
+                var = mm.yOUT if dir_.upper() == "OUT" else mm.yRET
+                return float(var[q, tau].value or 0.0)
+            except Exception:
+                return 0.0
+
         def _print_sp_diagnostics(diag: dict | None) -> None:
             if not diag:
                 return
@@ -486,11 +514,12 @@ class BendersSolver:
                 Q = list(m.Q)
                 per_q_tau = [[0.0 for _ in range(T)] for _ in Q]
                 for tau in range(T):
-                    # Determine which shuttles start at tau in the given direction
-                    if dir_.upper() == "OUT":
-                        qs = [q for q in Q if float(m.yOUT[q, tau].value or 0.0) >= 0.5]
-                    else:
-                        qs = [q for q in Q if float(m.yRET[q, tau].value or 0.0) >= 0.5]
+                    # Determine which shuttles start at tau in the given direction.
+                    # Read the SAME solution the rest of the report describes (the
+                    # incumbent snapshot), not the live model, which holds the last
+                    # master solve. Mixing the two silently drops every passenger
+                    # assigned to a slot where the last solve had no departure.
+                    qs = [q for q in Q if _report_y(dir_, q, tau) >= 0.5]
                     kmax = min(len(qs), len(pax_by_tau_k[tau]) if tau < len(pax_by_tau_k) else 0)
                     for k in range(kmax):
                         q = qs[k]
@@ -591,22 +620,49 @@ class BendersSolver:
                     try:
                         if m is not None:
                             Q = list(m.Q)
-                            served_qt = [[0.0 for _ in range(T)] for _ in Q]
-                            for tau in range(T):
-                                out_qs = [q for q in Q if float(m.yOUT[q, tau].value or 0.0) >= 0.5]
-                                ret_qs = [q for q in Q if float(m.yRET[q, tau].value or 0.0) >= 0.5]
-                                k_out = len(out_qs)
-                                k_ret = len(ret_qs)
-                                share_out = (float(pax_out[tau]) / k_out) if k_out > 0 else 0.0
-                                share_ret = (float(pax_ret[tau]) / k_ret) if k_ret > 0 else 0.0
-                                for q in out_qs:
-                                    served_qt[q][tau] += share_out
-                                for q in ret_qs:
-                                    served_qt[q][tau] += share_ret
-                            print("\nPax per shuttle and slot (total):")
-                            print(header)
-                            for q in Q:
-                                print(f"  q={q}: {_fmt_row(served_qt[q], T)}")
+                            # Use the subproblem's true per-layer counts and the
+                            # incumbent's departures, exactly as the multi-scenario
+                            # path does. The previous version split pax_out[tau]
+                            # EQUALLY across the vehicles departing at tau -- a
+                            # fiction that made shuttles look identical -- and read
+                            # those departures from the live model, so passengers
+                            # assigned to slots the last master solve left empty
+                            # were dropped from the table while still counted in
+                            # the "Pax served" total below.
+                            pax_out_k = diag.get("pax_out_by_tau_k")
+                            pax_ret_k = diag.get("pax_ret_by_tau_k")
+                            served_qt: list[list[float]] | None = None
+                            if isinstance(pax_out_k, list) and isinstance(pax_ret_k, list):
+                                per_q_out = _map_layers_to_shuttles(T, pax_out_k, "OUT")
+                                per_q_ret = _map_layers_to_shuttles(T, pax_ret_k, "RET")
+                                served_qt = [
+                                    [
+                                        float(per_q_out[q][t] if q < len(per_q_out) and t < len(per_q_out[q]) else 0.0)
+                                        + float(per_q_ret[q][t] if q < len(per_q_ret) and t < len(per_q_ret[q]) else 0.0)
+                                        for t in range(T)
+                                    ]
+                                    for q in Q
+                                ]
+                            if served_qt is not None:
+                                print("\nPax per shuttle and slot (total):")
+                                print(header)
+                                for q in Q:
+                                    print(f"  q={q}: {_fmt_row(served_qt[q], T)}")
+                                # Cross-check: the table must account for every served
+                                # passenger. A mismatch means the table and the total
+                                # describe different solutions -- say so rather than
+                                # printing a total that appears to validate the table.
+                                try:
+                                    table_sum = float(sum(sum(row) for row in served_qt))
+                                    served_chk = float(sum(pax_out) + sum(pax_ret))
+                                    if abs(table_sum - served_chk) > 1e-6 * max(1.0, abs(served_chk)):
+                                        print(
+                                            f"  [WARN] per-shuttle table sums to {table_sum:.0f} but "
+                                            f"{served_chk:.0f} passengers were served; the table and the "
+                                            "totals describe different solutions."
+                                        )
+                                except Exception:
+                                    pass
                             try:
                                 served = float(sum(pax_out) + sum(pax_ret))
                                 total = float(sum(R_out) + sum(R_ret))
@@ -677,7 +733,11 @@ class BendersSolver:
 
         def _make_result(status: SolveStatus, iterations: int) -> BendersRunResult:
             extra = _extract_sp_diag(_report_diag())
+            _diag = _report_diag()
+            _mode = _diag.get("cut_generation_mode") if isinstance(_diag, dict) else None
             return BendersRunResult(
+                cut_generation_mode=_mode,
+                cut_valid_lower_bound=bool(lower_bound_semantics_valid),
                 status=status,
                 iterations=iterations,
                 best_lower_bound=best_lb,

@@ -238,19 +238,13 @@ class ProblemMaster(MasterProblem):
 
         # inTrip equality: 1 during travel slots strictly after a start until arrival
         # For a start at time u, travel occupies slots t in {u+1, ..., u+trip_slots-1}
-        for q in m.Q:
-            for t in m.T:
-                lo = max(0, t - trip_slots + 1)
-                hi = t - 1
-                if lo <= hi:
-                    m.add_component(
-                        f"C1b_intrip_eq_{q}_{t}",
-                        pyo.Constraint(expr=m.inTrip[q, t] == sum(m.yOUT[q, u] + m.yRET[q, u] for u in range(lo, hi + 1))),
-                    )
-                else:
-                    m.add_component(
-                        f"C1b_intrip_zero_{q}_{t}", pyo.Constraint(expr=m.inTrip[q, t] == 0)
-                    )
+        def _c1b_intrip_rule(m, q, t):
+            lo = max(0, t - trip_slots + 1)
+            hi = t - 1
+            if lo <= hi:
+                return m.inTrip[q, t] == sum(m.yOUT[q, u] + m.yRET[q, u] for u in range(lo, hi + 1))
+            return m.inTrip[q, t] == 0
+        m.C1b_intrip = pyo.Constraint(m.Q, m.T, rule=_c1b_intrip_rule)
 
         # Block actions when in trip (keeps starts and charging off while busy)
         m.C1c = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yOUT[q, t] + m.yRET[q, t] + m.c[q, t] <= 1 - m.inTrip[q, t])
@@ -274,20 +268,21 @@ class ProblemMaster(MasterProblem):
                 m.yOUT[q, t].fix(0)
 
         # Occupancy recursions: leave Longvilliers when starting OUT; arrive to Longvilliers after RET duration
-        for q in m.Q:
-            for t in range(1, T):
-                # Arrivals from RET into Longvilliers at t from starts at (t - trip_slots)
-                arr_ret = m.yRET[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
-                m.add_component(
-                    f"C2a_locL_{q}_{t}",
-                    pyo.Constraint(expr=m.atL[q, t] == m.atL[q, t - 1] - m.yOUT[q, t - 1] + arr_ret),
-                )
-                # Arrivals from OUT into Massy at t from starts at (t - trip_slots)
-                arr_out = m.yOUT[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
-                m.add_component(
-                    f"C2a_locM_{q}_{t}",
-                    pyo.Constraint(expr=m.atM[q, t] == m.atM[q, t - 1] - m.yRET[q, t - 1] + arr_out),
-                )
+        def _c2a_locL_rule(m, q, t):
+            if t < 1:
+                return pyo.Constraint.Skip
+            # Arrivals from RET into Longvilliers at t from starts at (t - trip_slots)
+            arr_ret = m.yRET[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
+            return m.atL[q, t] == m.atL[q, t - 1] - m.yOUT[q, t - 1] + arr_ret
+        m.C2a_locL = pyo.Constraint(m.Q, m.T, rule=_c2a_locL_rule)
+
+        def _c2a_locM_rule(m, q, t):
+            if t < 1:
+                return pyo.Constraint.Skip
+            # Arrivals from OUT into Massy at t from starts at (t - trip_slots)
+            arr_out = m.yOUT[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
+            return m.atM[q, t] == m.atM[q, t - 1] - m.yRET[q, t - 1] + arr_out
+        m.C2a_locM = pyo.Constraint(m.Q, m.T, rule=_c2a_locM_rule)
 
         # Gating by occupancy
         m.C2b = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yOUT[q, t] <= m.atL[q, t])
@@ -297,19 +292,29 @@ class ProblemMaster(MasterProblem):
         # Note: We no longer enforce "first non-idle must be OUT".
         # Charging at Longvilliers (s=0) is allowed even before the first OUT.
 
-        # Never recharge right after an idle slot at Longvilliers.
-        # Interpretation: if the previous slot at Longvilliers had neither a departure nor charging
-        # (i.e., it was an idle/wait slot), then charging in the current slot is not allowed.
+        # Charge-before-idle canonicalisation (M2), on by default.
+        #
+        # Never recharge right after an idle slot at Longvilliers: if the previous
+        # slot at Longvilliers had neither a departure nor charging (i.e. it was an
+        # idle/wait slot), charging in the current slot is not allowed.
         # Linear form: c[q,t] <= yOUT[q,t-1] + c[q,t-1] + (1 - atL[q,t-1])
         # - If prev was idle at L: yOUT=0, c=0, atL=1 -> RHS=0, so c[q,t]=0
         # - If prev not at L (travel/Massy): atL=0 -> RHS>=1, no restriction beyond other gates
         # - If prev had charge or departure: RHS>=something positive, allowing continued charge if feasible
-        for q in m.Q:
-            for t in range(1, T):
-                m.add_component(
-                    f"C_no_recharge_after_idle_{q}_{t}",
-                    pyo.Constraint(expr=m.c[q, t] <= m.yOUT[q, t - 1] + m.c[q, t - 1] + 1 - m.atL[q, t - 1]),
-                )
+        #
+        # This is a readability/canonicalisation device, not a physical constraint.
+        # With, say, six idle slots at the depot where five are needed to charge, it
+        # picks the canonical ordering (charge first, then idle) rather than leaving
+        # the solver free to interleave equivalent orderings. It is gated by a config
+        # flag rather than hard-coded so that turning it off is a visible choice in a
+        # config diff. NOTE it does restrict the model: it is a canonical-ordering
+        # choice among equal-cost schedules, so leave it on unless you have a reason.
+        if bool(self._p("charge_before_idle", True)):
+            def _c_no_recharge_after_idle_rule(m, q, t):
+                if t < 1:
+                    return pyo.Constraint.Skip
+                return m.c[q, t] <= m.yOUT[q, t - 1] + m.c[q, t - 1] + 1 - m.atL[q, t - 1]
+            m.C_no_recharge_after_idle = pyo.Constraint(m.Q, m.T, rule=_c_no_recharge_after_idle_rule)
 
         for q in m.Q:
             first_action = initial_actions[q]
@@ -329,63 +334,111 @@ class ProblemMaster(MasterProblem):
             else:
                 m.c[q, 0].fix(0)
 
-        # Optional FIFO symmetry-breaking across vehicles (can restrict starts unintentionally)
-        if bool(self._p("use_fifo_symmetry", False)) and Q >= 2:
-            for k in range(1, Q):
-                for t in range(T):
-                    m.add_component(
-                        f"C3_fifo_{k}_{t}",
-                        pyo.Constraint(
-                            expr=
-                            sum(m.yOUT[k, tau] + m.yRET[k, tau] for tau in range(0, t + 1))
-                            <= sum(m.yOUT[k - 1, tau] + m.yRET[k - 1, tau] for tau in range(0, t + 1))
-                        ),
-                    )
-
-        # Symmetry breaking: order vehicles by cumulative departures (OUT+RET)
-        if bool(self._p("symmetry_breaking", False)) and Q >= 2:
-            for k in range(Q - 1):
-                # Cumulative ordering by time prefix
-                for t in range(T):
-                    m.add_component(
-                        f"C_sym_break_pref_{k}_{t}",
-                        pyo.Constraint(
-                            expr=
-                            sum(m.yOUT[k, tau] + m.yRET[k, tau] for tau in range(0, t + 1))
-                            >= sum(m.yOUT[k + 1, tau] + m.yRET[k + 1, tau] for tau in range(0, t + 1))
-                        ),
-                    )
-                # Redundant total-ordering reinforcement
-                m.add_component(
-                    f"C_sym_break_tot_{k}",
-                    pyo.Constraint(
-                        expr=
-                        sum(m.yOUT[k, t] + m.yRET[k, t] for t in m.T)
-                        >= sum(m.yOUT[k + 1, t] + m.yRET[k + 1, t] for t in m.T)
-                    ),
+        # Symmetry breaking: order vehicles by cumulative departures (OUT+RET).
+        #
+        # This block previously existed twice, under use_fifo_symmetry and under
+        # symmetry_breaking, both defaulting true in configs/default.yaml. They were
+        # the same constraint set written in opposite directions: FIFO emitted
+        # cum[k][t] <= cum[k-1][t] for k=1..Q-1, symmetry_breaking emitted
+        # cum[k][t] >= cum[k+1][t] for k=0..Q-2, which is the same family reindexed.
+        # symmetry_breaking additionally emitted a total-ordering constraint that its
+        # own comment called redundant -- it is the prefix constraint at t=T-1. With
+        # Q=2 that meant 45 constraints where 22 suffice (H4).
+        #
+        # Both config keys are still accepted so existing YAML keeps working; either
+        # one enables the single implementation below.
+        _sym_fifo = bool(self._p("use_fifo_symmetry", False))
+        _sym_break = bool(self._p("symmetry_breaking", False))
+        if (_sym_fifo or _sym_break) and Q >= 2:
+            # Precondition: ordering vehicles by cumulative departures is only valid
+            # for a homogeneous fleet in an identical initial state. With differing
+            # initial battery or forced first actions the vehicles are not
+            # interchangeable, and this constraint can cut off the true optimum.
+            # The audit flagged that this precondition was never checked.
+            _b_distinct = sorted({round(float(b), 9) for b in binit[:Q]})
+            _a_distinct = sorted({str(a) for a in initial_actions[:Q]})
+            if len(_b_distinct) > 1 or len(_a_distinct) > 1:
+                raise ValueError(
+                    "Symmetry breaking requires a homogeneous fleet with an identical "
+                    "initial state, but the vehicles differ: "
+                    f"initial_battery={list(binit[:Q])!r} "
+                    f"initial_actions={list(initial_actions[:Q])!r}. "
+                    "Ordering vehicles by cumulative departures would then be able to "
+                    "cut off the true optimum. Set master.use_fifo_symmetry and "
+                    "master.symmetry_breaking to false, or make the fleet homogeneous."
                 )
+            # Order by TOTAL departures, not by every time prefix.
+            #
+            # The previous cumulative-prefix form, cum[k][t] <= cum[k-1][t] for every
+            # t, is not valid symmetry breaking even for a homogeneous fleet: it
+            # removes feasible schedules that are not symmetric duplicates, so the
+            # master stops being a relaxation and its bound -- the Benders LB -- can
+            # exceed the true optimum. Observed directly: a master best_bound of
+            # ~4558 alongside a known feasible solution of 4228.99.
+            #
+            # Counterexample. Vehicle A makes one trip at t=0, vehicle B makes trips
+            # at t=1 and t=2. Labelled (A,B): cum[0]=[1,1,1], cum[1]=[0,1,2] violates
+            # at t=2. Labelled (B,A): cum[0]=[0,1,2], cum[1]=[1,1,1] violates at t=0.
+            # No relabelling satisfies the prefix form.
+            #
+            # Total ordering is valid: any schedule can be relabelled by sorting the
+            # vehicles on total trips. It also needs only Q-1 rows rather than
+            # T*(Q-1).
+            def _c_sym_break_tot_rule(m, k):
+                if k < 1:
+                    return pyo.Constraint.Skip
+                return (
+                    sum(m.yOUT[k, t] + m.yRET[k, t] for t in m.T)
+                    <= sum(m.yOUT[k - 1, t] + m.yRET[k - 1, t] for t in m.T)
+                )
+            m.C_sym_break_tot = pyo.Constraint(m.Q, rule=_c_sym_break_tot_rule)
 
         for q in m.Q:
             m.b[q, 0].fix(float(binit[q]))
-            for t in range(T - 1):
-                m.add_component(
-                    f"C4_bal_{q}_{t}",
-                    pyo.Constraint(expr=m.b[q, t + 1] == m.b[q, t] - L * (m.yOUT[q, t] + m.yRET[q, t]) + m.gchg[q, t]),
-                )
-                # Charging linkage (continuous): enforce gchg[q,t] = delta_chg * c[q,t],
-                # but respect remaining capacity: gchg[q,t] <= Emax - b[q,t].
-                # With c in [0,1], the model can throttle charging fractionally.
-                m.add_component(
-                    f"C4_chg1_{q}_{t}", pyo.Constraint(expr=m.gchg[q, t] <= delta_chg * m.c[q, t])
-                )
-                m.add_component(
-                    f"C4_chg1_lb_{q}_{t}", pyo.Constraint(expr=m.gchg[q, t] >= delta_chg * m.c[q, t])
-                )
-                m.add_component(
-                    f"C4_chg2_{q}_{t}", pyo.Constraint(expr=m.gchg[q, t] <= Emax - m.b[q, t])
-                )
 
+        def _c4_bal_rule(m, q, t):
+            if t >= T - 1:
+                return pyo.Constraint.Skip
+            return m.b[q, t + 1] == m.b[q, t] - L * (m.yOUT[q, t] + m.yRET[q, t]) + m.gchg[q, t]
+        m.C4_bal = pyo.Constraint(m.Q, m.T, rule=_c4_bal_rule)
+
+        # Charging linkage (continuous): gchg[q,t] == delta_chg * c[q,t].
+        # This was previously written as two opposing inequalities (C4_chg1 and
+        # C4_chg1_lb), which is the same constraint in twice the rows -- the original
+        # comment already described it as an equality.
+        def _c4_chg_link_rule(m, q, t):
+            if t >= T - 1:
+                return pyo.Constraint.Skip
+            return m.gchg[q, t] == delta_chg * m.c[q, t]
+        m.C4_chg_link = pyo.Constraint(m.Q, m.T, rule=_c4_chg_link_rule)
+
+        # Respect remaining capacity: gchg[q,t] <= Emax - b[q,t].
+        # With c in [0,1] the model can throttle charging fractionally.
+        def _c4_chg_cap_rule(m, q, t):
+            if t >= T - 1:
+                return pyo.Constraint.Skip
+            return m.gchg[q, t] <= Emax - m.b[q, t]
+        m.C4_chg_cap = pyo.Constraint(m.Q, m.T, rule=_c4_chg_cap_rule)
+
+        # An OUT trip must carry enough charge for the outbound leg and the return.
         m.C5 = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.b[q, t] >= 2 * L * m.yOUT[q, t])
+
+        # NOT ADDED (M1): the explicit return-leg constraint b[q,t] >= L*yRET[q,t].
+        #
+        # AUDIT_v3 M1 recommends stating it because it is only implied -- exclusivity
+        # forces c=0 when yRET=1, hence gchg=0, so b[q,t+1] = b[q,t] - L >= 0 requires
+        # b[q,t] >= L -- and argues the tighter LP relaxation is worth it regardless
+        # of correctness, since master solve time dominates.
+        #
+        # Measured, it is the opposite. Adding those Q*T rows took the master phase
+        # from 18.2s to 49s over 10 iterations (2.7x, reproduced across two runs at
+        # 50.298s and 50.762s with bit-identical results), and the bound after the
+        # same iteration budget got WORSE, LB 3034.77 -> 2770.97. A valid inequality
+        # cannot weaken the LP relaxation, but it can make the MIP harder to solve
+        # and leave a worse best-bound when the solve stops on gap or time.
+        #
+        # Do not re-add it without re-measuring. The constraint is sound; it just
+        # does not pay for itself here.
 
         # Avoid uninitialized gchg at the last time period (not used in constraints)
         for q in m.Q:
@@ -423,7 +476,7 @@ class ProblemMaster(MasterProblem):
         m = self.m
         solver = self._get_solver()
         tee_flag = bool(self._p("solver_tee", self._p("mp_solve_tee", False)))
-        emit_reports = bool(self._p("emit_reports", True))
+        emit_reports = bool(self._p("emit_reports", False))
         # Per-iteration solver controls
         try:
             time_limit = self._p("solve_time_limit_s")
@@ -683,7 +736,9 @@ class ProblemMaster(MasterProblem):
                     gap_val = 0.0
                 stats["gap"] = gap_val
                 sources["gap"] = "computed"
-            except Exception:
+            except (TypeError, ValueError):
+                # Only a bad numeric conversion is expected here. Anything else is a
+                # real error and must not be swallowed on the bound-provenance path.
                 pass
 
         if stats.get("best_integer") is None:
@@ -692,9 +747,12 @@ class ProblemMaster(MasterProblem):
             elif parsed_best_int is not None:
                 stats["best_integer"] = parsed_best_int
 
-        stats["incumbent_source"] = sources.get("incumbent")
-        stats["best_bound_source"] = sources.get("best_bound")
-        stats["gap_source"] = sources.get("gap")
+        # Never leave provenance blank. A missing source means the value could not be
+        # obtained from any of solver_results / cplex_api / cplex_log / computed, and
+        # that should be visible rather than reading as an absent field (M3).
+        stats["incumbent_source"] = sources.get("incumbent") or "unavailable"
+        stats["best_bound_source"] = sources.get("best_bound") or "unavailable"
+        stats["gap_source"] = sources.get("gap") or "unavailable"
 
         if stats.get("best_bound") is None:
             if self._last_log_path is None:
@@ -885,6 +943,20 @@ class ProblemMaster(MasterProblem):
                     cand["__theta"] = float(val)
         except Exception:
             pass
+        # Directional thetas, when disaggregation is active. Without these the
+        # candidate carries no theta at all under theta_out/theta_ret, and the end
+        # of run report falls back to the LIVE model values -- i.e. the last master
+        # solve rather than the incumbent being reported.
+        try:
+            if hasattr(m, "theta_out") and hasattr(m, "theta_ret"):
+                v_out = pyo.value(m.theta_out, exception=False)
+                v_ret = pyo.value(m.theta_ret, exception=False)
+                if v_out is not None:
+                    cand["__theta_out"] = float(v_out)
+                if v_ret is not None:
+                    cand["__theta_ret"] = float(v_ret)
+        except Exception:
+            pass
         try:
             if hasattr(m, "theta_s"):
                 try:
@@ -999,6 +1071,12 @@ class ProblemMaster(MasterProblem):
         try:
             if report_candidate is not None and "__theta" in report_candidate:
                 lines.append(f"theta = {_candidate_value('__theta'):.6g}")
+            elif report_candidate is not None and "__theta_out" in report_candidate and "__theta_ret" in report_candidate:
+                t_out = _candidate_value("__theta_out")
+                t_ret = _candidate_value("__theta_ret")
+                lines.append(f"theta = {t_out + t_ret:.6g}")
+                lines.append(f"  - theta_out = {t_out:.6g}")
+                lines.append(f"  - theta_ret = {t_ret:.6g}")
             elif hasattr(m, "theta"):
                 lines.append(f"theta = {pyo.value(m.theta):.6g}")
             elif hasattr(m, "theta_out") and hasattr(m, "theta_ret"):
@@ -1228,6 +1306,41 @@ class ProblemMaster(MasterProblem):
         agg_out: dict[int | tuple[int, int], float] = {}
         agg_ret: dict[int | tuple[int, int], float] = {}
         raw_pos_dm = 0
+
+        def _assert_q_invariant(coeffs: dict, direction: str) -> None:
+            """Collapsing (q,tau) -> tau is only valid if the coefficients agree across q.
+
+            Aggregation replaces sum_q coeff[q,tau]*y[q,tau] with coeff[tau]*Y[tau],
+            where Y[tau] == sum_q y[q,tau]. That substitution is an identity only when
+            coeff is the same for every q. On the production path it is, by
+            construction: the subproblem's duals are per-slot (summed over layers,
+            never indexed by vehicle) and are broadcast to every q. This check exists
+            so that a future per-vehicle formulation fails loudly here instead of
+            silently emitting an invalid cut (D10 / spec §2.7).
+            """
+            if not isinstance(coeffs, dict):
+                return
+            first: dict[int, tuple[int, float]] = {}
+            for (q, t), v in coeffs.items():
+                t_i = int(t)
+                val = float(v)
+                if t_i not in first:
+                    first[t_i] = (int(q), val)
+                    continue
+                q0, v0 = first[t_i]
+                # Scale-relative tolerance: these are cut slopes, order 1e2-1e3.
+                if abs(val - v0) > 1e-9 * max(1.0, abs(v0)):
+                    raise RuntimeError(
+                        f"Cut coefficient varies across q at fixed tau; aggregation "
+                        f"invalid. direction={direction} tau={t_i} "
+                        f"coeff[q={q0}]={v0!r} coeff[q={int(q)}]={val!r}. "
+                        f"Check the cut-generation mode: aggregate_cuts_by_tau "
+                        f"requires per-slot duals broadcast identically to every q."
+                    )
+
+        if aggregate:
+            _assert_q_invariant(coeff_yOUT, "OUT")
+            _assert_q_invariant(coeff_yRET, "RET")
         if isinstance(coeff_yOUT, dict):
             if aggregate:
                 used = set()
@@ -1330,6 +1443,43 @@ class ProblemMaster(MasterProblem):
         const_adj = float(ub_est) - float(contrib)
         const_adj_out = (float(ub_est_out) - float(contrib_out)) if ub_est_out is not None else None
         const_adj_ret = (float(ub_est_ret) - float(contrib_ret)) if ub_est_ret is not None else None
+
+        # Check that the re-anchoring only does what it is entitled to do.
+        #
+        # const_adj - const has exactly two legitimate sources:
+        #   1. q-aggregation, which is an identity when the coefficients are
+        #      q-invariant (enforced above) and so contributes nothing; and
+        #   2. cut_coeff_threshold dropping small coefficients from the aggregated
+        #      maps while ub_est still counts them -- a deliberate sparsification.
+        # Anything beyond the dropped mass means the aggregated cut does not
+        # reproduce the per-(q,tau) cut at the incumbent, which is a real defect.
+        #
+        # This used to be applied unconditionally as a silent correction, which would
+        # paper over precisely the inconsistency the q-invariance check exists to
+        # catch. Raise instead (spec §2.7).
+        dropped = 0.0
+        for _coeffs, _var in ((coeff_yOUT, "yOUT"), (coeff_yRET, "yRET")):
+            if not isinstance(_coeffs, dict):
+                continue
+            for (q, t), v in _coeffs.items():
+                if abs(float(v)) > coeff_tol:
+                    continue
+                try:
+                    yv = float((m.yOUT if _var == "yOUT" else m.yRET)[int(q), int(t)].value or 0.0)
+                except Exception:
+                    yv = 0.0
+                dropped += float(v) * yv
+        _residual = abs((float(const_adj) - float(const)) - dropped)
+        if _residual > max(1e-6, 1e-9 * max(1.0, abs(float(const)))):
+            raise RuntimeError(
+                f"Cut constant re-anchoring is not accounted for: const={float(const)!r} "
+                f"reconstructed={float(const_adj)!r} "
+                f"delta={float(const_adj) - float(const)!r} "
+                f"explained_by_threshold={dropped!r} residual={_residual!r}. "
+                f"The aggregated cut does not reproduce the per-(q,tau) cut at the "
+                f"incumbent beyond what cut_coeff_threshold={coeff_tol!r} explains. "
+                f"Do not mask this by re-anchoring -- find the cause."
+            )
 
         # Assemble RHS with aggregated coefficients using adjusted constant
         rhs = const_adj

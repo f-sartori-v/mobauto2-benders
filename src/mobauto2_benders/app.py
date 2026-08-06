@@ -101,11 +101,17 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     mp["cut_coeff_threshold"] = float(cfg.master.cut_coeff_threshold)
     mp["theta_per_scenario"] = bool(cfg.master.theta_per_scenario)
     mp["write_lp_after_cut"] = bool(cfg.master.write_lp_after_cut)
+    mp["charge_before_idle"] = bool(cfg.master.charge_before_idle)
 
     mp["solver"] = cfg.solver.master_solver
     mp["solver_tee"] = bool(cfg.solver.solver_tee)
     mp["log_level"] = str(cfg.run.log_level)
-    mp["emit_reports"] = str(cfg.run.log_level).upper() != "REPORT"
+    # Off by default (M5). Writing a symbolic LP plus a solver log on every master
+    # solve is a debugging aid, not something a normal run should produce -- a
+    # 10-iteration run left 20 files behind. Previously this was derived from
+    # log_level != "REPORT", i.e. on unless you set a log level that reads as if it
+    # would enable reports rather than disable them.
+    mp["emit_reports"] = bool(cfg.run.emit_reports)
 
     sp["lp_solver"] = cfg.solver.subproblem_solver
     sp["multi_cuts_by_scenario"] = bool(cfg.subproblem.multi_cuts_by_scenario)
@@ -118,7 +124,6 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     _set_if_not_none(sp, "Wmax_slots", cfg.subproblem.Wmax_slots)
     sp["p"] = cfg.subproblem.p
     sp["fill_first_epsilon"] = float(cfg.subproblem.fill_first_epsilon)
-    sp["unused_capacity_penalty"] = float(cfg.subproblem.unused_capacity_penalty)
     sp["degenerate_cut_probe_top_k"] = int(cfg.subproblem.degenerate_cut_probe_top_k)
     _set_if_not_none(sp, "degenerate_cut_probe_top_k_out", cfg.subproblem.degenerate_cut_probe_top_k_out)
     _set_if_not_none(sp, "degenerate_cut_probe_top_k_ret", cfg.subproblem.degenerate_cut_probe_top_k_ret)
@@ -368,6 +373,30 @@ def _run_single(
     return result, master
 
 
+def _emit_manifest(cfg, config_path, result, master, emit_cli_output: bool) -> None:
+    """Write the run manifest (spec §0.4). Never fails a run.
+
+    A manifest that cannot be written must not take a completed solve with it,
+    but the failure has to be visible -- silently skipping provenance is how the
+    invalid-lower-bound problem became hard to scope after the fact.
+    """
+    from .manifest import build_manifest, write_manifest
+
+    try:
+        diag = {
+            "cut_generation_mode": getattr(result, "cut_generation_mode", None),
+            "cut_valid_lower_bound": getattr(result, "cut_valid_lower_bound", None),
+        }
+        repo_root = Path(__file__).resolve().parents[2]
+        out_dir = Path(cfg.run.report_dir) if cfg.run.report_dir else (repo_root / "manifests")
+        manifest = build_manifest(cfg, Path(config_path) if config_path else None, result, repo_root, diag)
+        path = write_manifest(manifest, out_dir, cfg.run.name)
+        if emit_cli_output:
+            print(f"\nManifest: {path}")
+    except Exception as exc:  # noqa: BLE001 - provenance must not break a solve
+        print(f"\n[WARN] could not write run manifest: {exc!r}")
+
+
 def run(config_path: str | Path | None = None, overrides: dict | None = None) -> BendersRunResult:
     """Run the Benders solver with a single canonical execution path.
 
@@ -442,6 +471,7 @@ def run(config_path: str | Path | None = None, overrides: dict | None = None) ->
         return last_result
 
     result, _master = _run_single(cfg, mp_base, sp_base, emit_cli_output)
+    _emit_manifest(cfg, config_path, result, _master, emit_cli_output)
     return result
 
 

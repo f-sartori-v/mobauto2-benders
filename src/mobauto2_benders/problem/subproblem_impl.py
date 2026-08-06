@@ -65,17 +65,9 @@ class ProblemSubproblem(Subproblem):
         # Resolution in minutes per slot (copied from master params via config or set here)
         slot_res = int(params.get("slot_resolution", params.get("resolution", 1)))
         time_step_min = int(params.get("time_step_minutes", 1) or 1)
-        # D9: the elastic/minute-level relaxation is deprecated from the default path.
-        # Beyond selecting the subproblem model, this flag also gates mw_enabled,
-        # use_dual_slopes and cut_lb_valid below -- with it True, cuts carry no valid
-        # lower bound and the solver discards best_lb entirely.
-        temporal_refinement = bool(params.get("enable_temporal_refinement", False))
-        refined_cut_mode = str(
-            params.get(
-                "refined_cut_generation_mode",
-                "refined_lp_relaxation" if temporal_refinement else "native",
-            )
-        ).strip().lower()
+        # D9: the elastic/minute-level subproblem relaxation has been removed. The
+        # slot-only model (solve_subproblem + solve_mw_dual) is the only path.
+        # See docs/docs_decisions.md D9 and docs/BENDERS_SPEC_v3.md §2.5.
         # Allow Wmax to be specified in minutes
         if "Wmax_minutes" in params:
             Wmax = int(math.ceil(float(params.get("Wmax_minutes", 0)) / max(1, slot_res)))
@@ -116,6 +108,13 @@ class ProblemSubproblem(Subproblem):
         def _aggregate_requests(container: Any, Tlen: int) -> tuple[list[float], list[float]]:
             R_out = [0.0 for _ in range(Tlen)]
             R_ret = [0.0 for _ in range(Tlen)]
+
+            def _slot_idx_from_minutes(tmin: float) -> int:
+                # Map continuous minutes to slot index via floor:
+                # [0,res)->0, [res,2res)->1, ...
+                res = max(1, slot_res)
+                return max(0, int(math.floor(float(tmin) / res)))
+
             if container is None:
                 return R_out, R_ret
             # Direct arrays
@@ -132,11 +131,6 @@ class ProblemSubproblem(Subproblem):
                 container = container.get("requests") or container.get("req_matrix") or []
             # List of dicts [{dir,time}, ...]
             if isinstance(container, list) and container and isinstance(container[0], dict):
-                import math as _math
-                def _slot_idx_from_minutes(tmin: float) -> int:
-                    # Map continuous minutes to slot index via floor: [0,res)->0, [res,2res)->1, ...
-                    res = max(1, slot_res)
-                    return max(0, int(_math.floor(float(tmin) / res)))
                 for r in container:
                     d = r.get("dir")
                     try:
@@ -163,10 +157,6 @@ class ProblemSubproblem(Subproblem):
                 return R_out, R_ret
             # Matrix [[dir,time], ...]
             if isinstance(container, list):
-                import math as _math
-                def _slot_idx_from_minutes(tmin: float) -> int:
-                    res = max(1, slot_res)
-                    return max(0, int(_math.floor(float(tmin) / res)))
                 for row in container:
                     if not isinstance(row, (list, tuple)) or len(row) < 2:
                         continue
@@ -211,22 +201,10 @@ class ProblemSubproblem(Subproblem):
             if debug_timing:
                 self._vprint(msg)
 
-        def _candidate_is_all_idle() -> bool:
-            return all(float(v) <= 1e-9 for v in C_out) and all(float(v) <= 1e-9 for v in C_ret)
-            try:
-                return float(v)
-            except Exception:
-                return None
-
         def _load_demand_from_file(path_like: Any, Tlen: int) -> tuple[list[float], list[float]]:
             p = Path(str(path_like))
             doc = _load_doc(p)
             return _aggregate_requests(doc, Tlen)
-
-        def _load_exact_arrivals_from_file(path_like: Any) -> tuple[list[float] | None, list[float] | None]:
-            p = Path(str(path_like))
-            doc = _load_doc(p)
-            return _extract_exact_arrival_minutes(doc)
 
         # (legacy) aggregate_requests_to_R removed; using _aggregate_requests instead
 
@@ -269,20 +247,16 @@ class ProblemSubproblem(Subproblem):
             scenarios = list(params.get("scenario_files"))
         # Normalize single-scenario lists to single-demand path
         single_scenario_override: tuple[list[float], list[float]] | None = None
-        single_scenario_arrivals: tuple[list[float] | None, list[float] | None] | None = None
         if scenarios and len(scenarios) == 1:
             s0 = scenarios[0]
             if isinstance(s0, (str, Path)):
                 R_out0, R_ret0 = _load_demand_from_file(s0, T)
-                single_scenario_arrivals = _load_exact_arrivals_from_file(s0)
             elif isinstance(s0, dict) and ("requests" in s0 or "req_matrix" in s0 or "R_out" in s0 or "R_ret" in s0):
                 R_out0, R_ret0 = _aggregate_requests(s0, T)
-                single_scenario_arrivals = _extract_exact_arrival_minutes(s0)
             else:
                 # Best effort
                 R_out0 = list(getattr(s0, "R_out", [0.0] * T))
                 R_ret0 = list(getattr(s0, "R_ret", [0.0] * T))
-                single_scenario_arrivals = (None, None)
             R_out0 = (R_out0 + [0.0] * T)[:T]
             R_ret0 = (R_ret0 + [0.0] * T)[:T]
             single_scenario_override = (R_out0, R_ret0)
@@ -304,7 +278,7 @@ class ProblemSubproblem(Subproblem):
         active_taus = sorted(t_idx) if t_idx else list(range(T))
 
         # Optional Magnanti–Wong selection
-        mw_enabled: bool = bool(params.get("use_magnanti_wong", False)) and (not temporal_refinement)
+        mw_enabled: bool = bool(params.get("use_magnanti_wong", False))
         core_point = params.get("mw_core_point") or {}
         Ybar_out = list(core_point.get("Yout", [])) if isinstance(core_point, dict) else []
         Ybar_ret = list(core_point.get("Yret", [])) if isinstance(core_point, dict) else []
@@ -320,23 +294,6 @@ class ProblemSubproblem(Subproblem):
                 Ybar_ret = [1.0 for _ in range(T)]
         except Exception:
             pass
-
-        def _pick_vehicle_for_tau(tau: int) -> int | None:
-            q_candidates = master_q_idx if master_q_idx else list(range(int(params.get("Q", 0) or 0)))
-            if not q_candidates:
-                return None
-            for q in q_candidates:
-                used = False
-                for tt in range(T):
-                    if _cand_float(candidate, f"yOUT[{q},{tt}]", 0.0) >= 0.5 or _cand_float(candidate, f"yRET[{q},{tt}]", 0.0) >= 0.5:
-                        used = True
-                        break
-                if not used:
-                    return int(q)
-            for q in q_candidates:
-                if _cand_float(candidate, f"yOUT[{q},{tau}]", 0.0) < 0.5 and _cand_float(candidate, f"yRET[{q},{tau}]", 0.0) < 0.5:
-                    return int(q)
-            return int(q_candidates[0])
 
         def solve_mw_dual(
             T_: int,
@@ -363,31 +320,39 @@ class ProblemSubproblem(Subproblem):
             md.name = "mw_dual"
             Tset = range(T_)
 
-            # Dual variables
+            # Dual variables.
+            #
+            # Sign convention follows Pyomo/CPLEX and the rest of this module: for a
+            # '<=' constraint in a MINIMISATION, the dual is <= 0 (raising capacity
+            # lowers cost). solve_subproblem reads its pi_OUT/pi_RET straight from
+            # m.dual and they come out non-positive, which is why dm = +S*pi yields
+            # the negative slopes the master expects. This LP must match that.
             md.a_OUT = pyo.Var(Tset)
             md.a_RET = pyo.Var(Tset)
-            md.pi_OUT = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)], within=pyo.NonNegativeReals)
-            md.pi_RET = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)], within=pyo.NonNegativeReals)
+            md.pi_OUT = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)], within=pyo.NonPositiveReals)
+            md.pi_RET = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)], within=pyo.NonPositiveReals)
 
-            # Dual feasibility: for every primal x_OUT[t, tau, k]
+            # Dual feasibility: one constraint per primal variable.
+            #   primal x[t,tau,k], cost (tau-t) + fill_eps*k  ->  a[t] + pi[tau,k] <= cost
+            #   primal u[t],       cost p                     ->  a[t]            <= p
             def df_out_rule(m, t, tau, k):
                 # active arc iff (t+1) <= tau <= min(T-1, t+W)
                 if not ((t + 1) <= tau <= min(T_ - 1, t + Wmax_slots)):
                     return pyo.Constraint.Skip
-                return m.a_OUT[t] + m.pi_OUT[tau, k] >= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
+                return m.a_OUT[t] + m.pi_OUT[tau, k] <= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
             md.DF_OUT = pyo.Constraint([(t, tau, k) for t in Tset for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)],
                                        rule=lambda m, t, tau, k: df_out_rule(m, t, tau, k))
             # Dual feasibility for RET
             def df_ret_rule(m, t, tau, k):
                 if not ((t + 1) <= tau <= min(T_ - 1, t + Wmax_slots)):
                     return pyo.Constraint.Skip
-                return m.a_RET[t] + m.pi_RET[tau, k] >= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
+                return m.a_RET[t] + m.pi_RET[tau, k] <= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
             md.DF_RET = pyo.Constraint([(t, tau, k) for t in Tset for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)],
                                        rule=lambda m, t, tau, k: df_ret_rule(m, t, tau, k))
 
-            # u constraints (nonnegativity vars): a_[t] >= p
-            md.A_OUT_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_OUT[t] >= float(p_penalty))
-            md.A_RET_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_RET[t] >= float(p_penalty))
+            # Dual constraint from the unmet-demand variables u[t] >= 0
+            md.A_OUT_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_OUT[t] <= float(p_penalty))
+            md.A_RET_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_RET[t] <= float(p_penalty))
 
             # Optimality face equality: dual objective equals primal UB at incumbent
             cap_out_rhs = [min(float(S_cap), float(C_out_vec[tau])) for tau in Tset]
@@ -397,13 +362,42 @@ class ProblemSubproblem(Subproblem):
                 term_cap = sum(cap_out_rhs[tau] * m.pi_OUT[tau, k] for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)) \
                            + sum(cap_ret_rhs[tau] * m.pi_RET[tau, k] for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0))
                 return term_dem + term_cap
-            md.OptFace = pyo.Constraint(expr=(dual_obj_expr(md) == float(ub_base)))
+            # Restrict to the optimal face. Weak duality gives dual_obj <= ub_base for
+            # every dual-feasible point, so ">= ub_base - tol" carves out the (near-)
+            # optimal face. Stated as an inequality rather than "== ub_base" because a
+            # float equality against a separately-computed primal optimum is brittle:
+            # a few ulps of disagreement make the whole LP infeasible.
+            face_tol = max(1e-6, 1e-9 * abs(float(ub_base)))
+            md.OptFace = pyo.Constraint(expr=(dual_obj_expr(md) >= float(ub_base) - face_tol))
 
-            # MW objective: maximize dm·Ybar where dm[tau] = S * sum_k pi[tau,k]
+            # Magnanti-Wong objective.
+            #
+            # The cut is theta >= const + sum_tau dm[tau]*Y[tau], with dm[tau] =
+            # S*sum_k pi[tau,k] and const anchored so the cut is tight at the
+            # incumbent: const = ub_base - sum_tau dm[tau]*y_inc[tau]. Its value at the
+            # core point Ybar is therefore
+            #
+            #     const + sum dm*Ybar = ub_base + sum_tau dm[tau]*(Ybar[tau]-y_inc[tau])
+            #
+            # ub_base is fixed by OptFace, so selecting the Pareto-optimal dual means
+            # maximising sum_tau dm[tau]*(Ybar[tau] - y_inc[tau]).
+            #
+            # The previous version maximised sum dm*Ybar, dropping the -y_inc term.
+            # That term is NOT constant over the optimal face (dm varies across it), so
+            # omitting it selects the wrong dual. y_inc[tau] = C[tau]/S, hence the
+            # coefficient below is (S*Ybar[tau] - C[tau]).
             md.obj = pyo.Objective(
-                expr= float(S_cap) * (
-                    sum(float(Ybar_out_vec[tau]) * sum(md.pi_OUT[tau, k] for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)) for tau in Tset)
-                    + sum(float(Ybar_ret_vec[tau]) * sum(md.pi_RET[tau, k] for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)) for tau in Tset)
+                expr=(
+                    sum(
+                        (float(S_cap) * float(Ybar_out_vec[tau]) - float(C_out_vec[tau]))
+                        * sum(md.pi_OUT[tau, k] for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0))
+                        for tau in Tset
+                    )
+                    + sum(
+                        (float(S_cap) * float(Ybar_ret_vec[tau]) - float(C_ret_vec[tau]))
+                        * sum(md.pi_RET[tau, k] for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0))
+                        for tau in Tset
+                    )
                 ),
                 sense=pyo.maximize,
             )
@@ -417,6 +411,13 @@ class ProblemSubproblem(Subproblem):
             res = solver.solve(md, tee=False, load_solutions=False)
             term = getattr(res.solver, "termination_condition", None)
             if term not in (pyo.TerminationCondition.optimal,):
+                # Report why MW failed. Without this the caller only sees None and
+                # silently degrades to finite differences (see N6).
+                self._vprint(
+                    f"[MW FAIL] dual LP not optimal: termination={term} "
+                    f"status={getattr(res.solver, 'status', None)} "
+                    f"ub_base={float(ub_base):.10g}"
+                )
                 return None
             try:
                 md.solutions.load_from(res)
@@ -447,99 +448,55 @@ class ProblemSubproblem(Subproblem):
             dm_ret: Dict[int, float] = {}
 
             for tau in active_taus:
-                q_probe = _pick_vehicle_for_tau(tau)
-                if temporal_refinement and q_probe is not None:
-                    cand_out = dict(candidate)
-                    cand_out[f"yOUT[{q_probe},{tau}]"] = 1.0
-                    _, ub_plus = solve_refined_subproblem(
-                        SPParams(
-                            T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S,
-                            K_out=K_out_base, K_ret=K_ret_base, fill_eps=fill_eps,
-                            solver_options=solver_options, eps_cut=eps_cut,
-                            slot_resolution=slot_res, time_step_minutes=time_step_min,
-                            T_minutes=params.get("T_minutes"), trip_duration_minutes=params.get("trip_duration_minutes"),
-                            trip_slots=params.get("trip_slots"), Q=int(params.get("Q", len(q_idx) if q_idx else 0) or 0),
-                            binit=params.get("binit"), initial_actions=params.get("initial_actions"),
-                            Emax=params.get("Emax"), L=params.get("L"), delta_chg=params.get("delta_chg"),
-                            eps_feas=float(params.get("eps_feas", 1e-7)),
-                            solve_time_limit_s=params.get("solve_time_limit_s"),
-                        ),
-                        R_out_vec,
-                        R_ret_vec,
-                        cand_out,
-                    )
-                    dm_out[tau] = float(ub_plus - ub_base) if math.isfinite(float(ub_plus)) else 0.0
+                # OUT marginal in the legacy nominal-capacity LP.
+                C_out_tau = C_out_base.copy()
+                C_out_tau[tau] = C_out_tau[tau] + S
+                K_out_tau = K_out_base.copy()
+                K_out_tau[tau] = K_out_tau[tau] + 1
+                _, ub_plus = solve_subproblem(
+                    SPParams(
+                        T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S,
+                        K_out=K_out_tau, K_ret=K_ret_base, fill_eps=fill_eps,
+                        solver_options=solver_options, eps_cut=eps_cut,
+                        slot_resolution=slot_res, time_step_minutes=time_step_min,
+                        T_minutes=params.get("T_minutes"), trip_duration_minutes=params.get("trip_duration_minutes"),
+                        trip_slots=params.get("trip_slots"), Q=int(params.get("Q", len(q_idx) if q_idx else 0) or 0),
+                        binit=params.get("binit"), initial_actions=params.get("initial_actions"),
+                        Emax=params.get("Emax"), L=params.get("L"), delta_chg=params.get("delta_chg"),
+                        eps_feas=float(params.get("eps_feas", 1e-7)),
+                        solve_time_limit_s=params.get("solve_time_limit_s"),
+                    ),
+                    C_out_tau,
+                    C_ret_base,
+                    R_out_vec,
+                    R_ret_vec,
+                )
+                dm_out[tau] = float(ub_plus - ub_base)
 
-                    cand_ret = dict(candidate)
-                    cand_ret[f"yRET[{q_probe},{tau}]"] = 1.0
-                    _, ub_plus_r = solve_refined_subproblem(
-                        SPParams(
-                            T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S,
-                            K_out=K_out_base, K_ret=K_ret_base, fill_eps=fill_eps,
-                            solver_options=solver_options, eps_cut=eps_cut,
-                            slot_resolution=slot_res, time_step_minutes=time_step_min,
-                            T_minutes=params.get("T_minutes"), trip_duration_minutes=params.get("trip_duration_minutes"),
-                            trip_slots=params.get("trip_slots"), Q=int(params.get("Q", len(q_idx) if q_idx else 0) or 0),
-                            binit=params.get("binit"), initial_actions=params.get("initial_actions"),
-                            Emax=params.get("Emax"), L=params.get("L"), delta_chg=params.get("delta_chg"),
-                            eps_feas=float(params.get("eps_feas", 1e-7)),
-                            solve_time_limit_s=params.get("solve_time_limit_s"),
-                        ),
-                        R_out_vec,
-                        R_ret_vec,
-                        cand_ret,
-                    )
-                    dm_ret[tau] = float(ub_plus_r - ub_base) if math.isfinite(float(ub_plus_r)) else 0.0
-                else:
-                    # OUT marginal in the legacy nominal-capacity LP.
-                    C_out_tau = C_out_base.copy()
-                    C_out_tau[tau] = C_out_tau[tau] + S
-                    K_out_tau = K_out_base.copy()
-                    K_out_tau[tau] = K_out_tau[tau] + 1
-                    _, ub_plus = solve_subproblem(
-                        SPParams(
-                            T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S,
-                            K_out=K_out_tau, K_ret=K_ret_base, fill_eps=fill_eps,
-                            solver_options=solver_options, eps_cut=eps_cut,
-                            slot_resolution=slot_res, time_step_minutes=time_step_min,
-                            T_minutes=params.get("T_minutes"), trip_duration_minutes=params.get("trip_duration_minutes"),
-                            trip_slots=params.get("trip_slots"), Q=int(params.get("Q", len(q_idx) if q_idx else 0) or 0),
-                            binit=params.get("binit"), initial_actions=params.get("initial_actions"),
-                            Emax=params.get("Emax"), L=params.get("L"), delta_chg=params.get("delta_chg"),
-                            eps_feas=float(params.get("eps_feas", 1e-7)),
-                            solve_time_limit_s=params.get("solve_time_limit_s"),
-                        ),
-                        C_out_tau,
-                        C_ret_base,
-                        R_out_vec,
-                        R_ret_vec,
-                    )
-                    dm_out[tau] = float(ub_plus - ub_base)
-
-                    # RET marginal in the legacy nominal-capacity LP.
-                    C_ret_tau = C_ret_base.copy()
-                    C_ret_tau[tau] = C_ret_tau[tau] + S
-                    K_ret_tau = K_ret_base.copy()
-                    K_ret_tau[tau] = K_ret_tau[tau] + 1
-                    _, ub_plus_r = solve_subproblem(
-                        SPParams(
-                            T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S,
-                            K_out=K_out_base, K_ret=K_ret_tau, fill_eps=fill_eps,
-                            solver_options=solver_options, eps_cut=eps_cut,
-                            slot_resolution=slot_res, time_step_minutes=time_step_min,
-                            T_minutes=params.get("T_minutes"), trip_duration_minutes=params.get("trip_duration_minutes"),
-                            trip_slots=params.get("trip_slots"), Q=int(params.get("Q", len(q_idx) if q_idx else 0) or 0),
-                            binit=params.get("binit"), initial_actions=params.get("initial_actions"),
-                            Emax=params.get("Emax"), L=params.get("L"), delta_chg=params.get("delta_chg"),
-                            eps_feas=float(params.get("eps_feas", 1e-7)),
-                            solve_time_limit_s=params.get("solve_time_limit_s"),
-                        ),
-                        C_out_base,
-                        C_ret_tau,
-                        R_out_vec,
-                        R_ret_vec,
-                    )
-                    dm_ret[tau] = float(ub_plus_r - ub_base)
+                # RET marginal in the legacy nominal-capacity LP.
+                C_ret_tau = C_ret_base.copy()
+                C_ret_tau[tau] = C_ret_tau[tau] + S
+                K_ret_tau = K_ret_base.copy()
+                K_ret_tau[tau] = K_ret_tau[tau] + 1
+                _, ub_plus_r = solve_subproblem(
+                    SPParams(
+                        T=T, Wmax_slots=Wmax, p=p_pen, lp_solver=lp_solver, S=S,
+                        K_out=K_out_base, K_ret=K_ret_tau, fill_eps=fill_eps,
+                        solver_options=solver_options, eps_cut=eps_cut,
+                        slot_resolution=slot_res, time_step_minutes=time_step_min,
+                        T_minutes=params.get("T_minutes"), trip_duration_minutes=params.get("trip_duration_minutes"),
+                        trip_slots=params.get("trip_slots"), Q=int(params.get("Q", len(q_idx) if q_idx else 0) or 0),
+                        binit=params.get("binit"), initial_actions=params.get("initial_actions"),
+                        Emax=params.get("Emax"), L=params.get("L"), delta_chg=params.get("delta_chg"),
+                        eps_feas=float(params.get("eps_feas", 1e-7)),
+                        solve_time_limit_s=params.get("solve_time_limit_s"),
+                    ),
+                    C_out_base,
+                    C_ret_tau,
+                    R_out_vec,
+                    R_ret_vec,
+                )
+                dm_ret[tau] = float(ub_plus_r - ub_base)
 
             # Expand to the full master variable grid, not just sparse incumbent keys.
             for q in master_q_idx:
@@ -551,151 +508,6 @@ class ProblemSubproblem(Subproblem):
                         coeff_y_ret[(int(q), int(tau))] = float(v)
 
             return coeff_y_out, coeff_y_ret, dm_out, dm_ret
-
-        def _expand_time_slopes(
-            dm_out: Dict[int, float],
-            dm_ret: Dict[int, float],
-        ) -> tuple[Dict[tuple[int, int], float], Dict[tuple[int, int], float]]:
-            coeff_y_out: Dict[tuple[int, int], float] = {}
-            coeff_y_ret: Dict[tuple[int, int], float] = {}
-            for q in master_q_idx:
-                for tau, v in dm_out.items():
-                    if 0 <= tau < T and abs(float(v)) > 0.0:
-                        coeff_y_out[(int(q), int(tau))] = float(v)
-                for tau, v in dm_ret.items():
-                    if 0 <= tau < T and abs(float(v)) > 0.0:
-                        coeff_y_ret[(int(q), int(tau))] = float(v)
-            return coeff_y_out, coeff_y_ret
-
-        def _slot_exposure(R_vec: list[float]) -> list[float]:
-            exposure = [0.0 for _ in range(T)]
-            for tau in range(T):
-                total = 0.0
-                for t in range(T):
-                    if (t + 1) <= tau <= min(T - 1, t + Wmax):
-                        total += float(R_vec[t])
-                exposure[tau] = total
-            return exposure
-
-        def _top_probe_slots(R_vec: list[float], max_probes: int) -> list[int]:
-            exposure = _slot_exposure(R_vec)
-            ranked = sorted(
-                range(T),
-                key=lambda tau: (float(exposure[tau]), float(R_vec[tau]) if tau < len(R_vec) else 0.0, -int(tau)),
-                reverse=True,
-            )
-            chosen = [int(tau) for tau in ranked if exposure[tau] > 1e-9]
-            if not chosen:
-                chosen = [int(tau) for tau in ranked if (tau < len(R_vec) and float(R_vec[tau]) > 1e-9)]
-            return chosen[: max(0, int(max_probes))]
-
-        def _restricted_temporal_fdiff(
-            ub_base: float,
-            R_out_vec: list[float],
-            R_ret_vec: list[float],
-            top_k_out: int,
-            top_k_ret: int,
-        ) -> tuple[Dict[tuple[int, int], float], Dict[tuple[int, int], float], Dict[int, float], Dict[int, float], dict]:
-            coeff_y_out: Dict[tuple[int, int], float] = {}
-            coeff_y_ret: Dict[tuple[int, int], float] = {}
-            dm_out: Dict[int, float] = {}
-            dm_ret: Dict[int, float] = {}
-            probe_slots_out = _top_probe_slots(R_out_vec, top_k_out)
-            probe_slots_ret = _top_probe_slots(R_ret_vec, top_k_ret)
-            probe_time = 0.0
-            for tau in probe_slots_out:
-                q_probe = _pick_vehicle_for_tau(tau)
-                if q_probe is None:
-                    continue
-                cand_out = dict(candidate)
-                cand_out[f"yOUT[{q_probe},{tau}]"] = 1.0
-                t0 = time.perf_counter()
-                _, ub_plus = solve_refined_subproblem(sp_params, R_out_vec, R_ret_vec, cand_out)
-                t1 = time.perf_counter()
-                probe_time += float(t1 - t0)
-                dm_out[int(tau)] = float(ub_plus - ub_base) if math.isfinite(float(ub_plus)) else 0.0
-            for tau in probe_slots_ret:
-                q_probe = _pick_vehicle_for_tau(tau)
-                if q_probe is None:
-                    continue
-                cand_ret = dict(candidate)
-                cand_ret[f"yRET[{q_probe},{tau}]"] = 1.0
-                t0 = time.perf_counter()
-                _, ub_plus = solve_refined_subproblem(sp_params, R_out_vec, R_ret_vec, cand_ret)
-                t1 = time.perf_counter()
-                probe_time += float(t1 - t0)
-                dm_ret[int(tau)] = float(ub_plus - ub_base) if math.isfinite(float(ub_plus)) else 0.0
-            coeff_y_out, coeff_y_ret = _expand_time_slopes(dm_out, dm_ret)
-            diag = {
-                "mode": "restricted_finite_difference",
-                "probe_slots_out": list(probe_slots_out),
-                "probe_slots_ret": list(probe_slots_ret),
-                "probe_time_s": float(probe_time),
-            }
-            return coeff_y_out, coeff_y_ret, dm_out, dm_ret, diag
-
-        def _is_degenerate_cut(
-            ub_val: float,
-            coeff_y_out: Dict[tuple[int, int], float],
-            coeff_y_ret: Dict[tuple[int, int], float],
-            zero_tol: float,
-        ) -> bool:
-            if float(ub_val) <= zero_tol:
-                return False
-            nnz = sum(1 for v in coeff_y_out.values() if abs(float(v)) > zero_tol) + sum(1 for v in coeff_y_ret.values() if abs(float(v)) > zero_tol)
-            if nnz == 0:
-                return True
-            max_abs = 0.0
-            for v in coeff_y_out.values():
-                max_abs = max(max_abs, abs(float(v)))
-            for v in coeff_y_ret.values():
-                max_abs = max(max_abs, abs(float(v)))
-            return max_abs <= zero_tol
-
-        def _build_anti_trivial_cut(reason: str) -> Cut:
-            return Cut(
-                name="anti_trivial_idle",
-                cut_type=CutType.FEASIBILITY,
-                metadata={
-                    "anti_trivial_min_total_starts": 1,
-                    "fallback_reason": reason,
-                    "cut_family": "anti_trivial_idle",
-                },
-            )
-
-        def _proxy_cut_from_nominal_lp(
-            sp_params: "SPParams",
-            R_out_vec: list[float],
-            R_ret_vec: list[float],
-            ub_target: float,
-        ) -> tuple[Dict[tuple[int, int], float], Dict[tuple[int, int], float], Dict[int, float], Dict[int, float], dict]:
-            proxy_t0 = time.perf_counter()
-            proxy_duals, proxy_ub = solve_subproblem(sp_params, C_out, C_ret, R_out_vec, R_ret_vec, candidate)
-            proxy_t1 = time.perf_counter()
-            pi_out = dict(proxy_duals.get("pi_OUT", {}))
-            pi_ret = dict(proxy_duals.get("pi_RET", {}))
-            dm_out = {int(t): float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)}
-            dm_ret = {int(t): float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)}
-            coeff_y_out, coeff_y_ret = _expand_time_slopes(dm_out, dm_ret)
-            proxy_diag = {
-                "mode": "nominal_lp_proxy",
-                "proxy_recourse_objective": float(proxy_ub),
-                "proxy_cut_solve_s": float(proxy_t1 - proxy_t0),
-            }
-            if isinstance(proxy_duals, dict):
-                for key in (
-                    "timing_build_s",
-                    "timing_solve_s",
-                    "timing_extract_s",
-                    "timing_postprocess_s",
-                    "timing_lp_export_s",
-                    "model_num_variables",
-                    "model_num_binary_variables",
-                    "model_num_constraints",
-                ):
-                    if key in proxy_duals:
-                        proxy_diag[f"proxy_{key}"] = proxy_duals[key]
-            return coeff_y_out, coeff_y_ret, dm_out, dm_ret, proxy_diag
 
         # If scenarios provided, iterate; else use single-demand params
         if scenarios:
@@ -726,23 +538,20 @@ class ProblemSubproblem(Subproblem):
             for idx_s, s in enumerate(scenarios):
                 if isinstance(s, (str, Path)):
                     R_out, R_ret = _load_demand_from_file(s, T)
-                    arrival_minutes_out, arrival_minutes_ret = _load_exact_arrivals_from_file(s)
                     scen_label = str(s)
                 elif isinstance(s, dict) and ("requests" in s or "req_matrix" in s or "R_out" in s or "R_ret" in s):
                     R_out, R_ret = _aggregate_requests(s, T)
-                    arrival_minutes_out, arrival_minutes_ret = _extract_exact_arrival_minutes(s)
                     scen_label = str(s.get("name") or s.get("label") or "scenario")
                 else:
                     # Best effort
                     R_out = list(getattr(s, "R_out", [0.0] * T))
                     R_ret = list(getattr(s, "R_ret", [0.0] * T))
-                    arrival_minutes_out, arrival_minutes_ret = (None, None)
                     scen_label = str(getattr(s, "name", "scenario"))
                 R_out = (R_out + [0.0] * T)[:T]
                 R_ret = (R_ret + [0.0] * T)[:T]
 
                 # If using dual slopes, force at least one layer per time to create capacity constraints
-                use_dual = bool(params.get("use_dual_slopes", False)) and (not temporal_refinement)
+                use_dual = bool(params.get("use_dual_slopes", False))
                 K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
                 K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret
                 sp_params = SPParams(
@@ -754,7 +563,6 @@ class ProblemSubproblem(Subproblem):
                     trip_slots=params.get("trip_slots"), Q=int(params.get("Q", len(q_idx) if q_idx else 0) or 0),
                     binit=params.get("binit"), initial_actions=params.get("initial_actions"),
                     Emax=params.get("Emax"), L=params.get("L"), delta_chg=params.get("delta_chg"),
-                    arrival_minutes_out=arrival_minutes_out, arrival_minutes_ret=arrival_minutes_ret,
                     eps_feas=float(params.get("eps_feas", 1e-7)),
                     debug_timing=debug_timing,
                     debug_solver_tee=bool(params.get("debug_solver_tee", False)),
@@ -766,14 +574,11 @@ class ProblemSubproblem(Subproblem):
                     solve_time_limit_s=params.get("solve_time_limit_s"),
                 )
                 t_solve0 = time.perf_counter()
-                if temporal_refinement:
-                    duals, ub_val = solve_refined_subproblem(sp_params, R_out, R_ret, candidate)
-                else:
-                    duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret, candidate)
+                duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret, candidate)
                 t_solve1 = time.perf_counter()
                 sp_solve_time = t_solve1 - t_solve0
                 _dbg(
-                    "[SP TIMING] iter=%s scenario=%s solve_total=%.3fs build=%.3fs solve=%.3fs extract=%.3fs post=%.3fs cut_mode=%s"
+                    "[SP TIMING] iter=%s scenario=%s solve_total=%.3fs build=%.3fs solve=%.3fs extract=%.3fs post=%.3fs"
                     % (
                         str(params.get("debug_current_iteration", "-")),
                         scen_label,
@@ -782,7 +587,6 @@ class ProblemSubproblem(Subproblem):
                         float(duals.get("timing_solve_s", 0.0) or 0.0),
                         float(duals.get("timing_extract_s", 0.0) or 0.0),
                         float(duals.get("timing_postprocess_s", 0.0) or 0.0),
-                        refined_cut_mode,
                     )
                 )
                 if not bool(duals.get("is_feasible", True)):
@@ -998,7 +802,7 @@ class ProblemSubproblem(Subproblem):
                 )
 
             # Phase 2: generate cuts (unless early-exit above)
-            use_dual = bool(params.get("use_dual_slopes", False)) and (not temporal_refinement)
+            use_dual = bool(params.get("use_dual_slopes", False))
             K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
             K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret
             for rec in scenario_records:
@@ -1040,21 +844,10 @@ class ProblemSubproblem(Subproblem):
 
                 # Build marginal slopes either from duals (fast) or finite differences (fallback)
                 t_cut0 = time.perf_counter()
-                cut_mode_used = refined_cut_mode if temporal_refinement else ("dual" if use_dual else "finite_difference")
+                cut_mode_used = "dual" if use_dual else "finite_difference"
                 proxy_diag: dict[str, Any] = {}
-                cut_lb_valid = not temporal_refinement
-                if temporal_refinement and refined_cut_mode == "refined_lp_relaxation":
-                    cut_lp, _ = solve_refined_lp_relaxation_cut(sp_params, R_out, R_ret, candidate)
-                    c_out_map = dict(cut_lp.get("coeff_yOUT", {}))
-                    c_ret_map = dict(cut_lp.get("coeff_yRET", {}))
-                    dm_out = {int(t): sum(float(c_out_map.get((int(q), int(t)), 0.0)) for q in master_q_idx) for t in range(T)}
-                    dm_ret = {int(t): sum(float(c_ret_map.get((int(q), int(t)), 0.0)) for q in master_q_idx) for t in range(T)}
-                    cut_lb_valid = True
-                    proxy_diag = cut_lp
-                elif temporal_refinement and refined_cut_mode in {"nominal_lp_proxy", "proxy_dual"}:
-                    c_out_map, c_ret_map, dm_out, dm_ret, proxy_diag = _proxy_cut_from_nominal_lp(sp_params, R_out, R_ret, ub_val)
-                    cut_lb_valid = False
-                elif mw_enabled:
+                cut_lb_valid = True
+                if mw_enabled:
                     # MW-selected dual slopes on optimal face
                     # Ensure at least one capacity layer per tau for dual π variables
                     K_out_mw = [max(1, int(K_out_lp[t])) for t in range(T)]
@@ -1070,10 +863,20 @@ class ProblemSubproblem(Subproblem):
                         solver_options,
                     )
                     if dm_pair is None:
-                        # Fallback to finite differences to guarantee nonzero slopes
+                        # Fallback to finite differences to guarantee nonzero slopes.
+                        # Finite-difference slopes are NOT a provable lower bound on the
+                        # recourse, so the resulting cut cannot support a gap/optimality
+                        # claim -- mark it invalid so solver.py drops best_lb.
                         c_out_fd, c_ret_fd, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
+                        cut_mode_used = "mw_fdiff_fallback"
+                        cut_lb_valid = False
+                        self._vprint(
+                            f"[SP WARN] scenario={scen_label}: solve_mw_dual returned no solution; "
+                            "fell back to finite differences. Cut is NOT a valid lower bound."
+                        )
                     else:
                         dm_out, dm_ret = dm_pair
+                        cut_mode_used = "mw"
                     # Expand to per-(q,t)
                     c_out_map: Dict[tuple[int, int], float] = {}
                     c_ret_map: Dict[tuple[int, int], float] = {}
@@ -1121,32 +924,7 @@ class ProblemSubproblem(Subproblem):
                     # Finite-difference coefficients and constant per scenario
                     c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
                     cut_lb_valid = False
-                # Proxy cut first; if it degenerates, escalate to a sparse restricted
-                # finite-difference fallback on promising slots rather than probing all slots.
-                deg_tol = float(params.get("degenerate_cut_zero_tol", 1e-9) or 1e-9)
                 fallback_diag: dict[str, Any] = {}
-                if temporal_refinement and (not cut_lb_valid) and _is_degenerate_cut(float(ub_val), c_out_map, c_ret_map, deg_tol):
-                    top_k_out = int(params.get("degenerate_cut_probe_top_k_out", params.get("degenerate_cut_probe_top_k", 6)))
-                    top_k_ret = int(params.get("degenerate_cut_probe_top_k_ret", params.get("degenerate_cut_probe_top_k", 6)))
-                    c_out_map, c_ret_map, dm_out, dm_ret, fallback_diag = _restricted_temporal_fdiff(ub_val, R_out, R_ret, top_k_out, top_k_ret)
-                    if _is_degenerate_cut(float(ub_val), c_out_map, c_ret_map, deg_tol):
-                        if _candidate_is_all_idle():
-                            cuts.append(_build_anti_trivial_cut("degenerate_proxy_after_restricted_fdiff"))
-                            scenario_diags.append({
-                                "label": scen_label,
-                                "T": T,
-                                "R_out": [float(R_out[t]) for t in range(T)],
-                                "R_ret": [float(R_ret[t]) for t in range(T)],
-                                "objective_value": float(duals.get("objective_value", ub_val)),
-                                "timing_sp_solve_s": sp_solve_time,
-                                "timing_cutgen_s": time.perf_counter() - t_cut0,
-                                "cut_generation_mode": "anti_trivial_idle_fallback",
-                                "cut_generation_proxy": proxy_diag,
-                                "cut_generation_fallback": fallback_diag,
-                            })
-                            agg.setdefault("timing_cutgen_s", []).append(time.perf_counter() - t_cut0)
-                            continue
-                    cut_mode_used = "restricted_finite_difference_fallback"
                 t_cut1 = time.perf_counter()
                 cutgen_time = t_cut1 - t_cut0
                 _dbg(
@@ -1166,36 +944,29 @@ class ProblemSubproblem(Subproblem):
 
                 sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
                 sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
-                if temporal_refinement and refined_cut_mode == "refined_lp_relaxation":
-                    const = float(proxy_diag.get("const", 0.0))
-                else:
-                    const = float(ub_val)
-                    const -= sum(dm_out.get(tau, 0.0) * sum_y_out[tau] for tau in range(T))
-                    const -= sum(dm_ret.get(tau, 0.0) * sum_y_ret[tau] for tau in range(T))
+                const = float(ub_val)
+                const -= sum(dm_out.get(tau, 0.0) * sum_y_out[tau] for tau in range(T))
+                const -= sum(dm_ret.get(tau, 0.0) * sum_y_ret[tau] for tau in range(T))
                 consts.append(const)
                 coeffs_out_list.append(c_out_map)
                 coeffs_ret_list.append(c_ret_map)
                 # Per-direction constants if available from SP diagnostics
-                if temporal_refinement and refined_cut_mode == "refined_lp_relaxation":
-                    const_out = float(proxy_diag.get("const_out", const))
-                    const_ret = float(proxy_diag.get("const_ret", 0.0))
-                else:
-                    try:
-                        ub_out = float(duals.get("ub_out", const))
-                    except Exception:
-                        ub_out = float(const)
-                    try:
-                        ub_ret = float(duals.get("ub_ret", 0.0))
-                    except Exception:
-                        ub_ret = 0.0
-                    const_out = float(ub_out) - sum(dm_out.get(tau, 0.0) * sum_y_out[tau] for tau in range(T))
-                    const_ret = float(ub_ret) - sum(dm_ret.get(tau, 0.0) * sum_y_ret[tau] for tau in range(T))
+                try:
+                    ub_out = float(duals.get("ub_out", const))
+                except Exception:
+                    ub_out = float(const)
+                try:
+                    ub_ret = float(duals.get("ub_ret", 0.0))
+                except Exception:
+                    ub_ret = 0.0
+                const_out = float(ub_out) - sum(dm_out.get(tau, 0.0) * sum_y_out[tau] for tau in range(T))
+                const_ret = float(ub_ret) - sum(dm_ret.get(tau, 0.0) * sum_y_ret[tau] for tau in range(T))
                 consts_out.append(const_out)
                 consts_ret.append(const_ret)
                 # Evaluate line at incumbent for diagnostics
                 theta_lb_s = float(const) + sum(float(v) * _cand_float(candidate, f"yOUT[{int(q)},{int(tau)}]", 0.0) for (q, tau), v in c_out_map.items()) \
                     + sum(float(v) * _cand_float(candidate, f"yRET[{int(q)},{int(tau)}]", 0.0) for (q, tau), v in c_ret_map.items())
-                target_val = float(proxy_diag.get("objective_value", ub_val)) if temporal_refinement and refined_cut_mode == "refined_lp_relaxation" else float(ub_val)
+                target_val = float(ub_val)
                 if abs(float(target_val) - float(theta_lb_s)) > eps_cut * max(1.0, abs(float(target_val))):
                     raise RuntimeError("Cut tightness failed at incumbent; aborting cut generation.")
                 cuts.append(Cut(
@@ -1285,6 +1056,14 @@ class ProblemSubproblem(Subproblem):
             else:
                 raise ValueError("ub_aggregation must be one of 'mean', 'sum', 'max'")
             agg_cut_lb_valid = all(bool(sd.get("cut_valid_lower_bound", False)) for sd in scenario_diags) if scenario_diags else False
+            # Report which cut generator produced this aggregate. A single label when
+            # every scenario agreed, otherwise "mixed(a+b)" -- never silently blank,
+            # since a reported number must state the mode that produced it.
+            _modes = sorted({str(sd.get("cut_generation_mode", "unknown")) for sd in scenario_diags})
+            agg_cut_mode = (
+                _modes[0] if len(_modes) == 1
+                else (f"mixed({'+'.join(_modes)})" if _modes else "unknown")
+            )
 
             if not multi_cuts:
                 # Weighted average of constants and coefficients
@@ -1311,6 +1090,7 @@ class ProblemSubproblem(Subproblem):
                         "recourse_total": float(ub_val_agg),
                         "recourse_out": float(sum(weights[i] * scenario_records[i]["duals"].get("ub_out", 0.0) for i in range(len(scenario_records)))),
                         "recourse_ret": float(sum(weights[i] * scenario_records[i]["duals"].get("ub_ret", 0.0) for i in range(len(scenario_records)))),
+                        "cut_generation_mode": agg_cut_mode,
                         "cut_valid_lower_bound": bool(agg_cut_lb_valid),
                     },
                 )
@@ -1332,6 +1112,7 @@ class ProblemSubproblem(Subproblem):
                         "slot_resolution": int(params.get("slot_resolution", 1)),
                         "timing_sp_solve_s": agg_sp_time,
                         "timing_cutgen_s": agg_cut_time,
+                        "cut_generation_mode": agg_cut_mode,
                         "cut_valid_lower_bound": bool(agg_cut_lb_valid),
                     },
                 )
@@ -1354,6 +1135,7 @@ class ProblemSubproblem(Subproblem):
                         "slot_resolution": int(params.get("slot_resolution", 1)),
                         "timing_sp_solve_s": agg_sp_time,
                         "timing_cutgen_s": agg_cut_time,
+                        "cut_generation_mode": agg_cut_mode,
                         "cut_valid_lower_bound": bool(agg_cut_lb_valid),
                     },
                 )
@@ -1361,24 +1143,20 @@ class ProblemSubproblem(Subproblem):
             # Single-demand case from params (prefer external file if given)
             if single_scenario_override is not None:
                 R_out, R_ret = single_scenario_override
-                arrival_minutes_out, arrival_minutes_ret = single_scenario_arrivals or (None, None)
             elif params.get("demand_file"):
                 R_out, R_ret = _load_demand_from_file(params.get("demand_file"), T)
-                arrival_minutes_out, arrival_minutes_ret = _load_exact_arrivals_from_file(params.get("demand_file"))
             elif ("requests" in params) or ("req_matrix" in params) or ("R_out" in params) or ("R_ret" in params):
                 R_out, R_ret = _aggregate_requests(params, T)
-                arrival_minutes_out, arrival_minutes_ret = _extract_exact_arrival_minutes(params)
             else:
                 R_out = [0.0] * T
                 R_ret = [0.0] * T
-                arrival_minutes_out, arrival_minutes_ret = (None, None)
             if len(R_out) != T:
                 R_out = (R_out + [0.0] * T)[:T]
             if len(R_ret) != T:
                 R_ret = (R_ret + [0.0] * T)[:T]
 
             # If using dual slopes, ensure at least one layer to create capacity constraints
-            use_dual = bool(params.get("use_dual_slopes", False)) and (not temporal_refinement)
+            use_dual = bool(params.get("use_dual_slopes", False))
             K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
             K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret
             sp_params = SPParams(
@@ -1390,7 +1168,6 @@ class ProblemSubproblem(Subproblem):
                 trip_slots=params.get("trip_slots"), Q=int(params.get("Q", len(q_idx) if q_idx else 0) or 0),
                 binit=params.get("binit"), initial_actions=params.get("initial_actions"),
                 Emax=params.get("Emax"), L=params.get("L"), delta_chg=params.get("delta_chg"),
-                arrival_minutes_out=arrival_minutes_out, arrival_minutes_ret=arrival_minutes_ret,
                 eps_feas=float(params.get("eps_feas", 1e-7)),
                 debug_timing=debug_timing,
                 debug_solver_tee=bool(params.get("debug_solver_tee", False)),
@@ -1402,14 +1179,11 @@ class ProblemSubproblem(Subproblem):
                 solve_time_limit_s=params.get("solve_time_limit_s"),
             )
             t_solve0 = time.perf_counter()
-            if temporal_refinement:
-                duals, ub_val = solve_refined_subproblem(sp_params, R_out, R_ret, candidate)
-            else:
-                duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret, candidate)
+            duals, ub_val = solve_subproblem(sp_params, C_out, C_ret, R_out, R_ret, candidate)
             t_solve1 = time.perf_counter()
             sp_solve_time = t_solve1 - t_solve0
             _dbg(
-                "[SP TIMING] iter=%s scenario=single solve_total=%.3fs build=%.3fs solve=%.3fs extract=%.3fs post=%.3fs cut_mode=%s"
+                "[SP TIMING] iter=%s scenario=single solve_total=%.3fs build=%.3fs solve=%.3fs extract=%.3fs post=%.3fs"
                 % (
                     str(params.get("debug_current_iteration", "-")),
                     float(sp_solve_time),
@@ -1417,7 +1191,6 @@ class ProblemSubproblem(Subproblem):
                     float(duals.get("timing_solve_s", 0.0) or 0.0),
                     float(duals.get("timing_extract_s", 0.0) or 0.0),
                     float(duals.get("timing_postprocess_s", 0.0) or 0.0),
-                    refined_cut_mode,
                 )
             )
             if not bool(duals.get("is_feasible", True)):
@@ -1495,21 +1268,10 @@ class ProblemSubproblem(Subproblem):
 
             # Build coefficients via MW, duals (fast) or finite differences (fallback)
             t_cut0 = time.perf_counter()
-            cut_mode_used = refined_cut_mode if temporal_refinement else ("dual" if use_dual else "finite_difference")
+            cut_mode_used = "dual" if use_dual else "finite_difference"
             proxy_diag: dict[str, Any] = {}
-            cut_lb_valid = not temporal_refinement
-            if temporal_refinement and refined_cut_mode == "refined_lp_relaxation":
-                cut_lp, _ = solve_refined_lp_relaxation_cut(sp_params, R_out, R_ret, candidate)
-                c_out_map = dict(cut_lp.get("coeff_yOUT", {}))
-                c_ret_map = dict(cut_lp.get("coeff_yRET", {}))
-                dm_out = {int(t): sum(float(c_out_map.get((int(q), int(t)), 0.0)) for q in master_q_idx) for t in range(T)}
-                dm_ret = {int(t): sum(float(c_ret_map.get((int(q), int(t)), 0.0)) for q in master_q_idx) for t in range(T)}
-                proxy_diag = cut_lp
-                cut_lb_valid = True
-            elif temporal_refinement and refined_cut_mode in {"nominal_lp_proxy", "proxy_dual"}:
-                c_out_map, c_ret_map, dm_out, dm_ret, proxy_diag = _proxy_cut_from_nominal_lp(sp_params, R_out, R_ret, ub_val)
-                cut_lb_valid = False
-            elif mw_enabled:
+            cut_lb_valid = True
+            if mw_enabled:
                 dm_pair = solve_mw_dual(
                     T, Wmax, p_pen, S,
                     # Ensure at least one capacity layer per tau for dual π variables
@@ -1523,10 +1285,20 @@ class ProblemSubproblem(Subproblem):
                     solver_options,
                 )
                 if dm_pair is None:
-                    # Fallback to finite differences to guarantee nonzero slopes
+                    # Fallback to finite differences to guarantee nonzero slopes.
+                    # Finite-difference slopes are NOT a provable lower bound on the
+                    # recourse, so the resulting cut cannot support a gap/optimality
+                    # claim -- mark it invalid so solver.py drops best_lb.
                     c_out_fd, c_ret_fd, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
+                    cut_mode_used = "mw_fdiff_fallback"
+                    cut_lb_valid = False
+                    self._vprint(
+                        "[SP WARN] solve_mw_dual returned no solution; fell back to finite "
+                        "differences. Cut is NOT a valid lower bound."
+                    )
                 else:
                     dm_out, dm_ret = dm_pair
+                    cut_mode_used = "mw"
                 # Expand to per-(q,t)
                 c_out_map: Dict[tuple[int, int], float] = {}
                 c_ret_map: Dict[tuple[int, int], float] = {}
@@ -1574,41 +1346,7 @@ class ProblemSubproblem(Subproblem):
                 # Finite differences fallback
                 c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret)
                 cut_lb_valid = False
-            # Proxy cut first; if it degenerates, escalate to a sparse restricted
-            # finite-difference fallback on promising slots rather than probing all slots.
-            deg_tol = float(params.get("degenerate_cut_zero_tol", 1e-9) or 1e-9)
             fallback_diag: dict[str, Any] = {}
-            if temporal_refinement and (not cut_lb_valid) and _is_degenerate_cut(float(ub_val), c_out_map, c_ret_map, deg_tol):
-                top_k_out = int(params.get("degenerate_cut_probe_top_k_out", params.get("degenerate_cut_probe_top_k", 6)))
-                top_k_ret = int(params.get("degenerate_cut_probe_top_k_ret", params.get("degenerate_cut_probe_top_k", 6)))
-                c_out_map, c_ret_map, dm_out, dm_ret, fallback_diag = _restricted_temporal_fdiff(ub_val, R_out, R_ret, top_k_out, top_k_ret)
-                if _is_degenerate_cut(float(ub_val), c_out_map, c_ret_map, deg_tol):
-                    if _candidate_is_all_idle():
-                        diagnostics = {
-                            "T": T,
-                            "R_out": [float(R_out[t]) for t in range(T)],
-                            "R_ret": [float(R_ret[t]) for t in range(T)],
-                            "objective_value": float(duals.get("objective_value", ub_val)),
-                            "waiting_cost_slots": float(duals.get("waiting_cost_slots", 0.0)),
-                            "fill_eps_cost": float(duals.get("fill_eps_cost", 0.0)),
-                            "penalty_cost": float(duals.get("penalty_cost", 0.0)),
-                            "penalty_pax": float(duals.get("penalty_pax", 0.0)),
-                            "served_total": float(duals.get("served_total", 0.0)),
-                            "total_demand": float(duals.get("total_demand", 0.0)),
-                            "slot_resolution": int(params.get("slot_resolution", 1)),
-                            "timing_sp_solve_s": sp_solve_time,
-                            "timing_cutgen_s": time.perf_counter() - t_cut0,
-                            "cut_generation_mode": "anti_trivial_idle_fallback",
-                            "cut_generation_proxy": proxy_diag,
-                            "cut_generation_fallback": fallback_diag,
-                        }
-                        return SubproblemResult(
-                            is_feasible=True,
-                            cut=_build_anti_trivial_cut("degenerate_proxy_after_restricted_fdiff"),
-                            upper_bound=ub_val,
-                            diagnostics=diagnostics,
-                        )
-                cut_mode_used = "restricted_finite_difference_fallback"
 
             t_cut1 = time.perf_counter()
             cutgen_time = t_cut1 - t_cut0
@@ -1631,33 +1369,26 @@ class ProblemSubproblem(Subproblem):
             sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
 
             # Intercept (const) so that the cut passes through current incumbent: const = Q(y) - dm·Y
-            if temporal_refinement and refined_cut_mode == "refined_lp_relaxation":
-                const = float(proxy_diag.get("const", 0.0))
-            else:
-                const = float(ub_val)
-                const -= sum(dm_out.get(t, 0.0) * sum_y_out[t] for t in range(T))
-                const -= sum(dm_ret.get(t, 0.0) * sum_y_ret[t] for t in range(T))
+            const = float(ub_val)
+            const -= sum(dm_out.get(t, 0.0) * sum_y_out[t] for t in range(T))
+            const -= sum(dm_ret.get(t, 0.0) * sum_y_ret[t] for t in range(T))
 
             # Directional intercepts if available from decomposition diagnostics
-            if temporal_refinement and refined_cut_mode == "refined_lp_relaxation":
-                const_out = float(proxy_diag.get("const_out", const))
-                const_ret = float(proxy_diag.get("const_ret", 0.0))
-            else:
-                try:
-                    ub_out = float(duals.get("ub_out", const))
-                except Exception:
-                    ub_out = float(const)
-                try:
-                    ub_ret = float(duals.get("ub_ret", 0.0))
-                except Exception:
-                    ub_ret = 0.0
-                const_out = float(ub_out) - sum(dm_out.get(t, 0.0) * sum_y_out[t] for t in range(T))
-                const_ret = float(ub_ret) - sum(dm_ret.get(t, 0.0) * sum_y_ret[t] for t in range(T))
+            try:
+                ub_out = float(duals.get("ub_out", const))
+            except Exception:
+                ub_out = float(const)
+            try:
+                ub_ret = float(duals.get("ub_ret", 0.0))
+            except Exception:
+                ub_ret = 0.0
+            const_out = float(ub_out) - sum(dm_out.get(t, 0.0) * sum_y_out[t] for t in range(T))
+            const_ret = float(ub_ret) - sum(dm_ret.get(t, 0.0) * sum_y_ret[t] for t in range(T))
 
             # Optional: evaluate the line at the incumbent (theta_lb) to verify tightness (≈ ub_val)
             theta_lb = float(const) + sum(float(v) * _cand_float(candidate, f"yOUT[{int(q)},{int(tau)}]", 0.0) for (q, tau), v in c_out_map.items()) \
                 + sum(float(v) * _cand_float(candidate, f"yRET[{int(q)},{int(tau)}]", 0.0) for (q, tau), v in c_ret_map.items())
-            target_val = float(proxy_diag.get("objective_value", ub_val)) if temporal_refinement and refined_cut_mode == "refined_lp_relaxation" else float(ub_val)
+            target_val = float(ub_val)
             if abs(float(target_val) - float(theta_lb)) > eps_cut * max(1.0, abs(float(target_val))):
                 raise RuntimeError("Cut tightness failed at incumbent; aborting cut generation.")
 
@@ -1710,18 +1441,6 @@ class ProblemSubproblem(Subproblem):
                 "cut_valid_lower_bound": bool(cut_lb_valid),
             }
             return SubproblemResult(is_feasible=True, cut=cut, upper_bound=ub_val, diagnostics=diagnostics)
-
-@dataclass
-class RefinedServiceEvent:
-    sid: int
-    q: int
-    tau: int
-    direction: str
-    nominal_min: int
-    window_lb_min: int
-    window_ub_min: int
-    prev_sid: Optional[int]
-    layer_index: int
 
 
 def _cand_float(candidate: Candidate | None, name: str, default: float = 0.0) -> float:
@@ -1813,1093 +1532,6 @@ def _maybe_export_lp(model: pyo.ConcreteModel, P: "SPParams") -> tuple[Optional[
     return str(lp_path), float(t1 - t0)
 
 
-def _charge_profile(candidate: Candidate | None, P: "SPParams") -> dict[tuple[int, int], float]:
-    prof: dict[tuple[int, int], float] = {}
-    for q in range(int(P.Q)):
-        for t in range(int(P.T)):
-            v = _cand_float(candidate, f"c[{q},{t}]", 0.0)
-            if abs(v) > 1e-9:
-                prof[(q, t)] = max(0.0, min(1.0, v))
-    return prof
-
-
-def _service_slot_window_lb_min(tau: int, slot_res: int) -> int:
-    tau = int(tau)
-    if tau < 1:
-        raise AssertionError(f"Invalid service slot index tau={tau}; service starts must satisfy tau >= 1")
-    return (tau - 1) * int(slot_res) + 1
-
-
-def _service_slot_window_ub_min(tau: int, slot_res: int) -> int:
-    tau = int(tau)
-    if tau < 1:
-        raise AssertionError(f"Invalid service slot index tau={tau}; service starts must satisfy tau >= 1")
-    return tau * int(slot_res)
-
-
-def _slot_nominal_departure_min(tau: int, slot_res: int) -> int:
-    return _service_slot_window_ub_min(int(tau), int(slot_res))
-
-
-def _demand_release_min(t: int, slot_res: int) -> int:
-    return int(t) * int(slot_res) + 1
-
-
-def _wait_slots_from_minute(t: int, dep_min: int, slot_res: int) -> float:
-    release_min = _demand_release_min(int(t), int(slot_res))
-    return float(max(0, int(dep_min) - release_min)) / float(max(1, int(slot_res)))
-
-
-def _slot_index_from_minute(arrival_min: float, slot_res: int, T: int) -> int | None:
-    try:
-        minute = float(arrival_min)
-    except Exception:
-        return None
-    if minute < 0.0:
-        return None
-    if T <= 0:
-        return None
-    slot = int(math.floor(minute / float(max(1, int(slot_res)))))
-    return max(0, min(int(T) - 1, slot))
-
-
-def _extract_exact_arrival_minutes(container: Any) -> tuple[list[float] | None, list[float] | None]:
-    if container is None:
-        return None, None
-    if isinstance(container, dict):
-        if "requests" in container:
-            container = container.get("requests") or []
-        elif "req_matrix" in container:
-            container = container.get("req_matrix") or []
-        else:
-            return None, None
-    if not isinstance(container, list):
-        return None, None
-
-    out_minutes: list[float] = []
-    ret_minutes: list[float] = []
-    if container and isinstance(container[0], dict):
-        for req in container:
-            try:
-                minute = float(req.get("time", -1))
-            except Exception:
-                continue
-            if minute < 0.0:
-                continue
-            direction = req.get("dir")
-            if isinstance(direction, str):
-                dd = direction.upper()
-                if dd == "OUT":
-                    out_minutes.append(minute)
-                elif dd == "RET":
-                    ret_minutes.append(minute)
-            else:
-                try:
-                    if int(direction) == 0:
-                        out_minutes.append(minute)
-                    else:
-                        ret_minutes.append(minute)
-                except Exception:
-                    continue
-        return out_minutes, ret_minutes
-    for row in container:
-        if not isinstance(row, (list, tuple)) or len(row) < 2:
-            continue
-        direction, raw_minute = row[0], row[1]
-        try:
-            minute = float(raw_minute)
-        except Exception:
-            continue
-        if minute < 0.0:
-            continue
-        if isinstance(direction, str):
-            dd = direction.upper()
-            if dd == "OUT":
-                out_minutes.append(minute)
-            elif dd == "RET":
-                ret_minutes.append(minute)
-        else:
-            try:
-                if int(direction) == 0:
-                    out_minutes.append(minute)
-                else:
-                    ret_minutes.append(minute)
-            except Exception:
-                continue
-    return out_minutes, ret_minutes
-
-
-def _eligible_arrivals_by_slot_and_cutoff(
-    R: list[float],
-    arrival_minutes: list[float] | None,
-    T: int,
-    slot_res: int,
-    cutoffs_by_slot: Mapping[int, Iterable[int]],
-) -> dict[tuple[int, int], float]:
-    eligible: dict[tuple[int, int], float] = {}
-    if arrival_minutes is None:
-        for t, cutoffs in cutoffs_by_slot.items():
-            full_available_min = (int(t) + 1) * int(slot_res)
-            demand = float(R[t]) if 0 <= int(t) < len(R) else 0.0
-            for cutoff in cutoffs:
-                eligible[(int(t), int(cutoff))] = demand if int(cutoff) >= full_available_min else 0.0
-        return eligible
-
-    arrivals_by_slot: list[list[float]] = [[] for _ in range(max(0, int(T)))]
-    for minute in arrival_minutes:
-        slot = _slot_index_from_minute(minute, slot_res, T)
-        if slot is None:
-            continue
-        arrivals_by_slot[slot].append(float(minute))
-    for arrs in arrivals_by_slot:
-        arrs.sort()
-
-    for t, cutoffs in cutoffs_by_slot.items():
-        arrs = arrivals_by_slot[int(t)] if 0 <= int(t) < len(arrivals_by_slot) else []
-        for cutoff in cutoffs:
-            eligible[(int(t), int(cutoff))] = float(bisect_right(arrs, float(cutoff)))
-    return eligible
-
-
-def _direction_eligible_arrivals_by_minute(
-    R: list[float],
-    arrival_minutes: list[float] | None,
-    T: int,
-    slot_res: int,
-    minute: float,
-) -> float:
-    cutoff = float(minute)
-    if arrival_minutes is not None:
-        clean = sorted(float(v) for v in arrival_minutes if v is not None)
-        return float(bisect_right(clean, cutoff))
-    total = 0.0
-    for t in range(min(int(T), len(R))):
-        if cutoff >= float((t + 1) * int(slot_res)):
-            total += float(R[t])
-    return total
-
-
-def _validate_realized_departure_minutes(
-    events: list[RefinedServiceEvent],
-    dep_by_sid: Mapping[int, float],
-    slot_res: int,
-) -> None:
-    for event in events:
-        if int(event.tau) < 1:
-            raise AssertionError(
-                f"Invalid service start slot q={event.q} tau={event.tau}; service starts must satisfy tau >= 1"
-            )
-        try:
-            dep = float(dep_by_sid[event.sid])
-        except Exception as exc:
-            raise AssertionError(f"Missing realized departure for event sid={event.sid}") from exc
-        lb = _service_slot_window_lb_min(int(event.tau), int(slot_res))
-        ub = _service_slot_window_ub_min(int(event.tau), int(slot_res))
-        if dep < float(lb) - 1.0e-9 or dep > float(ub) + 1.0e-9:
-            raise AssertionError(
-                "Realized departure outside slot window: "
-                f"q={event.q} tau={event.tau} dep={dep:.6g} expected in [{lb}, {ub}]"
-            )
-
-
-def _build_service_events(candidate: Candidate | None, P: "SPParams") -> list[RefinedServiceEvent]:
-    slot_res = max(1, int(P.slot_resolution))
-    events: list[RefinedServiceEvent] = []
-    per_tau_dir_count: dict[tuple[str, int], int] = {}
-    for q in range(int(P.Q)):
-        prev_sid: Optional[int] = None
-        for tau in range(int(P.T)):
-            direction = ""
-            if _cand_float(candidate, f"yOUT[{q},{tau}]", 0.0) >= 0.5:
-                direction = "OUT"
-            elif _cand_float(candidate, f"yRET[{q},{tau}]", 0.0) >= 0.5:
-                direction = "RET"
-            if not direction:
-                continue
-            if int(tau) < 1:
-                raise AssertionError(
-                    f"Invalid service start slot q={q} tau={tau}; slot 0 is a demand bucket, not a departure slot"
-                )
-            nominal = _slot_nominal_departure_min(int(tau), slot_res)
-            key = (direction, int(tau))
-            layer_index = per_tau_dir_count.get(key, 0)
-            per_tau_dir_count[key] = layer_index + 1
-            events.append(
-                RefinedServiceEvent(
-                    sid=len(events),
-                    q=int(q),
-                    tau=int(tau),
-                    direction=direction,
-                    nominal_min=nominal,
-                    window_lb_min=_service_slot_window_lb_min(int(tau), slot_res),
-                    window_ub_min=_service_slot_window_ub_min(int(tau), slot_res),
-                    prev_sid=prev_sid,
-                    layer_index=layer_index,
-                )
-            )
-            prev_sid = events[-1].sid
-    return events
-
-
-def _charge_minutes_between(
-    q: int,
-    start_min: float,
-    end_min: float,
-    charge_prof: dict[tuple[int, int], float],
-    slot_res: int,
-    T: int,
-) -> float:
-    if end_min <= start_min:
-        return 0.0
-    total = 0.0
-    for tau in range(T):
-        frac = float(charge_prof.get((q, tau), 0.0))
-        if frac <= 0.0:
-            continue
-        lo = float(tau * slot_res)
-        hi = float((tau + 1) * slot_res)
-        overlap = max(0.0, min(end_min, hi) - max(start_min, lo))
-        if overlap > 0.0:
-            total += frac * overlap
-    return total
-
-
-def _first_violation(
-    events: list[RefinedServiceEvent],
-    charge_prof: dict[tuple[int, int], float],
-    P: "SPParams",
-) -> dict[str, Any] | None:
-    slot_res = max(1, int(P.slot_resolution))
-    trip_minutes = int(P.trip_duration_minutes or (int(P.trip_slots or 0) * slot_res))
-    charge_rate = float(P.delta_chg or 0.0) / float(slot_res)
-    emax = float(P.Emax) if P.Emax is not None else float("inf")
-    binit = _normalize_binit(P)
-    by_vehicle: dict[int, list[RefinedServiceEvent]] = {}
-    for event in events:
-        by_vehicle.setdefault(event.q, []).append(event)
-    for q, seq in sorted(by_vehicle.items()):
-        batt = float(binit[q] if q < len(binit) else 0.0)
-        prev_dep = 0.0
-        prev_event: Optional[RefinedServiceEvent] = None
-        for event in seq:
-            dep = float(event.window_ub_min)
-            if prev_event is not None:
-                req = prev_dep + trip_minutes
-                if dep + float(P.eps_feas) < req:
-                    return {
-                        "type": "timing",
-                        "vehicle_id": q,
-                        "predecessor_slot": prev_event.tau,
-                        "current_slot": event.tau,
-                        "required_min_time": req,
-                        "available_realized_time": dep,
-                    }
-            charge_min = _charge_minutes_between(q, prev_dep + trip_minutes if prev_event is not None else 0.0, dep, charge_prof, slot_res, int(P.T))
-            batt = min(emax, batt + charge_rate * charge_min)
-            if batt + float(P.eps_feas) < float(P.L or 0.0):
-                return {
-                    "type": "battery",
-                    "vehicle_id": q,
-                    "predecessor_slot": prev_event.tau if prev_event is not None else None,
-                    "current_slot": event.tau,
-                    "required_min_charge": float(P.L or 0.0),
-                    "available_realized_charge": batt,
-                }
-            batt -= float(P.L or 0.0)
-            prev_dep = dep
-            prev_event = event
-    return None
-
-
-def solve_refined_lp_relaxation_cut(
-    P: "SPParams",
-    R_out: Iterable[float],
-    R_ret: Iterable[float],
-    candidate: Candidate | None = None,
-):
-    """Solve a valid LP lower-bounding recourse model parameterized by master y.
-
-    This is not the refined MILP recourse itself. It is a relaxation that keeps
-    the time-within-slot activation structure and passenger assignment dependence
-    on the master schedule, while relaxing temporal refinement choices to
-    continuous convex combinations. Because it is an LP with y only on RHS
-    activation constraints, its duals define globally valid lower-bounding cuts.
-    """
-    t_build0 = time.perf_counter()
-    m = pyo.ConcreteModel()
-    m.name = "subproblem_refined_lp_relax"
-    R_out = [float(v) for v in R_out]
-    R_ret = [float(v) for v in R_ret]
-    slot_res = max(1, int(P.slot_resolution))
-    step = max(1, int(P.time_step_minutes))
-    W_minutes = int(P.Wmax_slots) * slot_res
-
-    Tset = range(int(P.T))
-    service_slots = range(1, int(P.T))
-    Qset = range(int(P.Q))
-    out_events = [(int(q), int(tau)) for q in Qset for tau in service_slots]
-    ret_events = [(int(q), int(tau)) for q in Qset for tau in service_slots]
-
-    for q in Qset:
-        if _cand_float(candidate, f"yOUT[{int(q)},0]", 0.0) >= 0.5 or _cand_float(candidate, f"yRET[{int(q)},0]", 0.0) >= 0.5:
-            raise AssertionError(
-                f"Invalid service start slot q={int(q)} tau=0; slot 0 is a demand bucket, not a departure slot"
-            )
-
-    out_choices = []
-    ret_choices = []
-    for q, tau in out_events:
-        nominal = _slot_nominal_departure_min(int(tau), slot_res)
-        lb = _service_slot_window_lb_min(int(tau), slot_res)
-        for h in range(lb, nominal + 1, step):
-            out_choices.append((q, tau, int(h)))
-    for q, tau in ret_events:
-        nominal = _slot_nominal_departure_min(int(tau), slot_res)
-        lb = _service_slot_window_lb_min(int(tau), slot_res)
-        for h in range(lb, nominal + 1, step):
-            ret_choices.append((q, tau, int(h)))
-
-    out_choice_map: dict[tuple[int, int], list[int]] = {}
-    ret_choice_map: dict[tuple[int, int], list[int]] = {}
-    for q, tau, h in out_choices:
-        out_choice_map.setdefault((q, tau), []).append(h)
-    for q, tau, h in ret_choices:
-        ret_choice_map.setdefault((q, tau), []).append(h)
-
-    m.OutChoices = pyo.Set(initialize=out_choices, dimen=3, ordered=False)
-    m.RetChoices = pyo.Set(initialize=ret_choices, dimen=3, ordered=False)
-    m.z_OUT = pyo.Var(m.OutChoices, bounds=(0.0, 1.0))
-    m.z_RET = pyo.Var(m.RetChoices, bounds=(0.0, 1.0))
-
-    y_out_rhs = {(int(q), int(tau)): _cand_float(candidate, f"yOUT[{int(q)},{int(tau)}]", 0.0) for q in Qset for tau in service_slots}
-    y_ret_rhs = {(int(q), int(tau)): _cand_float(candidate, f"yRET[{int(q)},{int(tau)}]", 0.0) for q in Qset for tau in service_slots}
-
-    def _act_out(mm, q, tau):
-        return sum(mm.z_OUT[q, tau, h] for h in out_choice_map[(int(q), int(tau))]) == float(y_out_rhs[(int(q), int(tau))])
-    m.Act_OUT = pyo.Constraint(out_events, rule=_act_out)
-
-    def _act_ret(mm, q, tau):
-        return sum(mm.z_RET[q, tau, h] for h in ret_choice_map[(int(q), int(tau))]) == float(y_ret_rhs[(int(q), int(tau))])
-    m.Act_RET = pyo.Constraint(ret_events, rule=_act_ret)
-
-    out_arcs = []
-    for t, dem in enumerate(R_out):
-        if dem <= 0.0:
-            continue
-        release = _demand_release_min(int(t), slot_res)
-        for q, tau, h in out_choices:
-            if release <= h <= release + W_minutes:
-                out_arcs.append((int(t), int(q), int(tau), int(h)))
-    ret_arcs = []
-    for t, dem in enumerate(R_ret):
-        if dem <= 0.0:
-            continue
-        release = _demand_release_min(int(t), slot_res)
-        for q, tau, h in ret_choices:
-            if release <= h <= release + W_minutes:
-                ret_arcs.append((int(t), int(q), int(tau), int(h)))
-
-    out_cutoffs_by_t: dict[int, set[int]] = {}
-    ret_cutoffs_by_t: dict[int, set[int]] = {}
-    for t, _q, _tau, h in out_arcs:
-        out_cutoffs_by_t.setdefault(int(t), set()).add(int(h))
-    for t, _q, _tau, h in ret_arcs:
-        ret_cutoffs_by_t.setdefault(int(t), set()).add(int(h))
-    eligible_out_prefix = _eligible_arrivals_by_slot_and_cutoff(
-        R_out,
-        getattr(P, "arrival_minutes_out", None),
-        int(P.T),
-        slot_res,
-        out_cutoffs_by_t,
-    )
-    eligible_ret_prefix = _eligible_arrivals_by_slot_and_cutoff(
-        R_ret,
-        getattr(P, "arrival_minutes_ret", None),
-        int(P.T),
-        slot_res,
-        ret_cutoffs_by_t,
-    )
-
-    m.OutArcs = pyo.Set(initialize=out_arcs, dimen=4, ordered=False)
-    m.RetArcs = pyo.Set(initialize=ret_arcs, dimen=4, ordered=False)
-    m.x_OUT = pyo.Var(m.OutArcs, within=pyo.NonNegativeReals)
-    m.x_RET = pyo.Var(m.RetArcs, within=pyo.NonNegativeReals)
-    m.u_OUT = pyo.Var(Tset, within=pyo.NonNegativeReals)
-    m.u_RET = pyo.Var(Tset, within=pyo.NonNegativeReals)
-    m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
-
-    out_arc_index: dict[tuple[int, int], list[tuple[int, int, int, int]]] = {}
-    ret_arc_index: dict[tuple[int, int], list[tuple[int, int, int, int]]] = {}
-    for arc in out_arcs:
-        out_arc_index.setdefault((int(arc[1]), int(arc[2])), []).append(arc)
-    for arc in ret_arcs:
-        ret_arc_index.setdefault((int(arc[1]), int(arc[2])), []).append(arc)
-
-    def _wait_slots(t: int, h: int) -> float:
-        return _wait_slots_from_minute(int(t), int(h), slot_res)
-
-    m.obj = pyo.Objective(
-        expr=
-        sum(_wait_slots(t, h) * m.x_OUT[t, q, tau, h] for (t, q, tau, h) in m.OutArcs)
-        + sum(_wait_slots(t, h) * m.x_RET[t, q, tau, h] for (t, q, tau, h) in m.RetArcs)
-        + float(P.p) * (sum(m.u_OUT[t] for t in Tset) + sum(m.u_RET[t] for t in Tset)),
-        sense=pyo.minimize,
-    )
-
-    def _dem_out(mm, t):
-        rel = [(q, tau, h) for (tt, q, tau, h) in mm.OutArcs if tt == t]
-        return sum(mm.x_OUT[t, q, tau, h] for (q, tau, h) in rel) + mm.u_OUT[t] == float(R_out[t])
-    m.D_out_relax = pyo.Constraint(Tset, rule=_dem_out)
-
-    def _dem_ret(mm, t):
-        rel = [(q, tau, h) for (tt, q, tau, h) in mm.RetArcs if tt == t]
-        return sum(mm.x_RET[t, q, tau, h] for (q, tau, h) in rel) + mm.u_RET[t] == float(R_ret[t])
-    m.D_ret_relax = pyo.Constraint(Tset, rule=_dem_ret)
-
-    def _gate_out(mm, t, q, tau, h):
-        return mm.x_OUT[t, q, tau, h] <= float(R_out[t]) * mm.z_OUT[q, tau, h]
-    m.Gate_OUT = pyo.Constraint(m.OutArcs, rule=_gate_out)
-
-    def _gate_ret(mm, t, q, tau, h):
-        return mm.x_RET[t, q, tau, h] <= float(R_ret[t]) * mm.z_RET[q, tau, h]
-    m.Gate_RET = pyo.Constraint(m.RetArcs, rule=_gate_ret)
-
-    def _cap_out(mm, q, tau):
-        rel = out_arc_index.get((int(q), int(tau)), [])
-        if not rel:
-            return pyo.Constraint.Skip
-        return sum(mm.x_OUT[t, q, tau, h] for (t, q, tau, h) in rel) <= float(P.S) * sum(mm.z_OUT[q, tau, h] for h in out_choice_map[(int(q), int(tau))])
-    m.Cap_OUT = pyo.Constraint(out_events, rule=_cap_out)
-
-    def _cap_ret(mm, q, tau):
-        rel = ret_arc_index.get((int(q), int(tau)), [])
-        if not rel:
-            return pyo.Constraint.Skip
-        return sum(mm.x_RET[t, q, tau, h] for (t, q, tau, h) in rel) <= float(P.S) * sum(mm.z_RET[q, tau, h] for h in ret_choice_map[(int(q), int(tau))])
-    m.Cap_RET = pyo.Constraint(ret_events, rule=_cap_ret)
-
-    for t, cutoffs in out_cutoffs_by_t.items():
-        for cutoff in sorted(cutoffs):
-            rel = [(q, tau, h) for (tt, q, tau, h) in out_arcs if int(tt) == int(t) and int(h) <= int(cutoff)]
-            if not rel:
-                continue
-            eligible = float(eligible_out_prefix.get((int(t), int(cutoff)), 0.0))
-            m.add_component(
-                f"EligPrefixOut_{int(t)}_{int(cutoff)}",
-                pyo.Constraint(expr=sum(m.x_OUT[t, q, tau, h] for (q, tau, h) in rel) <= eligible),
-            )
-    for t, cutoffs in ret_cutoffs_by_t.items():
-        for cutoff in sorted(cutoffs):
-            rel = [(q, tau, h) for (tt, q, tau, h) in ret_arcs if int(tt) == int(t) and int(h) <= int(cutoff)]
-            if not rel:
-                continue
-            eligible = float(eligible_ret_prefix.get((int(t), int(cutoff)), 0.0))
-            m.add_component(
-                f"EligPrefixRet_{int(t)}_{int(cutoff)}",
-                pyo.Constraint(expr=sum(m.x_RET[t, q, tau, h] for (q, tau, h) in rel) <= eligible),
-            )
-
-    build_stats = _model_size_stats(m)
-    lp_path = None
-    lp_export_time = 0.0
-    try:
-        lp_path, lp_export_time = _maybe_export_lp(m, P)
-    except Exception:
-        lp_path, lp_export_time = (None, 0.0)
-    t_build1 = time.perf_counter()
-
-    solver = pyo.SolverFactory(P.lp_solver)
-    try:
-        if getattr(P, "solver_options", None):
-            for k, v in (P.solver_options or {}).items():
-                solver.options[k] = v
-    except Exception:
-        pass
-    _apply_solver_time_limit(solver, getattr(P, "solve_time_limit_s", None))
-    t_solve0 = time.perf_counter()
-    res = solver.solve(m, tee=bool(getattr(P, "debug_solver_tee", False)), load_solutions=False)
-    t_solve1 = time.perf_counter()
-    term = getattr(res.solver, "termination_condition", None)
-    if term not in (pyo.TerminationCondition.optimal, pyo.TerminationCondition.feasible):
-        raise RuntimeError(f"Refined LP-relaxation solve failed: termination_condition={term}")
-    try:
-        m.solutions.load_from(res)
-    except Exception:
-        pass
-    t_extract0 = time.perf_counter()
-
-    coeff_y_out = {(int(q), int(tau)): 0.0 for q in Qset for tau in Tset}
-    coeff_y_ret = {(int(q), int(tau)): 0.0 for q in Qset for tau in Tset}
-    for (q, tau) in out_events:
-        coeff_y_out[(int(q), int(tau))] = float(m.dual.get(m.Act_OUT[q, tau], 0.0))
-    for (q, tau) in ret_events:
-        coeff_y_ret[(int(q), int(tau))] = float(m.dual.get(m.Act_RET[q, tau], 0.0))
-
-    y_out_sum = sum(float(coeff_y_out[(int(q), int(tau))]) * float(_cand_float(candidate, f"yOUT[{int(q)},{int(tau)}]", 0.0)) for q in Qset for tau in Tset)
-    y_ret_sum = sum(float(coeff_y_ret[(int(q), int(tau))]) * float(_cand_float(candidate, f"yRET[{int(q)},{int(tau)}]", 0.0)) for q in Qset for tau in Tset)
-    obj_val = float(pyo.value(m.obj))
-    const = float(obj_val) - float(y_out_sum) - float(y_ret_sum)
-
-    out_cost = sum(_wait_slots(t, h) * float(m.x_OUT[t, q, tau, h].value or 0.0) for (t, q, tau, h) in out_arcs)
-    out_cost += float(P.p) * sum(float(m.u_OUT[t].value or 0.0) for t in Tset)
-    ret_cost = sum(_wait_slots(t, h) * float(m.x_RET[t, q, tau, h].value or 0.0) for (t, q, tau, h) in ret_arcs)
-    ret_cost += float(P.p) * sum(float(m.u_RET[t].value or 0.0) for t in Tset)
-    const_out = float(out_cost) - float(y_out_sum)
-    const_ret = float(ret_cost) - float(y_ret_sum)
-
-    served_out_by_tau = [0.0 for _ in Tset]
-    served_ret_by_tau = [0.0 for _ in Tset]
-    for (t, q, tau, h) in out_arcs:
-        served_out_by_tau[int(tau)] += float(m.x_OUT[t, q, tau, h].value or 0.0)
-    for (t, q, tau, h) in ret_arcs:
-        served_ret_by_tau[int(tau)] += float(m.x_RET[t, q, tau, h].value or 0.0)
-    penalty_pax = float(sum(float(m.u_OUT[t].value or 0.0) for t in Tset) + sum(float(m.u_RET[t].value or 0.0) for t in Tset))
-    wait_cost_slots = float(out_cost + ret_cost - float(P.p) * penalty_pax)
-    t_extract1 = time.perf_counter()
-
-    return (
-        {
-            "objective_value": obj_val,
-            "const": float(const),
-            "const_out": float(const_out),
-            "const_ret": float(const_ret),
-            "coeff_yOUT": coeff_y_out,
-            "coeff_yRET": coeff_y_ret,
-            "served_out_by_tau": served_out_by_tau,
-            "served_ret_by_tau": served_ret_by_tau,
-            "served_out_by_tau_k": [[] for _ in Tset],
-            "served_ret_by_tau_k": [[] for _ in Tset],
-            "waiting_cost_slots": wait_cost_slots,
-            "fill_eps_cost": 0.0,
-            "penalty_cost": float(P.p) * penalty_pax,
-            "penalty_pax": penalty_pax,
-            "served_total": float(sum(served_out_by_tau) + sum(served_ret_by_tau)),
-            "total_demand": float(sum(R_out) + sum(R_ret)),
-            "timing_build_s": float(t_build1 - t_build0),
-            "timing_solve_s": float(t_solve1 - t_solve0),
-            "timing_extract_s": float(t_extract1 - t_extract0),
-            "timing_postprocess_s": 0.0,
-            "timing_lp_export_s": float(lp_export_time),
-            "exported_lp_path": lp_path,
-            "cut_valid_lower_bound": True,
-            "cut_generation_mode": "refined_lp_relaxation",
-            **build_stats,
-        },
-        obj_val,
-    )
-
-
-def solve_refined_subproblem(
-    P: "SPParams",
-    R_out: Iterable[float],
-    R_ret: Iterable[float],
-    candidate: Candidate | None = None,
-):
-    t_build0 = time.perf_counter()
-    m = pyo.ConcreteModel()
-    m.name = "subproblem_refined"
-    R_out = [float(v) for v in R_out]
-    R_ret = [float(v) for v in R_ret]
-    slot_res = max(1, int(P.slot_resolution))
-    step = max(1, int(P.time_step_minutes))
-    W_minutes = int(P.Wmax_slots) * slot_res
-    trip_minutes = int(P.trip_duration_minutes or (int(P.trip_slots or 0) * slot_res))
-    charge_rate = float(P.delta_chg or 0.0) / float(slot_res)
-    emax = float(P.Emax) if P.Emax is not None else float("inf")
-    events = _build_service_events(candidate, P)
-    charge_prof = _charge_profile(candidate, P)
-    binit = _normalize_binit(P)
-
-    if not events:
-        penalty_pax = float(sum(R_out) + sum(R_ret))
-        return (
-            {
-                "is_feasible": True,
-                "alpha_OUT": {},
-                "alpha_RET": {},
-                "pi_OUT": {},
-                "pi_RET": {},
-                "served_out_by_tau": [0.0 for _ in range(int(P.T))],
-                "served_ret_by_tau": [0.0 for _ in range(int(P.T))],
-                "served_out_by_tau_k": [[] for _ in range(int(P.T))],
-                "served_ret_by_tau_k": [[] for _ in range(int(P.T))],
-                "realized_departures": [],
-                "realized_departure_min_map": {},
-                "refined_departure_diagnostics": [],
-                "refined_departure_diagnostics_focus": [],
-                "effective_pre_service": [],
-                "battery_trajectory": {},
-                "objective_value": float(P.p) * penalty_pax,
-                "waiting_cost_slots": 0.0,
-                "fill_eps_cost": 0.0,
-                "penalty_cost": float(P.p) * penalty_pax,
-                "penalty_pax": penalty_pax,
-                "served_total": 0.0,
-                "total_demand": penalty_pax,
-                "ub_out": float(P.p) * float(sum(R_out)),
-                "ub_ret": float(P.p) * float(sum(R_ret)),
-            },
-            float(P.p) * penalty_pax,
-        )
-
-    event_ids = [e.sid for e in events]
-    event_by_id = {e.sid: e for e in events}
-    time_choices = []
-    force_nominal = bool(getattr(P, "debug_force_nominal_departures", False))
-    for e in events:
-        if force_nominal:
-            time_choices.append((e.sid, int(e.nominal_min)))
-        else:
-            for h in range(e.window_lb_min, e.window_ub_min + 1, step):
-                time_choices.append((e.sid, h))
-    choice_map: dict[int, list[int]] = {}
-    for sid, h in time_choices:
-        choice_map.setdefault(sid, []).append(h)
-    for sid in event_ids:
-        if not choice_map.get(sid):
-            event = event_by_id[sid]
-            raise RuntimeError(
-                "No feasible realized departure choices for service slot "
-                f"q={event.q} tau={event.tau} window=[{event.window_lb_min},{event.window_ub_min}]"
-            )
-
-    m.EventTimes = pyo.Set(initialize=time_choices, dimen=2, ordered=False)
-    m.z = pyo.Var(m.EventTimes, within=pyo.Binary)
-    m.b_after = pyo.Var(event_ids, within=pyo.NonNegativeReals)
-    m.Dep = pyo.Expression(event_ids, rule=lambda mm, sid: sum(h * mm.z[sid, h] for h in choice_map[sid]))
-    m.OneHot = pyo.Constraint(event_ids, rule=lambda mm, sid: sum(mm.z[sid, h] for h in choice_map[sid]) == 1)
-
-    if trip_minutes > 0:
-        def _precedence_rule(mm, sid):
-            event = event_by_id[sid]
-            if event.prev_sid is None:
-                return pyo.Constraint.Skip
-            return mm.Dep[sid] >= mm.Dep[event.prev_sid] + trip_minutes
-        m.Precedence = pyo.Constraint(event_ids, rule=_precedence_rule)
-
-    battery_cons: list[tuple[int, int, Optional[int], Optional[int], float]] = []
-    for event in events:
-        if event.prev_sid is None:
-            base_batt = float(binit[event.q] if event.q < len(binit) else 0.0)
-            for h in choice_map[event.sid]:
-                gain = charge_rate * _charge_minutes_between(event.q, 0.0, float(h), charge_prof, slot_res, int(P.T))
-                rhs = base_batt + gain - float(P.L or 0.0)
-                cname = f"BattInitHi_{event.sid}_{h}"
-                m.add_component(cname, pyo.Constraint(expr=m.b_after[event.sid] <= rhs + 1.0e6 * (1 - m.z[event.sid, h])))
-                cname = f"BattInitLo_{event.sid}_{h}"
-                m.add_component(cname, pyo.Constraint(expr=m.b_after[event.sid] >= rhs - 1.0e6 * (1 - m.z[event.sid, h])))
-                cname = f"BattInitFeas_{event.sid}_{h}"
-                m.add_component(cname, pyo.Constraint(expr=base_batt + gain + 1.0e6 * (1 - m.z[event.sid, h]) >= float(P.L or 0.0)))
-        else:
-            prev_sid = int(event.prev_sid)
-            for hp in choice_map[prev_sid]:
-                for h in choice_map[event.sid]:
-                    gain = charge_rate * _charge_minutes_between(
-                        event.q,
-                        float(hp + trip_minutes),
-                        float(h),
-                        charge_prof,
-                        slot_res,
-                        int(P.T),
-                    )
-                    rhs = gain - float(P.L or 0.0)
-                    cname = f"BattHi_{prev_sid}_{hp}_{event.sid}_{h}"
-                    m.add_component(cname, pyo.Constraint(expr=m.b_after[event.sid] <= m.b_after[prev_sid] + rhs + 1.0e6 * (2 - m.z[prev_sid, hp] - m.z[event.sid, h])))
-                    cname = f"BattLo_{prev_sid}_{hp}_{event.sid}_{h}"
-                    m.add_component(cname, pyo.Constraint(expr=m.b_after[event.sid] >= m.b_after[prev_sid] + rhs - 1.0e6 * (2 - m.z[prev_sid, hp] - m.z[event.sid, h])))
-                    cname = f"BattFeas_{prev_sid}_{hp}_{event.sid}_{h}"
-                    m.add_component(cname, pyo.Constraint(expr=m.b_after[prev_sid] + gain + 1.0e6 * (2 - m.z[prev_sid, hp] - m.z[event.sid, h]) >= float(P.L or 0.0)))
-
-    out_events = [e for e in events if e.direction == "OUT"]
-    ret_events = [e for e in events if e.direction == "RET"]
-    out_by_sid = {e.sid: e for e in out_events}
-    ret_by_sid = {e.sid: e for e in ret_events}
-
-    out_arcs = []
-    for t, dem in enumerate(R_out):
-        if dem <= 0.0:
-            continue
-        release = _demand_release_min(int(t), slot_res)
-        for e in out_events:
-            for h in choice_map[e.sid]:
-                if release <= h <= release + W_minutes:
-                    out_arcs.append((t, e.sid, h))
-    ret_arcs = []
-    for t, dem in enumerate(R_ret):
-        if dem <= 0.0:
-            continue
-        release = _demand_release_min(int(t), slot_res)
-        for e in ret_events:
-            for h in choice_map[e.sid]:
-                if release <= h <= release + W_minutes:
-                    ret_arcs.append((t, e.sid, h))
-
-    out_cutoffs_by_t: dict[int, set[int]] = {}
-    ret_cutoffs_by_t: dict[int, set[int]] = {}
-    for t, _sid, h in out_arcs:
-        out_cutoffs_by_t.setdefault(int(t), set()).add(int(h))
-    for t, _sid, h in ret_arcs:
-        ret_cutoffs_by_t.setdefault(int(t), set()).add(int(h))
-    eligible_out_prefix = _eligible_arrivals_by_slot_and_cutoff(
-        R_out,
-        getattr(P, "arrival_minutes_out", None),
-        int(P.T),
-        slot_res,
-        out_cutoffs_by_t,
-    )
-    eligible_ret_prefix = _eligible_arrivals_by_slot_and_cutoff(
-        R_ret,
-        getattr(P, "arrival_minutes_ret", None),
-        int(P.T),
-        slot_res,
-        ret_cutoffs_by_t,
-    )
-
-    m.OutArcs = pyo.Set(initialize=out_arcs, dimen=3, ordered=False)
-    m.RetArcs = pyo.Set(initialize=ret_arcs, dimen=3, ordered=False)
-    m.x_OUT = pyo.Var(m.OutArcs, within=pyo.NonNegativeReals)
-    m.x_RET = pyo.Var(m.RetArcs, within=pyo.NonNegativeReals)
-    m.u_OUT = pyo.Var(range(len(R_out)), within=pyo.NonNegativeReals)
-    m.u_RET = pyo.Var(range(len(R_ret)), within=pyo.NonNegativeReals)
-
-    def _wait_slots(t: int, h: int) -> float:
-        return _wait_slots_from_minute(int(t), int(h), slot_res)
-
-    m.obj = pyo.Objective(
-        expr=
-        sum((_wait_slots(t, h) + float(P.fill_eps or 0.0) * float(out_by_sid[sid].layer_index)) * m.x_OUT[t, sid, h] for (t, sid, h) in m.OutArcs)
-        + sum((_wait_slots(t, h) + float(P.fill_eps or 0.0) * float(ret_by_sid[sid].layer_index)) * m.x_RET[t, sid, h] for (t, sid, h) in m.RetArcs)
-        + float(P.p) * (sum(m.u_OUT[t] for t in range(len(R_out))) + sum(m.u_RET[t] for t in range(len(R_ret)))),
-        sense=pyo.minimize,
-    )
-
-    def _dem_out(mm, t):
-        rel = [(sid, h) for (tt, sid, h) in mm.OutArcs if tt == t]
-        return sum(mm.x_OUT[t, sid, h] for (sid, h) in rel) + mm.u_OUT[t] == float(R_out[t])
-    m.D_out_refined = pyo.Constraint(range(len(R_out)), rule=_dem_out)
-
-    def _dem_ret(mm, t):
-        rel = [(sid, h) for (tt, sid, h) in mm.RetArcs if tt == t]
-        return sum(mm.x_RET[t, sid, h] for (sid, h) in rel) + mm.u_RET[t] == float(R_ret[t])
-    m.D_ret_refined = pyo.Constraint(range(len(R_ret)), rule=_dem_ret)
-
-    for (t, sid, h) in out_arcs:
-        m.add_component(f"GateOut_{t}_{sid}_{h}", pyo.Constraint(expr=m.x_OUT[t, sid, h] <= float(R_out[t]) * m.z[sid, h]))
-    for (t, sid, h) in ret_arcs:
-        m.add_component(f"GateRet_{t}_{sid}_{h}", pyo.Constraint(expr=m.x_RET[t, sid, h] <= float(R_ret[t]) * m.z[sid, h]))
-
-    def _cap_out(mm, sid):
-        rel = [(t, h) for (t, sid2, h) in mm.OutArcs if sid2 == sid]
-        if not rel:
-            return pyo.Constraint.Skip
-        return sum(mm.x_OUT[t, sid, h] for (t, h) in rel) <= float(P.S)
-    m.Cap_out_refined = pyo.Constraint([e.sid for e in out_events], rule=_cap_out)
-
-    def _cap_ret(mm, sid):
-        rel = [(t, h) for (t, sid2, h) in mm.RetArcs if sid2 == sid]
-        if not rel:
-            return pyo.Constraint.Skip
-        return sum(mm.x_RET[t, sid, h] for (t, h) in rel) <= float(P.S)
-    m.Cap_ret_refined = pyo.Constraint([e.sid for e in ret_events], rule=_cap_ret)
-
-    for t, cutoffs in out_cutoffs_by_t.items():
-        for cutoff in sorted(cutoffs):
-            rel = [(sid, h) for (tt, sid, h) in out_arcs if int(tt) == int(t) and int(h) <= int(cutoff)]
-            if not rel:
-                continue
-            eligible = float(eligible_out_prefix.get((int(t), int(cutoff)), 0.0))
-            m.add_component(
-                f"EligPrefixOut_{int(t)}_{int(cutoff)}",
-                pyo.Constraint(expr=sum(m.x_OUT[t, sid, h] for (sid, h) in rel) <= eligible),
-            )
-    for t, cutoffs in ret_cutoffs_by_t.items():
-        for cutoff in sorted(cutoffs):
-            rel = [(sid, h) for (tt, sid, h) in ret_arcs if int(tt) == int(t) and int(h) <= int(cutoff)]
-            if not rel:
-                continue
-            eligible = float(eligible_ret_prefix.get((int(t), int(cutoff)), 0.0))
-            m.add_component(
-                f"EligPrefixRet_{int(t)}_{int(cutoff)}",
-                pyo.Constraint(expr=sum(m.x_RET[t, sid, h] for (sid, h) in rel) <= eligible),
-            )
-
-    build_stats = _model_size_stats(m)
-    lp_path = None
-    lp_export_time = 0.0
-    try:
-        lp_path, lp_export_time = _maybe_export_lp(m, P)
-    except Exception:
-        lp_path, lp_export_time = (None, 0.0)
-    t_build1 = time.perf_counter()
-
-    solver = pyo.SolverFactory(P.lp_solver)
-    try:
-        if P.solver_options:
-            for k, v in P.solver_options.items():
-                solver.options[k] = v
-    except Exception:
-        pass
-    _apply_solver_time_limit(solver, getattr(P, "solve_time_limit_s", None))
-    if getattr(P, "debug_timing", False):
-        print(
-            "[SP DEBUG] iter=%s scenario=%s refined build=%.3fs vars=%s bin=%s cons=%s lp=%s"
-            % (
-                str(getattr(P, "debug_current_iteration", -1)),
-                str(getattr(P, "debug_scenario_label", "single")),
-                float(t_build1 - t_build0),
-                build_stats["model_num_variables"],
-                build_stats["model_num_binary_variables"],
-                build_stats["model_num_constraints"],
-                lp_path or "-",
-            )
-        )
-    t_solve0 = time.perf_counter()
-    res = solver.solve(m, tee=bool(getattr(P, "debug_solver_tee", False)), load_solutions=False)
-    t_solve1 = time.perf_counter()
-    term = getattr(res.solver, "termination_condition", None)
-    infeasible_terms = {
-        pyo.TerminationCondition.infeasible,
-        pyo.TerminationCondition.infeasibleOrUnbounded,
-    }
-    if term in infeasible_terms:
-        first = _first_violation(events, charge_prof, P)
-        return (
-            {
-                "is_feasible": False,
-                "infeasible": True,
-                "infeasibility_reason": "Refined timing/battery schedule is infeasible.",
-                "first_violation": first,
-                "refined_departure_diagnostics": [],
-                "refined_departure_diagnostics_focus": [],
-                "timing_build_s": float(t_build1 - t_build0),
-                "timing_solve_s": float(t_solve1 - t_solve0),
-                "timing_extract_s": 0.0,
-                "timing_postprocess_s": 0.0,
-                "timing_lp_export_s": float(lp_export_time),
-                **build_stats,
-            },
-            float("inf"),
-        )
-    load_ok = False
-    try:
-        m.solutions.load_from(res)
-        load_ok = _has_loaded_solution(m)
-    except Exception:
-        load_ok = False
-    time_limited_with_incumbent = term == pyo.TerminationCondition.maxTimeLimit and load_ok
-    if term not in (pyo.TerminationCondition.optimal, pyo.TerminationCondition.feasible) and not time_limited_with_incumbent:
-        raise RuntimeError(f"Refined subproblem solve failed: termination_condition={term}")
-    t_extract0 = time.perf_counter()
-
-    served_out_by_tau = [0.0 for _ in range(int(P.T))]
-    served_ret_by_tau = [0.0 for _ in range(int(P.T))]
-    served_out_by_tau_k = [[] for _ in range(int(P.T))]
-    served_ret_by_tau_k = [[] for _ in range(int(P.T))]
-    out_layer_sizes: dict[int, int] = {}
-    ret_layer_sizes: dict[int, int] = {}
-    for e in out_events:
-        out_layer_sizes[e.tau] = max(out_layer_sizes.get(e.tau, 0), e.layer_index + 1)
-    for e in ret_events:
-        ret_layer_sizes[e.tau] = max(ret_layer_sizes.get(e.tau, 0), e.layer_index + 1)
-    for tau, size in out_layer_sizes.items():
-        served_out_by_tau_k[tau] = [0.0 for _ in range(size)]
-    for tau, size in ret_layer_sizes.items():
-        served_ret_by_tau_k[tau] = [0.0 for _ in range(size)]
-
-    realized_departures: list[dict[str, Any]] = []
-    realized_departure_min_map: dict[tuple[int, int], float] = {}
-    effective_pre_service: list[dict[str, Any]] = []
-    battery_trajectory: dict[str, list[dict[str, Any]]] = {}
-    refined_departure_diagnostics: list[dict[str, Any]] = []
-    wait_cost_slots = 0.0
-    fill_eps_cost = 0.0
-    ub_out = 0.0
-    ub_ret = 0.0
-    dep_by_sid: dict[int, float] = {}
-    x_out_vals: dict[tuple[int, int, int], float] = {}
-    x_ret_vals: dict[tuple[int, int, int], float] = {}
-    out_arcs_by_sid: dict[int, list[tuple[int, int, int]]] = {}
-    ret_arcs_by_sid: dict[int, list[tuple[int, int, int]]] = {}
-    for sid, h in time_choices:
-        z_val = float(m.z[sid, h].value or 0.0)
-        if z_val >= 0.5:
-            dep_by_sid[sid] = float(h)
-    for sid in event_ids:
-        dep_by_sid.setdefault(sid, float(choice_map[sid][0]))
-    _validate_realized_departure_minutes(events, dep_by_sid, slot_res)
-    for arc in out_arcs:
-        val = float(m.x_OUT[arc].value or 0.0)
-        x_out_vals[arc] = val
-        out_arcs_by_sid.setdefault(int(arc[1]), []).append(arc)
-    for arc in ret_arcs:
-        val = float(m.x_RET[arc].value or 0.0)
-        x_ret_vals[arc] = val
-        ret_arcs_by_sid.setdefault(int(arc[1]), []).append(arc)
-
-    for e in out_events:
-        served = sum(x_out_vals[arc] for arc in out_arcs_by_sid.get(e.sid, []))
-        served_out_by_tau[e.tau] += served
-        served_out_by_tau_k[e.tau][e.layer_index] = served
-    for e in ret_events:
-        served = sum(x_ret_vals[arc] for arc in ret_arcs_by_sid.get(e.sid, []))
-        served_ret_by_tau[e.tau] += served
-        served_ret_by_tau_k[e.tau][e.layer_index] = served
-
-    for e in out_events:
-        dep = float(dep_by_sid[e.sid])
-        boarded = float(sum(x_out_vals[arc] for arc in out_arcs_by_sid.get(e.sid, [])))
-        eligible = _direction_eligible_arrivals_by_minute(
-            R_out,
-            getattr(P, "arrival_minutes_out", None),
-            int(P.T),
-            slot_res,
-            dep,
-        )
-        refined_departure_diagnostics.append({
-            "vehicle_id": int(e.q),
-            "direction": "OUT",
-            "slot": int(e.tau),
-            "departure_min": dep,
-            "boarded": boarded,
-            "eligible_arrivals": eligible,
-            "violation": bool(boarded > eligible + 1.0e-9),
-        })
-    for e in ret_events:
-        dep = float(dep_by_sid[e.sid])
-        boarded = float(sum(x_ret_vals[arc] for arc in ret_arcs_by_sid.get(e.sid, [])))
-        eligible = _direction_eligible_arrivals_by_minute(
-            R_ret,
-            getattr(P, "arrival_minutes_ret", None),
-            int(P.T),
-            slot_res,
-            dep,
-        )
-        refined_departure_diagnostics.append({
-            "vehicle_id": int(e.q),
-            "direction": "RET",
-            "slot": int(e.tau),
-            "departure_min": dep,
-            "boarded": boarded,
-            "eligible_arrivals": eligible,
-            "violation": bool(boarded > eligible + 1.0e-9),
-        })
-    refined_departure_diagnostics.sort(
-        key=lambda rec: (str(rec.get("direction", "")), float(rec.get("departure_min", 0.0)), int(rec.get("vehicle_id", 0)), int(rec.get("slot", 0)))
-    )
-    focus_counts = {"OUT": 0, "RET": 0}
-    refined_departure_diagnostics_focus: list[dict[str, Any]] = []
-    for rec in refined_departure_diagnostics:
-        direction = str(rec.get("direction", ""))
-        if focus_counts.get(direction, 0) >= 2:
-            continue
-        refined_departure_diagnostics_focus.append(dict(rec))
-        focus_counts[direction] = focus_counts.get(direction, 0) + 1
-
-    for (t, sid, h) in out_arcs:
-        val = x_out_vals[(t, sid, h)]
-        if val <= 0.0:
-            continue
-        cost = _wait_slots(t, h)
-        wait_cost_slots += cost * val
-        fill_eps_cost += float(P.fill_eps or 0.0) * float(out_by_sid[sid].layer_index) * val
-        ub_out += (cost + float(P.fill_eps or 0.0) * float(out_by_sid[sid].layer_index)) * val
-    for (t, sid, h) in ret_arcs:
-        val = x_ret_vals[(t, sid, h)]
-        if val <= 0.0:
-            continue
-        cost = _wait_slots(t, h)
-        wait_cost_slots += cost * val
-        fill_eps_cost += float(P.fill_eps or 0.0) * float(ret_by_sid[sid].layer_index) * val
-        ub_ret += (cost + float(P.fill_eps or 0.0) * float(ret_by_sid[sid].layer_index)) * val
-
-    u_out_vals = [float(m.u_OUT[t].value or 0.0) for t in range(len(R_out))]
-    u_ret_vals = [float(m.u_RET[t].value or 0.0) for t in range(len(R_ret))]
-    penalty_pax = float(sum(u_out_vals) + sum(u_ret_vals))
-    penalty_cost = float(P.p) * penalty_pax
-    total_demand = float(sum(R_out) + sum(R_ret))
-    served_total = float(sum(served_out_by_tau) + sum(served_ret_by_tau))
-    obj_val = float(pyo.value(m.obj))
-    t_extract1 = time.perf_counter()
-
-    t_post0 = time.perf_counter()
-    for q in range(int(P.Q)):
-        seq = [e for e in events if e.q == q]
-        seq.sort(key=lambda e: e.sid)
-        batt = float(binit[q] if q < len(binit) else 0.0)
-        prev_dep = 0.0
-        prev_event: Optional[RefinedServiceEvent] = None
-        battery_trajectory[str(q)] = []
-        for e in seq:
-            dep = dep_by_sid[e.sid]
-            charge_min = _charge_minutes_between(q, prev_dep + trip_minutes if prev_event is not None else 0.0, dep, charge_prof, slot_res, int(P.T))
-            idle_min = max(0.0, dep - (prev_dep + trip_minutes if prev_event is not None else 0.0) - charge_min)
-            batt = min(emax, batt + charge_rate * charge_min) - float(P.L or 0.0)
-            battery_trajectory[str(q)].append({
-                "slot": e.tau,
-                "direction": e.direction,
-                "departure_min": dep,
-                "battery_after": batt,
-            })
-            realized_departures.append({
-                "vehicle_id": e.q,
-                "slot": e.tau,
-                "direction": e.direction,
-                "nominal_departure_min": e.nominal_min,
-                "realized_departure_min": dep,
-            })
-            realized_departure_min_map[(int(e.q), int(e.tau))] = float(dep)
-            effective_pre_service.append({
-                "vehicle_id": e.q,
-                "slot": e.tau,
-                "direction": e.direction,
-                "charge_minutes": charge_min,
-                "idle_minutes": idle_min,
-                "battery_after": batt,
-                "predecessor_slot": prev_event.tau if prev_event is not None else None,
-            })
-            prev_dep = dep
-            prev_event = e
-    t_post1 = time.perf_counter()
-
-    return (
-        {
-            "is_feasible": True,
-            "alpha_OUT": {},
-            "alpha_RET": {},
-            "pi_OUT": {},
-            "pi_RET": {},
-            "served_out_by_tau": served_out_by_tau,
-            "served_ret_by_tau": served_ret_by_tau,
-            "served_out_by_tau_k": served_out_by_tau_k,
-            "served_ret_by_tau_k": served_ret_by_tau_k,
-            "realized_departures": realized_departures,
-            "realized_departure_min_map": realized_departure_min_map,
-            "refined_departure_diagnostics": refined_departure_diagnostics,
-            "refined_departure_diagnostics_focus": refined_departure_diagnostics_focus,
-            "effective_pre_service": effective_pre_service,
-            "battery_trajectory": battery_trajectory,
-            "ub_out": ub_out + float(P.p) * float(sum(u_out_vals)),
-            "ub_ret": ub_ret + float(P.p) * float(sum(u_ret_vals)),
-            "objective_value": obj_val,
-            "waiting_cost_slots": wait_cost_slots,
-            "fill_eps_cost": fill_eps_cost,
-            "penalty_cost": penalty_cost,
-            "penalty_pax": penalty_pax,
-            "served_total": served_total,
-            "total_demand": total_demand,
-            "timing_build_s": float(t_build1 - t_build0),
-            "timing_solve_s": float(t_solve1 - t_solve0),
-            "timing_extract_s": float(t_extract1 - t_extract0),
-            "timing_postprocess_s": float(t_post1 - t_post0),
-            "timing_lp_export_s": float(lp_export_time),
-            "exported_lp_path": lp_path,
-            "time_limited_incumbent": bool(time_limited_with_incumbent),
-            **build_stats,
-        },
-        obj_val,
-    )
-
-
 @dataclass
 class SPParams:
     T: int
@@ -2923,8 +1555,6 @@ class SPParams:
     Emax: float | None = None
     L: float | None = None
     delta_chg: float | None = None
-    arrival_minutes_out: list[float] | None = None
-    arrival_minutes_ret: list[float] | None = None
     eps_feas: float = 1e-7
     debug_timing: bool = False
     debug_solver_tee: bool = False
