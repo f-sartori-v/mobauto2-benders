@@ -123,7 +123,6 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     _set_if_not_none(sp, "Wmax_slots", cfg.subproblem.Wmax_slots)
     sp["p"] = cfg.subproblem.p
     sp["fill_first_epsilon"] = float(cfg.subproblem.fill_first_epsilon)
-    sp["unused_capacity_penalty"] = float(cfg.subproblem.unused_capacity_penalty)
     sp["degenerate_cut_probe_top_k"] = int(cfg.subproblem.degenerate_cut_probe_top_k)
     _set_if_not_none(sp, "degenerate_cut_probe_top_k_out", cfg.subproblem.degenerate_cut_probe_top_k_out)
     _set_if_not_none(sp, "degenerate_cut_probe_top_k_ret", cfg.subproblem.degenerate_cut_probe_top_k_ret)

@@ -48,8 +48,22 @@ model:
     delta_chg: 70 / (60 / slot_resolution)
   costs:
     # Small penalty on starting trips
+    # Departure regularisation (D4). At 0.01, 100 extra trips equal one unit of
+    # waiting-time reduction, so it only breaks ties between equal-waiting
+    # solutions and never competes with the primary objective.
     start_cost_epsilon: 0.01
-    # Small penalty per extra concurrent departure beyond 1 per slot
+    # Penalty per extra concurrent departure beyond one per slot per direction.
+    # Adds conc_pen * sum_t (eOut[t] + eRet[t]) to the master objective, where
+    # eOut[t] >= Yout[t] - 1 captures departures beyond the first in slot t.
+    # Operationally it spreads departures rather than bunching both shuttles into
+    # the same slot.
+    #
+    # This term is NOT part of the originally published formulation. It is small
+    # in magnitude -- about 1.75 of a ~4190 objective on the baseline instance,
+    # roughly 7 penalised slots -- but large enough to select between otherwise
+    # equal schedules, so state the value used on every reported table. It is a
+    # separate knob from start_cost_epsilon above and must not be conflated with
+    # it (D4).
     concurrency_penalty: 0.25
 
 master:
@@ -95,8 +109,6 @@ subproblem:
   p: 50.0
   # Tiny tie-breaker cost encouraging packing
   fill_first_epsilon: 1.0e-6
-  # Penalty per unit of unused seat-capacity
-  unused_capacity_penalty: 0.5
   # Restricted fallback probing when proxy cuts are degenerate
   degenerate_cut_probe_top_k: 6
   # Treat slopes with max abs value below this threshold as zero
