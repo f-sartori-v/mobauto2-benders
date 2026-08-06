@@ -238,19 +238,13 @@ class ProblemMaster(MasterProblem):
 
         # inTrip equality: 1 during travel slots strictly after a start until arrival
         # For a start at time u, travel occupies slots t in {u+1, ..., u+trip_slots-1}
-        for q in m.Q:
-            for t in m.T:
-                lo = max(0, t - trip_slots + 1)
-                hi = t - 1
-                if lo <= hi:
-                    m.add_component(
-                        f"C1b_intrip_eq_{q}_{t}",
-                        pyo.Constraint(expr=m.inTrip[q, t] == sum(m.yOUT[q, u] + m.yRET[q, u] for u in range(lo, hi + 1))),
-                    )
-                else:
-                    m.add_component(
-                        f"C1b_intrip_zero_{q}_{t}", pyo.Constraint(expr=m.inTrip[q, t] == 0)
-                    )
+        def _c1b_intrip_rule(m, q, t):
+            lo = max(0, t - trip_slots + 1)
+            hi = t - 1
+            if lo <= hi:
+                return m.inTrip[q, t] == sum(m.yOUT[q, u] + m.yRET[q, u] for u in range(lo, hi + 1))
+            return m.inTrip[q, t] == 0
+        m.C1b_intrip = pyo.Constraint(m.Q, m.T, rule=_c1b_intrip_rule)
 
         # Block actions when in trip (keeps starts and charging off while busy)
         m.C1c = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yOUT[q, t] + m.yRET[q, t] + m.c[q, t] <= 1 - m.inTrip[q, t])
@@ -274,20 +268,21 @@ class ProblemMaster(MasterProblem):
                 m.yOUT[q, t].fix(0)
 
         # Occupancy recursions: leave Longvilliers when starting OUT; arrive to Longvilliers after RET duration
-        for q in m.Q:
-            for t in range(1, T):
-                # Arrivals from RET into Longvilliers at t from starts at (t - trip_slots)
-                arr_ret = m.yRET[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
-                m.add_component(
-                    f"C2a_locL_{q}_{t}",
-                    pyo.Constraint(expr=m.atL[q, t] == m.atL[q, t - 1] - m.yOUT[q, t - 1] + arr_ret),
-                )
-                # Arrivals from OUT into Massy at t from starts at (t - trip_slots)
-                arr_out = m.yOUT[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
-                m.add_component(
-                    f"C2a_locM_{q}_{t}",
-                    pyo.Constraint(expr=m.atM[q, t] == m.atM[q, t - 1] - m.yRET[q, t - 1] + arr_out),
-                )
+        def _c2a_locL_rule(m, q, t):
+            if t < 1:
+                return pyo.Constraint.Skip
+            # Arrivals from RET into Longvilliers at t from starts at (t - trip_slots)
+            arr_ret = m.yRET[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
+            return m.atL[q, t] == m.atL[q, t - 1] - m.yOUT[q, t - 1] + arr_ret
+        m.C2a_locL = pyo.Constraint(m.Q, m.T, rule=_c2a_locL_rule)
+
+        def _c2a_locM_rule(m, q, t):
+            if t < 1:
+                return pyo.Constraint.Skip
+            # Arrivals from OUT into Massy at t from starts at (t - trip_slots)
+            arr_out = m.yOUT[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
+            return m.atM[q, t] == m.atM[q, t - 1] - m.yRET[q, t - 1] + arr_out
+        m.C2a_locM = pyo.Constraint(m.Q, m.T, rule=_c2a_locM_rule)
 
         # Gating by occupancy
         m.C2b = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yOUT[q, t] <= m.atL[q, t])
@@ -304,12 +299,11 @@ class ProblemMaster(MasterProblem):
         # - If prev was idle at L: yOUT=0, c=0, atL=1 -> RHS=0, so c[q,t]=0
         # - If prev not at L (travel/Massy): atL=0 -> RHS>=1, no restriction beyond other gates
         # - If prev had charge or departure: RHS>=something positive, allowing continued charge if feasible
-        for q in m.Q:
-            for t in range(1, T):
-                m.add_component(
-                    f"C_no_recharge_after_idle_{q}_{t}",
-                    pyo.Constraint(expr=m.c[q, t] <= m.yOUT[q, t - 1] + m.c[q, t - 1] + 1 - m.atL[q, t - 1]),
-                )
+        def _c_no_recharge_after_idle_rule(m, q, t):
+            if t < 1:
+                return pyo.Constraint.Skip
+            return m.c[q, t] <= m.yOUT[q, t - 1] + m.c[q, t - 1] + 1 - m.atL[q, t - 1]
+        m.C_no_recharge_after_idle = pyo.Constraint(m.Q, m.T, rule=_c_no_recharge_after_idle_rule)
 
         for q in m.Q:
             first_action = initial_actions[q]
@@ -379,35 +373,41 @@ class ProblemMaster(MasterProblem):
             # Total ordering is valid: any schedule can be relabelled by sorting the
             # vehicles on total trips. It also needs only Q-1 rows rather than
             # T*(Q-1).
-            for k in range(1, Q):
-                m.add_component(
-                    f"C_sym_break_tot_{k}",
-                    pyo.Constraint(
-                        expr=
-                        sum(m.yOUT[k, t] + m.yRET[k, t] for t in m.T)
-                        <= sum(m.yOUT[k - 1, t] + m.yRET[k - 1, t] for t in m.T)
-                    ),
+            def _c_sym_break_tot_rule(m, k):
+                if k < 1:
+                    return pyo.Constraint.Skip
+                return (
+                    sum(m.yOUT[k, t] + m.yRET[k, t] for t in m.T)
+                    <= sum(m.yOUT[k - 1, t] + m.yRET[k - 1, t] for t in m.T)
                 )
+            m.C_sym_break_tot = pyo.Constraint(m.Q, rule=_c_sym_break_tot_rule)
 
         for q in m.Q:
             m.b[q, 0].fix(float(binit[q]))
-            for t in range(T - 1):
-                m.add_component(
-                    f"C4_bal_{q}_{t}",
-                    pyo.Constraint(expr=m.b[q, t + 1] == m.b[q, t] - L * (m.yOUT[q, t] + m.yRET[q, t]) + m.gchg[q, t]),
-                )
-                # Charging linkage (continuous): enforce gchg[q,t] = delta_chg * c[q,t],
-                # but respect remaining capacity: gchg[q,t] <= Emax - b[q,t].
-                # With c in [0,1], the model can throttle charging fractionally.
-                m.add_component(
-                    f"C4_chg1_{q}_{t}", pyo.Constraint(expr=m.gchg[q, t] <= delta_chg * m.c[q, t])
-                )
-                m.add_component(
-                    f"C4_chg1_lb_{q}_{t}", pyo.Constraint(expr=m.gchg[q, t] >= delta_chg * m.c[q, t])
-                )
-                m.add_component(
-                    f"C4_chg2_{q}_{t}", pyo.Constraint(expr=m.gchg[q, t] <= Emax - m.b[q, t])
-                )
+
+        def _c4_bal_rule(m, q, t):
+            if t >= T - 1:
+                return pyo.Constraint.Skip
+            return m.b[q, t + 1] == m.b[q, t] - L * (m.yOUT[q, t] + m.yRET[q, t]) + m.gchg[q, t]
+        m.C4_bal = pyo.Constraint(m.Q, m.T, rule=_c4_bal_rule)
+
+        # Charging linkage (continuous): gchg[q,t] == delta_chg * c[q,t].
+        # This was previously written as two opposing inequalities (C4_chg1 and
+        # C4_chg1_lb), which is the same constraint in twice the rows -- the original
+        # comment already described it as an equality.
+        def _c4_chg_link_rule(m, q, t):
+            if t >= T - 1:
+                return pyo.Constraint.Skip
+            return m.gchg[q, t] == delta_chg * m.c[q, t]
+        m.C4_chg_link = pyo.Constraint(m.Q, m.T, rule=_c4_chg_link_rule)
+
+        # Respect remaining capacity: gchg[q,t] <= Emax - b[q,t].
+        # With c in [0,1] the model can throttle charging fractionally.
+        def _c4_chg_cap_rule(m, q, t):
+            if t >= T - 1:
+                return pyo.Constraint.Skip
+            return m.gchg[q, t] <= Emax - m.b[q, t]
+        m.C4_chg_cap = pyo.Constraint(m.Q, m.T, rule=_c4_chg_cap_rule)
 
         m.C5 = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.b[q, t] >= 2 * L * m.yOUT[q, t])
 
