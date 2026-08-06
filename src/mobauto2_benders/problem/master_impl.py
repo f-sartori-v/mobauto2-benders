@@ -885,6 +885,20 @@ class ProblemMaster(MasterProblem):
                     cand["__theta"] = float(val)
         except Exception:
             pass
+        # Directional thetas, when disaggregation is active. Without these the
+        # candidate carries no theta at all under theta_out/theta_ret, and the end
+        # of run report falls back to the LIVE model values -- i.e. the last master
+        # solve rather than the incumbent being reported.
+        try:
+            if hasattr(m, "theta_out") and hasattr(m, "theta_ret"):
+                v_out = pyo.value(m.theta_out, exception=False)
+                v_ret = pyo.value(m.theta_ret, exception=False)
+                if v_out is not None:
+                    cand["__theta_out"] = float(v_out)
+                if v_ret is not None:
+                    cand["__theta_ret"] = float(v_ret)
+        except Exception:
+            pass
         try:
             if hasattr(m, "theta_s"):
                 try:
@@ -999,6 +1013,12 @@ class ProblemMaster(MasterProblem):
         try:
             if report_candidate is not None and "__theta" in report_candidate:
                 lines.append(f"theta = {_candidate_value('__theta'):.6g}")
+            elif report_candidate is not None and "__theta_out" in report_candidate and "__theta_ret" in report_candidate:
+                t_out = _candidate_value("__theta_out")
+                t_ret = _candidate_value("__theta_ret")
+                lines.append(f"theta = {t_out + t_ret:.6g}")
+                lines.append(f"  - theta_out = {t_out:.6g}")
+                lines.append(f"  - theta_ret = {t_ret:.6g}")
             elif hasattr(m, "theta"):
                 lines.append(f"theta = {pyo.value(m.theta):.6g}")
             elif hasattr(m, "theta_out") and hasattr(m, "theta_ret"):
