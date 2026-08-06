@@ -1248,6 +1248,41 @@ class ProblemMaster(MasterProblem):
         agg_out: dict[int | tuple[int, int], float] = {}
         agg_ret: dict[int | tuple[int, int], float] = {}
         raw_pos_dm = 0
+
+        def _assert_q_invariant(coeffs: dict, direction: str) -> None:
+            """Collapsing (q,tau) -> tau is only valid if the coefficients agree across q.
+
+            Aggregation replaces sum_q coeff[q,tau]*y[q,tau] with coeff[tau]*Y[tau],
+            where Y[tau] == sum_q y[q,tau]. That substitution is an identity only when
+            coeff is the same for every q. On the production path it is, by
+            construction: the subproblem's duals are per-slot (summed over layers,
+            never indexed by vehicle) and are broadcast to every q. This check exists
+            so that a future per-vehicle formulation fails loudly here instead of
+            silently emitting an invalid cut (D10 / spec §2.7).
+            """
+            if not isinstance(coeffs, dict):
+                return
+            first: dict[int, tuple[int, float]] = {}
+            for (q, t), v in coeffs.items():
+                t_i = int(t)
+                val = float(v)
+                if t_i not in first:
+                    first[t_i] = (int(q), val)
+                    continue
+                q0, v0 = first[t_i]
+                # Scale-relative tolerance: these are cut slopes, order 1e2-1e3.
+                if abs(val - v0) > 1e-9 * max(1.0, abs(v0)):
+                    raise RuntimeError(
+                        f"Cut coefficient varies across q at fixed tau; aggregation "
+                        f"invalid. direction={direction} tau={t_i} "
+                        f"coeff[q={q0}]={v0!r} coeff[q={int(q)}]={val!r}. "
+                        f"Check the cut-generation mode: aggregate_cuts_by_tau "
+                        f"requires per-slot duals broadcast identically to every q."
+                    )
+
+        if aggregate:
+            _assert_q_invariant(coeff_yOUT, "OUT")
+            _assert_q_invariant(coeff_yRET, "RET")
         if isinstance(coeff_yOUT, dict):
             if aggregate:
                 used = set()
@@ -1350,6 +1385,43 @@ class ProblemMaster(MasterProblem):
         const_adj = float(ub_est) - float(contrib)
         const_adj_out = (float(ub_est_out) - float(contrib_out)) if ub_est_out is not None else None
         const_adj_ret = (float(ub_est_ret) - float(contrib_ret)) if ub_est_ret is not None else None
+
+        # Check that the re-anchoring only does what it is entitled to do.
+        #
+        # const_adj - const has exactly two legitimate sources:
+        #   1. q-aggregation, which is an identity when the coefficients are
+        #      q-invariant (enforced above) and so contributes nothing; and
+        #   2. cut_coeff_threshold dropping small coefficients from the aggregated
+        #      maps while ub_est still counts them -- a deliberate sparsification.
+        # Anything beyond the dropped mass means the aggregated cut does not
+        # reproduce the per-(q,tau) cut at the incumbent, which is a real defect.
+        #
+        # This used to be applied unconditionally as a silent correction, which would
+        # paper over precisely the inconsistency the q-invariance check exists to
+        # catch. Raise instead (spec §2.7).
+        dropped = 0.0
+        for _coeffs, _var in ((coeff_yOUT, "yOUT"), (coeff_yRET, "yRET")):
+            if not isinstance(_coeffs, dict):
+                continue
+            for (q, t), v in _coeffs.items():
+                if abs(float(v)) > coeff_tol:
+                    continue
+                try:
+                    yv = float((m.yOUT if _var == "yOUT" else m.yRET)[int(q), int(t)].value or 0.0)
+                except Exception:
+                    yv = 0.0
+                dropped += float(v) * yv
+        _residual = abs((float(const_adj) - float(const)) - dropped)
+        if _residual > max(1e-6, 1e-9 * max(1.0, abs(float(const)))):
+            raise RuntimeError(
+                f"Cut constant re-anchoring is not accounted for: const={float(const)!r} "
+                f"reconstructed={float(const_adj)!r} "
+                f"delta={float(const_adj) - float(const)!r} "
+                f"explained_by_threshold={dropped!r} residual={_residual!r}. "
+                f"The aggregated cut does not reproduce the per-(q,tau) cut at the "
+                f"incumbent beyond what cut_coeff_threshold={coeff_tol!r} explains. "
+                f"Do not mask this by re-anchoring -- find the cause."
+            )
 
         # Assemble RHS with aggregated coefficients using adjusted constant
         rhs = const_adj
