@@ -292,18 +292,29 @@ class ProblemMaster(MasterProblem):
         # Note: We no longer enforce "first non-idle must be OUT".
         # Charging at Longvilliers (s=0) is allowed even before the first OUT.
 
-        # Never recharge right after an idle slot at Longvilliers.
-        # Interpretation: if the previous slot at Longvilliers had neither a departure nor charging
-        # (i.e., it was an idle/wait slot), then charging in the current slot is not allowed.
+        # Charge-before-idle canonicalisation (M2), on by default.
+        #
+        # Never recharge right after an idle slot at Longvilliers: if the previous
+        # slot at Longvilliers had neither a departure nor charging (i.e. it was an
+        # idle/wait slot), charging in the current slot is not allowed.
         # Linear form: c[q,t] <= yOUT[q,t-1] + c[q,t-1] + (1 - atL[q,t-1])
         # - If prev was idle at L: yOUT=0, c=0, atL=1 -> RHS=0, so c[q,t]=0
         # - If prev not at L (travel/Massy): atL=0 -> RHS>=1, no restriction beyond other gates
         # - If prev had charge or departure: RHS>=something positive, allowing continued charge if feasible
-        def _c_no_recharge_after_idle_rule(m, q, t):
-            if t < 1:
-                return pyo.Constraint.Skip
-            return m.c[q, t] <= m.yOUT[q, t - 1] + m.c[q, t - 1] + 1 - m.atL[q, t - 1]
-        m.C_no_recharge_after_idle = pyo.Constraint(m.Q, m.T, rule=_c_no_recharge_after_idle_rule)
+        #
+        # This is a readability/canonicalisation device, not a physical constraint.
+        # With, say, six idle slots at the depot where five are needed to charge, it
+        # picks the canonical ordering (charge first, then idle) rather than leaving
+        # the solver free to interleave equivalent orderings. It is gated by a config
+        # flag rather than hard-coded so that turning it off is a visible choice in a
+        # config diff. NOTE it does restrict the model: it is a canonical-ordering
+        # choice among equal-cost schedules, so leave it on unless you have a reason.
+        if bool(self._p("charge_before_idle", True)):
+            def _c_no_recharge_after_idle_rule(m, q, t):
+                if t < 1:
+                    return pyo.Constraint.Skip
+                return m.c[q, t] <= m.yOUT[q, t - 1] + m.c[q, t - 1] + 1 - m.atL[q, t - 1]
+            m.C_no_recharge_after_idle = pyo.Constraint(m.Q, m.T, rule=_c_no_recharge_after_idle_rule)
 
         for q in m.Q:
             first_action = initial_actions[q]
@@ -409,7 +420,25 @@ class ProblemMaster(MasterProblem):
             return m.gchg[q, t] <= Emax - m.b[q, t]
         m.C4_chg_cap = pyo.Constraint(m.Q, m.T, rule=_c4_chg_cap_rule)
 
+        # An OUT trip must carry enough charge for the outbound leg and the return.
         m.C5 = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.b[q, t] >= 2 * L * m.yOUT[q, t])
+
+        # NOT ADDED (M1): the explicit return-leg constraint b[q,t] >= L*yRET[q,t].
+        #
+        # AUDIT_v3 M1 recommends stating it because it is only implied -- exclusivity
+        # forces c=0 when yRET=1, hence gchg=0, so b[q,t+1] = b[q,t] - L >= 0 requires
+        # b[q,t] >= L -- and argues the tighter LP relaxation is worth it regardless
+        # of correctness, since master solve time dominates.
+        #
+        # Measured, it is the opposite. Adding those Q*T rows took the master phase
+        # from 18.2s to 49s over 10 iterations (2.7x, reproduced across two runs at
+        # 50.298s and 50.762s with bit-identical results), and the bound after the
+        # same iteration budget got WORSE, LB 3034.77 -> 2770.97. A valid inequality
+        # cannot weaken the LP relaxation, but it can make the MIP harder to solve
+        # and leave a worse best-bound when the solve stops on gap or time.
+        #
+        # Do not re-add it without re-measuring. The constraint is sound; it just
+        # does not pay for itself here.
 
         # Avoid uninitialized gchg at the last time period (not used in constraints)
         for q in m.Q:

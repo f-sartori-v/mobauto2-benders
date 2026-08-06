@@ -98,6 +98,8 @@ class MasterSection:
     cut_coeff_threshold: float = 0.0
     theta_per_scenario: bool = False
     write_lp_after_cut: bool = False
+    # Canonical ordering: charge before idling at the depot (M2). On by default.
+    charge_before_idle: bool = True
 
 
 @dataclass(slots=True)
@@ -644,6 +646,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "cut_coeff_threshold",
             "theta_per_scenario",
             "write_lp_after_cut",
+            "charge_before_idle",
         },
         "master",
     )
@@ -676,6 +679,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         ),
         theta_per_scenario=_ensure_bool(master_raw.get("theta_per_scenario", False), "master.theta_per_scenario"),
         write_lp_after_cut=_ensure_bool(master_raw.get("write_lp_after_cut", False), "master.write_lp_after_cut"),
+        charge_before_idle=_ensure_bool(master_raw.get("charge_before_idle", True), "master.charge_before_idle"),
     )
 
     sub_raw = _as_mapping(data.get("subproblem"), "subproblem")

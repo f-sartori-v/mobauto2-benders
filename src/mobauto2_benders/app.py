@@ -101,6 +101,7 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     mp["cut_coeff_threshold"] = float(cfg.master.cut_coeff_threshold)
     mp["theta_per_scenario"] = bool(cfg.master.theta_per_scenario)
     mp["write_lp_after_cut"] = bool(cfg.master.write_lp_after_cut)
+    mp["charge_before_idle"] = bool(cfg.master.charge_before_idle)
 
     mp["solver"] = cfg.solver.master_solver
     mp["solver_tee"] = bool(cfg.solver.solver_tee)
