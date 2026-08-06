@@ -329,39 +329,63 @@ class ProblemMaster(MasterProblem):
             else:
                 m.c[q, 0].fix(0)
 
-        # Optional FIFO symmetry-breaking across vehicles (can restrict starts unintentionally)
-        if bool(self._p("use_fifo_symmetry", False)) and Q >= 2:
+        # Symmetry breaking: order vehicles by cumulative departures (OUT+RET).
+        #
+        # This block previously existed twice, under use_fifo_symmetry and under
+        # symmetry_breaking, both defaulting true in configs/default.yaml. They were
+        # the same constraint set written in opposite directions: FIFO emitted
+        # cum[k][t] <= cum[k-1][t] for k=1..Q-1, symmetry_breaking emitted
+        # cum[k][t] >= cum[k+1][t] for k=0..Q-2, which is the same family reindexed.
+        # symmetry_breaking additionally emitted a total-ordering constraint that its
+        # own comment called redundant -- it is the prefix constraint at t=T-1. With
+        # Q=2 that meant 45 constraints where 22 suffice (H4).
+        #
+        # Both config keys are still accepted so existing YAML keeps working; either
+        # one enables the single implementation below.
+        _sym_fifo = bool(self._p("use_fifo_symmetry", False))
+        _sym_break = bool(self._p("symmetry_breaking", False))
+        if (_sym_fifo or _sym_break) and Q >= 2:
+            # Precondition: ordering vehicles by cumulative departures is only valid
+            # for a homogeneous fleet in an identical initial state. With differing
+            # initial battery or forced first actions the vehicles are not
+            # interchangeable, and this constraint can cut off the true optimum.
+            # The audit flagged that this precondition was never checked.
+            _b_distinct = sorted({round(float(b), 9) for b in binit[:Q]})
+            _a_distinct = sorted({str(a) for a in initial_actions[:Q]})
+            if len(_b_distinct) > 1 or len(_a_distinct) > 1:
+                raise ValueError(
+                    "Symmetry breaking requires a homogeneous fleet with an identical "
+                    "initial state, but the vehicles differ: "
+                    f"initial_battery={list(binit[:Q])!r} "
+                    f"initial_actions={list(initial_actions[:Q])!r}. "
+                    "Ordering vehicles by cumulative departures would then be able to "
+                    "cut off the true optimum. Set master.use_fifo_symmetry and "
+                    "master.symmetry_breaking to false, or make the fleet homogeneous."
+                )
+            # Order by TOTAL departures, not by every time prefix.
+            #
+            # The previous cumulative-prefix form, cum[k][t] <= cum[k-1][t] for every
+            # t, is not valid symmetry breaking even for a homogeneous fleet: it
+            # removes feasible schedules that are not symmetric duplicates, so the
+            # master stops being a relaxation and its bound -- the Benders LB -- can
+            # exceed the true optimum. Observed directly: a master best_bound of
+            # ~4558 alongside a known feasible solution of 4228.99.
+            #
+            # Counterexample. Vehicle A makes one trip at t=0, vehicle B makes trips
+            # at t=1 and t=2. Labelled (A,B): cum[0]=[1,1,1], cum[1]=[0,1,2] violates
+            # at t=2. Labelled (B,A): cum[0]=[0,1,2], cum[1]=[1,1,1] violates at t=0.
+            # No relabelling satisfies the prefix form.
+            #
+            # Total ordering is valid: any schedule can be relabelled by sorting the
+            # vehicles on total trips. It also needs only Q-1 rows rather than
+            # T*(Q-1).
             for k in range(1, Q):
-                for t in range(T):
-                    m.add_component(
-                        f"C3_fifo_{k}_{t}",
-                        pyo.Constraint(
-                            expr=
-                            sum(m.yOUT[k, tau] + m.yRET[k, tau] for tau in range(0, t + 1))
-                            <= sum(m.yOUT[k - 1, tau] + m.yRET[k - 1, tau] for tau in range(0, t + 1))
-                        ),
-                    )
-
-        # Symmetry breaking: order vehicles by cumulative departures (OUT+RET)
-        if bool(self._p("symmetry_breaking", False)) and Q >= 2:
-            for k in range(Q - 1):
-                # Cumulative ordering by time prefix
-                for t in range(T):
-                    m.add_component(
-                        f"C_sym_break_pref_{k}_{t}",
-                        pyo.Constraint(
-                            expr=
-                            sum(m.yOUT[k, tau] + m.yRET[k, tau] for tau in range(0, t + 1))
-                            >= sum(m.yOUT[k + 1, tau] + m.yRET[k + 1, tau] for tau in range(0, t + 1))
-                        ),
-                    )
-                # Redundant total-ordering reinforcement
                 m.add_component(
                     f"C_sym_break_tot_{k}",
                     pyo.Constraint(
                         expr=
                         sum(m.yOUT[k, t] + m.yRET[k, t] for t in m.T)
-                        >= sum(m.yOUT[k + 1, t] + m.yRET[k + 1, t] for t in m.T)
+                        <= sum(m.yOUT[k - 1, t] + m.yRET[k - 1, t] for t in m.T)
                     ),
                 )
 
