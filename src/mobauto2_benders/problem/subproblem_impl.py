@@ -322,31 +322,39 @@ class ProblemSubproblem(Subproblem):
             md.name = "mw_dual"
             Tset = range(T_)
 
-            # Dual variables
+            # Dual variables.
+            #
+            # Sign convention follows Pyomo/CPLEX and the rest of this module: for a
+            # '<=' constraint in a MINIMISATION, the dual is <= 0 (raising capacity
+            # lowers cost). solve_subproblem reads its pi_OUT/pi_RET straight from
+            # m.dual and they come out non-positive, which is why dm = +S*pi yields
+            # the negative slopes the master expects. This LP must match that.
             md.a_OUT = pyo.Var(Tset)
             md.a_RET = pyo.Var(Tset)
-            md.pi_OUT = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)], within=pyo.NonNegativeReals)
-            md.pi_RET = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)], within=pyo.NonNegativeReals)
+            md.pi_OUT = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)], within=pyo.NonPositiveReals)
+            md.pi_RET = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)], within=pyo.NonPositiveReals)
 
-            # Dual feasibility: for every primal x_OUT[t, tau, k]
+            # Dual feasibility: one constraint per primal variable.
+            #   primal x[t,tau,k], cost (tau-t) + fill_eps*k  ->  a[t] + pi[tau,k] <= cost
+            #   primal u[t],       cost p                     ->  a[t]            <= p
             def df_out_rule(m, t, tau, k):
                 # active arc iff (t+1) <= tau <= min(T-1, t+W)
                 if not ((t + 1) <= tau <= min(T_ - 1, t + Wmax_slots)):
                     return pyo.Constraint.Skip
-                return m.a_OUT[t] + m.pi_OUT[tau, k] >= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
+                return m.a_OUT[t] + m.pi_OUT[tau, k] <= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
             md.DF_OUT = pyo.Constraint([(t, tau, k) for t in Tset for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)],
                                        rule=lambda m, t, tau, k: df_out_rule(m, t, tau, k))
             # Dual feasibility for RET
             def df_ret_rule(m, t, tau, k):
                 if not ((t + 1) <= tau <= min(T_ - 1, t + Wmax_slots)):
                     return pyo.Constraint.Skip
-                return m.a_RET[t] + m.pi_RET[tau, k] >= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
+                return m.a_RET[t] + m.pi_RET[tau, k] <= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
             md.DF_RET = pyo.Constraint([(t, tau, k) for t in Tset for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)],
                                        rule=lambda m, t, tau, k: df_ret_rule(m, t, tau, k))
 
-            # u constraints (nonnegativity vars): a_[t] >= p
-            md.A_OUT_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_OUT[t] >= float(p_penalty))
-            md.A_RET_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_RET[t] >= float(p_penalty))
+            # Dual constraint from the unmet-demand variables u[t] >= 0
+            md.A_OUT_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_OUT[t] <= float(p_penalty))
+            md.A_RET_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_RET[t] <= float(p_penalty))
 
             # Optimality face equality: dual objective equals primal UB at incumbent
             cap_out_rhs = [min(float(S_cap), float(C_out_vec[tau])) for tau in Tset]
@@ -356,13 +364,42 @@ class ProblemSubproblem(Subproblem):
                 term_cap = sum(cap_out_rhs[tau] * m.pi_OUT[tau, k] for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)) \
                            + sum(cap_ret_rhs[tau] * m.pi_RET[tau, k] for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0))
                 return term_dem + term_cap
-            md.OptFace = pyo.Constraint(expr=(dual_obj_expr(md) == float(ub_base)))
+            # Restrict to the optimal face. Weak duality gives dual_obj <= ub_base for
+            # every dual-feasible point, so ">= ub_base - tol" carves out the (near-)
+            # optimal face. Stated as an inequality rather than "== ub_base" because a
+            # float equality against a separately-computed primal optimum is brittle:
+            # a few ulps of disagreement make the whole LP infeasible.
+            face_tol = max(1e-6, 1e-9 * abs(float(ub_base)))
+            md.OptFace = pyo.Constraint(expr=(dual_obj_expr(md) >= float(ub_base) - face_tol))
 
-            # MW objective: maximize dm·Ybar where dm[tau] = S * sum_k pi[tau,k]
+            # Magnanti-Wong objective.
+            #
+            # The cut is theta >= const + sum_tau dm[tau]*Y[tau], with dm[tau] =
+            # S*sum_k pi[tau,k] and const anchored so the cut is tight at the
+            # incumbent: const = ub_base - sum_tau dm[tau]*y_inc[tau]. Its value at the
+            # core point Ybar is therefore
+            #
+            #     const + sum dm*Ybar = ub_base + sum_tau dm[tau]*(Ybar[tau]-y_inc[tau])
+            #
+            # ub_base is fixed by OptFace, so selecting the Pareto-optimal dual means
+            # maximising sum_tau dm[tau]*(Ybar[tau] - y_inc[tau]).
+            #
+            # The previous version maximised sum dm*Ybar, dropping the -y_inc term.
+            # That term is NOT constant over the optimal face (dm varies across it), so
+            # omitting it selects the wrong dual. y_inc[tau] = C[tau]/S, hence the
+            # coefficient below is (S*Ybar[tau] - C[tau]).
             md.obj = pyo.Objective(
-                expr= float(S_cap) * (
-                    sum(float(Ybar_out_vec[tau]) * sum(md.pi_OUT[tau, k] for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)) for tau in Tset)
-                    + sum(float(Ybar_ret_vec[tau]) * sum(md.pi_RET[tau, k] for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)) for tau in Tset)
+                expr=(
+                    sum(
+                        (float(S_cap) * float(Ybar_out_vec[tau]) - float(C_out_vec[tau]))
+                        * sum(md.pi_OUT[tau, k] for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0))
+                        for tau in Tset
+                    )
+                    + sum(
+                        (float(S_cap) * float(Ybar_ret_vec[tau]) - float(C_ret_vec[tau]))
+                        * sum(md.pi_RET[tau, k] for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0))
+                        for tau in Tset
+                    )
                 ),
                 sense=pyo.maximize,
             )
