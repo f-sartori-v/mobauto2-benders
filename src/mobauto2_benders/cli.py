@@ -112,7 +112,7 @@ def _print_config_summary(cfg) -> None:
         print(f"Data: scenario_weights={cfg.data.scenario_weights}")
     print(
         "Solver: max_iterations=%s tolerance=%s time_limit_s=%s"
-        % (cfg.solver.max_iterations, cfg.solver.tolerance, cfg.solver.time_limit_s)
+        % (cfg.solver.max_iterations, cfg.solver.tolerance, cfg.solver.total_time_limit_s)
     )
 
 

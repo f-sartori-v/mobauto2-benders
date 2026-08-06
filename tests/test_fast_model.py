@@ -130,3 +130,58 @@ class TestCutAggregationGuard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFleetListPaddingConvention(unittest.TestCase):
+    """Per-vehicle lists are [z specific vehicles..., 1 value shared by the rest].
+
+    A fleet of Q vehicles where z have distinct initial states and the remaining
+    Q-z are identical is written as a list of length z+1, and the LAST entry is
+    the shared value. `initial_battery` implemented this; `initial_actions` sat
+    ten lines away and padded with a literal "IDL" instead, so a fleet declared
+    to start charging silently started idle from vehicle z+1 on.
+
+    Homogeneous fleets are the case symmetry breaking allows, so these build with
+    symmetry breaking off -- that is the configuration where the convention has
+    anything to express.
+    """
+
+    def _params(self, **over):
+        params = master_params()
+        params["symmetry_breaking"] = False
+        params["use_fifo_symmetry"] = False
+        params["Q"] = 5
+        params.update(over)
+        return params
+
+    @staticmethod
+    def _initial_battery(pm) -> list[float]:
+        return [pyo.value(pm.m.b[q, 0]) for q in pm.m.Q]
+
+    @staticmethod
+    def _starts_charging(pm) -> list[float]:
+        """c[q,0] is fixed to 1 exactly when the forced first action is CHR."""
+        return [pyo.value(pm.m.c[q, 0]) for q in pm.m.Q]
+
+    def test_battery_pads_with_last_value(self):
+        pm = build_master(self._params(binit=[90.0, 150.0], initial_actions=["IDL"]))
+        self.assertEqual(self._initial_battery(pm), [90.0, 150.0, 150.0, 150.0, 150.0])
+
+    def test_actions_pad_with_last_value_not_literal_idl(self):
+        pm = build_master(self._params(binit=[150.0], initial_actions=["IDL", "CHR"]))
+        self.assertEqual(
+            self._starts_charging(pm),
+            [0, 1, 1, 1, 1],
+            "padding with a literal IDL ignores the shared-value convention",
+        )
+
+    def test_single_value_describes_a_homogeneous_fleet(self):
+        pm = build_master(self._params(binit=[150.0], initial_actions=["CHR"]))
+        self.assertEqual(self._initial_battery(pm), [150.0] * 5)
+        self.assertEqual(self._starts_charging(pm), [1] * 5)
+
+    def test_both_lists_pad_the_same_way(self):
+        """The defect was the two rules diverging, so pin them together."""
+        pm = build_master(self._params(binit=[10.0, 20.0], initial_actions=["IDL", "CHR"]))
+        self.assertEqual(self._initial_battery(pm)[1:], [20.0] * 4)
+        self.assertEqual(self._starts_charging(pm)[1:], [1] * 4)

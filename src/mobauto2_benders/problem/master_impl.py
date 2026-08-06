@@ -13,6 +13,58 @@ from ..benders.cplex_log import parse_cplex_log_bounds
 from ..tolerances import project_binary_value
 
 
+def _cplex_direct_option_name(key: str) -> str:
+    """Map a CPLEX C-API parameter name onto the name `cplex_direct` expects.
+
+    Pyomo's CPLEXDirect splits an option key on '_' and walks
+    `cplex.Cplex().parameters` piece by piece, so `CPXPARAM_Threads` would resolve
+    `parameters.CPXPARAM.Threads` and raise AttributeError. The C name maps
+    mechanically: drop the prefix and lowercase, so `CPXPARAM_Preprocessing_Symmetry`
+    becomes `preprocessing_symmetry` -> `parameters.preprocessing.symmetry`.
+
+    Non-CPXPARAM keys pass through untouched; `timelimit` and `mipgap` are already
+    written in the direct form elsewhere in this file.
+    """
+    name = str(key)
+    if not name.upper().startswith("CPXPARAM_"):
+        return name
+    return name[len("CPXPARAM_"):].lower()
+
+
+def _validate_cplex_options(options: dict, backend: str) -> None:
+    """Reject a CPLEX parameter name that will not resolve, at build time.
+
+    These options were silently dropped for years under `cplex_direct`, which hid
+    two separate mistakes at once: the drop itself, and the fact that the shipped
+    name `CPXPARAM_MIP_Strategy_Symmetry` does not exist -- CPLEX calls that
+    parameter `preprocessing.symmetry`. A wrong name must fail loudly (D19).
+    """
+    if not options:
+        return
+    if str(backend).lower() in ("cplex", ""):
+        return  # the file-based plugin validates CPXPARAM_* itself
+    try:
+        import cplex as _cplex
+    except Exception:
+        return  # no CPLEX available; nothing to validate against
+    try:
+        root = _cplex.Cplex().parameters
+    except Exception:
+        return
+    for key in options:
+        node = root
+        resolved = _cplex_direct_option_name(key)
+        for piece in resolved.split("_"):
+            node = getattr(node, piece, None)
+            if node is None:
+                raise ValueError(
+                    f"master.cplex_options key {key!r} does not name a CPLEX parameter "
+                    f"(resolved to {resolved!r}, failed at {piece!r}). "
+                    "Under solver_backend=cplex_direct these are applied as "
+                    "cplex.Cplex().parameters.<dotted path>."
+                )
+
+
 class ProblemMaster(MasterProblem):
     def __init__(self, params: dict[str, Any] | None = None):
         super().__init__(params)
@@ -146,7 +198,12 @@ class ProblemMaster(MasterProblem):
             except Exception:
                 initial_actions = ["IDL"] * Q
             if len(initial_actions) < Q:
-                initial_actions = initial_actions + ["IDL"] * (Q - len(initial_actions))
+                # Same convention as binit above: the list is
+                # [z specific vehicles..., 1 value shared by the remaining Q-z].
+                # This padded with a literal "IDL" instead, so a fleet declared to
+                # start charging silently started idle from the second vehicle on.
+                fill = initial_actions[-1] if initial_actions else "IDL"
+                initial_actions = initial_actions + [fill] * (Q - len(initial_actions))
             elif len(initial_actions) > Q:
                 initial_actions = initial_actions[:Q]
         allowed_initial_actions = {"IDL", "CHR", "OUT", "RET"}
@@ -457,6 +514,9 @@ class ProblemMaster(MasterProblem):
         else:
             solver_name = str(self._p("solver", "cplex"))
         self._solver = pyo.SolverFactory(solver_name)
+        # Fail at build time on a CPLEX parameter name that cannot resolve, rather
+        # than dropping it silently on every solve.
+        _validate_cplex_options(self._p("cplex_options", {}) or {}, backend)
         # Set solver options once here
         opts = self._p("solver_options", {}) or {}
         for k, v in opts.items():
@@ -487,16 +547,16 @@ class ProblemMaster(MasterProblem):
                 solver.options["mipgap"] = float(mipgap)
             cplex_opts = self._p("cplex_options", {}) or {}
             backend = str(self._p("solver_backend", "")).lower()
-            # CPLEX file-based plugin accepts CPXPARAM_* keys; cplex_direct does not.
+            # CPLEX file-based plugin accepts CPXPARAM_* keys; cplex_direct wants the
+            # dotted parameter path with '_' separators. Translate rather than skip:
+            # skipping meant every CPXPARAM_* in every config was silently discarded,
+            # so a run that asked for one thread quietly used all of them.
             if backend in ("cplex", ""):
                 for k, v in cplex_opts.items():
                     solver.options[k] = v
             else:
-                # Skip CPXPARAM_* for cplex_direct to avoid AttributeError.
                 for k, v in cplex_opts.items():
-                    if str(k).upper().startswith("CPXPARAM_"):
-                        continue
-                    solver.options[k] = v
+                    solver.options[_cplex_direct_option_name(k)] = v
         except Exception:
             pass
         # Apply warm start if provided: set initial y values only (x-only start)

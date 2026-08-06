@@ -27,7 +27,7 @@ data:
 model:
   time:
     # Total horizon length in minutes (T_minutes) or discrete slots (T)
-    T_minutes: 220
+    T_minutes: 660
     # Minutes per slot
     slot_resolution: 30
     # Trip duration in minutes (converted internally to slots)
@@ -73,13 +73,19 @@ master:
   symmetry_breaking: true
   # Use previous master solution as a MIP start
   use_mip_start: true
-  # Per-iteration master solve limit (seconds)
-  solve_time_limit_s: 10
-  # Per-iteration master MIP optimality gap
-  mipgap: 0.01
+  # Ceiling on ONE master MIP solve, per Benders iteration (seconds).
+  # This is NOT the run budget -- that is solver.total_time_limit_s below.
+  # The Benders loop runs a gap-tied schedule that picks a per-iteration limit;
+  # this caps it. Test phase: 30. Simulation phase: 600.
+  per_iteration_time_limit_s: 120
+  # Ceiling on the master MIP gap, per Benders iteration.
+  # This is NOT the convergence criterion -- that is solver.tolerance below.
+  # The schedule tightens the gap on its own (down to 0.001) as the Benders gap
+  # closes; this is the loosest it is allowed to be. Leave at 0.05 for both phases.
+  per_iteration_mipgap: 0.05
   # Optional CPLEX parameters
   cplex_options:
-    CPXPARAM_MIP_Strategy_Symmetry: 5
+    CPXPARAM_Preprocessing_Symmetry: 5
     CPXPARAM_Threads: 0
   # Master solver backend (preferred: cplex_direct)
   solver_backend: cplex_direct
@@ -115,10 +121,21 @@ subproblem:
   degenerate_cut_zero_tol: 1.0e-9
 
 solver:
-  # Benders loop settings
+  # Benders loop settings.
+  #
+  # Three limits decide when a run stops. They are easy to confuse:
+  #   solver.total_time_limit_s          -- wall clock for the WHOLE loop
+  #   solver.tolerance                   -- relative BD gap that counts as converged
+  #   master.per_iteration_time_limit_s  -- ceiling on ONE master solve (above)
+  #
   max_iterations: 100
-  tolerance: 0.001
-  time_limit_s: 120
+  # Relative Benders gap (UB-LB)/|UB| at which the run is declared converged.
+  tolerance: 0.01
+  # Budget for the whole Benders loop, in seconds. This is the knob that decides
+  # what a run costs. Checked between iterations and also clamps the master's
+  # per-iteration limit, so it is a real ceiling.
+  # Test phase: 120. Simulation phase: 1800 or more.
+  total_time_limit_s: 120
   # Optional stall-based early stopping
   stall_max_no_improve_iters: 0
   stall_min_abs_improve: 1.0

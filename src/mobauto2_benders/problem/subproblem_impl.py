@@ -108,6 +108,11 @@ class ProblemSubproblem(Subproblem):
         def _aggregate_requests(container: Any, Tlen: int) -> tuple[list[float], list[float]]:
             R_out = [0.0 for _ in range(Tlen)]
             R_ret = [0.0 for _ in range(Tlen)]
+            # Requests outside the horizon used to be dropped without a trace, so
+            # "Pax served: 173/224" counted a denominator that had already lost 60
+            # requests and understated unmet demand -- a headline metric weighted by p.
+            dropped = {"after_horizon": 0, "negative_time": 0, "array_tail": 0}
+            last_minute = [0.0]
 
             def _slot_idx_from_minutes(tmin: float) -> int:
                 # Map continuous minutes to slot index via floor:
@@ -115,16 +120,44 @@ class ProblemSubproblem(Subproblem):
                 res = max(1, slot_res)
                 return max(0, int(math.floor(float(tmin) / res)))
 
+            def _report_dropped() -> None:
+                total = sum(dropped.values())
+                if total <= 0:
+                    return
+                parts = [f"{k}={v}" for k, v in dropped.items() if v]
+                msg = (
+                    f"[DEMAND] {total} request(s) discarded outside the horizon "
+                    f"({', '.join(parts)}); horizon is {Tlen} slots of {max(1, slot_res)} min "
+                    f"= {Tlen * max(1, slot_res)} min, latest request at {last_minute[0]:.0f} min. "
+                    "Served/total counts below exclude them."
+                )
+                try:
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(msg)
+                except Exception:
+                    pass
+                try:
+                    self._vprint(msg)
+                except Exception:
+                    pass
+
             if container is None:
                 return R_out, R_ret
             # Direct arrays
             if isinstance(container, dict) and ("R_out" in container or "R_ret" in container):
                 rout = list(container.get("R_out", [0.0] * Tlen))
                 rret = list(container.get("R_ret", [0.0] * Tlen))
+                for arr in (rout, rret):
+                    if len(arr) > Tlen:
+                        try:
+                            dropped["array_tail"] += int(sum(float(x) for x in arr[Tlen:]))
+                        except Exception:
+                            pass
                 if len(rout) != Tlen:
                     rout = (rout + [0.0] * Tlen)[:Tlen]
                 if len(rret) != Tlen:
                     rret = (rret + [0.0] * Tlen)[:Tlen]
+                _report_dropped()
                 return [float(x) for x in rout], [float(x) for x in rret]
             # Pull list from mapping under 'requests' or 'req_matrix'
             if isinstance(container, dict):
@@ -138,10 +171,13 @@ class ProblemSubproblem(Subproblem):
                     except Exception:
                         continue
                     if tmin < 0:
+                        dropped["negative_time"] += 1
                         continue
+                    last_minute[0] = max(last_minute[0], float(tmin))
                     # Floor-based slot mapping
                     t = _slot_idx_from_minutes(tmin)
                     if not (0 <= t < Tlen):
+                        dropped["after_horizon"] += 1
                         continue
                     if isinstance(d, str):
                         dd = d.upper()
@@ -154,6 +190,7 @@ class ProblemSubproblem(Subproblem):
                             R_out[t] += 1.0
                         else:
                             R_ret[t] += 1.0
+                _report_dropped()
                 return R_out, R_ret
             # Matrix [[dir,time], ...]
             if isinstance(container, list):
@@ -166,9 +203,12 @@ class ProblemSubproblem(Subproblem):
                     except Exception:
                         continue
                     if tmin < 0:
+                        dropped["negative_time"] += 1
                         continue
+                    last_minute[0] = max(last_minute[0], float(tmin))
                     t = _slot_idx_from_minutes(tmin)
                     if not (0 <= t < Tlen):
+                        dropped["after_horizon"] += 1
                         continue
                     if isinstance(d, str):
                         dd = d.upper()
@@ -181,6 +221,7 @@ class ProblemSubproblem(Subproblem):
                             R_out[t] += 1.0
                         else:
                             R_ret[t] += 1.0
+                _report_dropped()
                 return R_out, R_ret
             return R_out, R_ret
 
@@ -195,6 +236,12 @@ class ProblemSubproblem(Subproblem):
             except Exception:
                 v = None
             if v is None:
+                return None
+            # Missing return: without it this helper yielded None for every key, so the
+            # early exit below never fired and a cut was generated every iteration.
+            try:
+                return float(v)
+            except Exception:
                 return None
 
         def _dbg(msg: str) -> None:

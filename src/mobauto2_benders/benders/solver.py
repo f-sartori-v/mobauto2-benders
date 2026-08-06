@@ -298,6 +298,13 @@ class BendersRunResult:
     # nothing in any output said so. The manifest records these.
     cut_generation_mode: Optional[str] = None
     cut_valid_lower_bound: Optional[bool] = None
+    # How many master solves stopped on the clock instead of on the gap. Any value
+    # above zero means the run is NOT bit-reproducible: node counts inside a
+    # time-limited solve depend on machine load, and every later iteration inherits
+    # the difference. configs/baseline_d9.yaml lists this as a determinism
+    # requirement; measured, a binding limit moved the LB by 8% between two runs of
+    # one config while a non-binding one reproduced to the last digit.
+    clock_truncated_master_solves: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -406,12 +413,32 @@ class BendersSolver:
         no_cut_streak = 0
         last_mp_gap: Optional[float] = None
         last_mp_term: Optional[str] = None
-        # Master schedule parameters tied to global BD gap
+        clock_truncated_master_solves = 0
+        # Master schedule parameters tied to global BD gap.
+        #
+        # The schedule below overwrites the master's per-iteration time limit and
+        # mipgap on every iteration. Before these two bounds were wired, that made
+        # master.solve_time_limit_s and master.mipgap inert: the config was parsed,
+        # passed down, and discarded (same class as D19). The config now supplies the
+        # ceilings, so the schedule can only tighten, never loosen past what was asked
+        # for.
         mp_gap_min = 0.001
-        mp_gap_max = 0.05
+        mp_gap_max = float(
+            self.cfg.master.per_iteration_mipgap
+            if self.cfg.master.per_iteration_mipgap is not None
+            else 0.05
+        )
         mp_gap_scale = 1.0
         mp_time_base = 2.0
         mp_time_k = 5.0
+        mp_tl_cap = (
+            float(self.cfg.master.per_iteration_time_limit_s)
+            if self.cfg.master.per_iteration_time_limit_s is not None
+            else None
+        )
+        if mp_gap_min > mp_gap_max:
+            # A config asking for a tighter ceiling than the schedule's floor wins.
+            mp_gap_min = mp_gap_max
         # MW config (default enabled)
         sp_params = self.subproblem.params or {}
         mw_enabled = bool(sp_params.get("use_magnanti_wong", self.cfg.subproblem.use_magnanti_wong))
@@ -751,13 +778,14 @@ class BendersSolver:
                 sp_penalty_pax=extra.get("sp_penalty_pax"),
                 sp_total_demand=extra.get("sp_total_demand"),
                 sp_slot_resolution=extra.get("sp_slot_resolution"),
+                clock_truncated_master_solves=int(clock_truncated_master_solves),
             )
         for it in range(1, max_it + 1):
             iter_t0 = time.perf_counter()
             rep = IterReport(k=it)
             lb_before_iter = best_lb
             ub_before_iter = best_ub
-            if time.time() - t0 > self.cfg.solver.time_limit_s:
+            if time.time() - t0 > self.cfg.solver.total_time_limit_s:
                 log.warning("Time limit reached after %d iterations", it - 1)
                 # Print the best incumbent information we have so far
                 try:
@@ -855,10 +883,25 @@ class BendersSolver:
                         g_bd = float(mp_gap_max)
                     mp_gap = min(float(mp_gap_max), max(float(mp_gap_min), float(mp_gap_scale) * float(g_bd)))
                     mp_tl = float(mp_time_base) + (float(mp_time_k) / max(float(mp_gap), 1e-4))
+                    if mp_tl_cap is not None:
+                        mp_tl = min(mp_tl, mp_tl_cap)
+                    # The scheduled value depends only on the gap, so this line is
+                    # reproducible and the baseline log-diff regression (D9) stays valid.
+                    _vprint(f"[SCHEDULE] master gap-tied: time_limit_s={mp_tl:.0f} mipgap={mp_gap:.2g} g_bd={g_bd:.3g}")
+                    # Never let one master solve outlast the run budget it sits inside.
+                    # This clamp reads the wall clock, so it is NOT reproducible -- log it
+                    # only when it actually bites, where its presence is itself the signal
+                    # that the run became machine-dependent.
+                    remaining = float(self.cfg.solver.total_time_limit_s) - (time.time() - t0)
+                    if remaining < mp_tl:
+                        mp_tl = max(1.0, remaining)
+                        _vprint(
+                            f"[SCHEDULE] budget clamp: time_limit_s={mp_tl:.0f} "
+                            "(run budget nearly spent; this run is not reproducible)"
+                        )
                     if isinstance(getattr(self.master, "params", None), dict):
                         self.master.params["solve_time_limit_s"] = mp_tl
                         self.master.params["mipgap"] = mp_gap
-                    _vprint(f"[SCHEDULE] master gap-tied: time_limit_s={mp_tl:.0f} mipgap={mp_gap:.2g} g_bd={g_bd:.3g}")
                 except Exception:
                     pass
             mp_t0 = time.perf_counter()
@@ -1037,6 +1080,13 @@ class BendersSolver:
             except Exception:
                 last_mp_gap = None
             last_mp_term = str(mp_term) if mp_term is not None else None
+            # A master solve that stops on the clock rather than on the gap makes the
+            # whole run machine-dependent: how many nodes it explored in those seconds
+            # depends on machine load, and every later iteration inherits the difference.
+            # configs/baseline_d9.yaml states this as a determinism requirement; a run
+            # that breaks it must say so rather than look reproducible.
+            if last_mp_term is not None and "maxtimelimit" in last_mp_term.lower().replace("_", ""):
+                clock_truncated_master_solves += 1
             _vprint(
                 "[MP] iter=%d incumbent=%s best_bound=%s gap=%s (src: inc=%s bb=%s gap=%s)"
                 % (
@@ -1227,7 +1277,7 @@ class BendersSolver:
             try:
                 if isinstance(getattr(self.subproblem, "params", None), dict):
                     self.subproblem.params["debug_current_iteration"] = int(it)
-                    remaining_time = max(1.0, float(self.cfg.solver.time_limit_s) - (time.time() - t0))
+                    remaining_time = max(1.0, float(self.cfg.solver.total_time_limit_s) - (time.time() - t0))
                     self.subproblem.params["solve_time_limit_s"] = float(remaining_time)
             except Exception:
                 pass
