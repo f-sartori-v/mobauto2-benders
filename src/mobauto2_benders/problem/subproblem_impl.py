@@ -196,6 +196,12 @@ class ProblemSubproblem(Subproblem):
                 v = None
             if v is None:
                 return None
+            # Missing return: without it this helper yielded None for every key, so the
+            # early exit below never fired and a cut was generated every iteration.
+            try:
+                return float(v)
+            except Exception:
+                return None
 
         def _dbg(msg: str) -> None:
             if debug_timing:
