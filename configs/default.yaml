@@ -17,7 +17,8 @@ data:
   # Demand source (preferred): file with requests or R_out/R_ret arrays
   demand_file: setups/base.yaml
   # Optional scenario files for multi-scenario runs
-  scenario_files: #[setups/prob/base.yaml, setups/prob/base_plus100_out_noon.yaml, setups/prob/base_ret_peak_adv.yaml, setups/prob/base_vol20_pm60.yaml]
+  scenario_files: [setups/base.yaml, setups/base_plus100_out_noon.yaml, setups/base_ret_peak_adv.yaml, setups/base_vol20_pm60.yaml]
+  #scenario_files: #[setups/prob/base.yaml, setups/prob/base_plus100_out_noon.yaml, setups/prob/base_ret_peak_adv.yaml, setups/prob/base_vol20_pm60.yaml]
   # Optional weights aligned with scenario_files
   scenario_weights: null
   # Optional inline demand arrays (single scenario)
@@ -29,12 +30,12 @@ model:
     # Total horizon length in minutes (T_minutes) or discrete slots (T)
     T_minutes: 660
     # Minutes per slot
-    slot_resolution: 30
+    slot_resolution: 15
     # Trip duration in minutes (converted internally to slots)
     trip_duration_minutes: 30
   fleet:
     # Number of shuttles
-    Q: 2
+    Q: 3
     # Initial battery level per shuttle (length Q)
     initial_battery: [150.0, 150.0, 150.0]
     # Forced first action per shuttle at t=0: IDL, CHR, OUT, RET
@@ -77,7 +78,7 @@ master:
   # This is NOT the run budget -- that is solver.total_time_limit_s below.
   # The Benders loop runs a gap-tied schedule that picks a per-iteration limit;
   # this caps it. Test phase: 30. Simulation phase: 600.
-  per_iteration_time_limit_s: 15
+  per_iteration_time_limit_s: 30
   # Ceiling on the master MIP gap, per Benders iteration.
   # This is NOT the convergence criterion -- that is solver.tolerance below.
   # The schedule tightens the gap on its own (down to 0.001) as the Benders gap
@@ -119,8 +120,6 @@ subproblem:
   Wmax_minutes: 60
   # Penalty per unit of unserved demand
   p: 50.0
-  # Tiny tie-breaker cost encouraging packing
-  fill_first_epsilon: 1.0e-6
   # Restricted fallback probing when proxy cuts are degenerate
   degenerate_cut_probe_top_k: 6
   # Treat slopes with max abs value below this threshold as zero
@@ -141,7 +140,7 @@ solver:
   # what a run costs. Checked between iterations and also clamps the master's
   # per-iteration limit, so it is a real ceiling.
   # Test phase: 120. Simulation phase: 1800 or more.
-  total_time_limit_s: 120
+  total_time_limit_s: 300
   # Optional stall-based early stopping
   stall_max_no_improve_iters: 0
   stall_min_abs_improve: 1.0

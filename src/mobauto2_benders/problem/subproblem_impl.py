@@ -80,7 +80,7 @@ class ProblemSubproblem(Subproblem):
         # Optional: solver-specific options (e.g., CPLEX: {"lpmethod": 2, "threads": 0})
         solver_options = dict(params.get("solver_options", {}) or {})
         # Prefer packing demand into the first vehicle layer, then the next (LP tie-breaker)
-        fill_eps = float(params.get("fill_first_epsilon", 1e-6) or 0.0)
+        fill_eps = 0.0  # removed with the layers (D30): no per-vehicle ordering to break
 
         # Determine T and Q from candidate if not configured
         q_idx, t_idx = self._parse_candidate_indices(candidate)
@@ -248,38 +248,38 @@ class ProblemSubproblem(Subproblem):
             # the negative slopes the master expects. This LP must match that.
             md.a_OUT = pyo.Var(Tset)
             md.a_RET = pyo.Var(Tset)
-            md.pi_OUT = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)], within=pyo.NonPositiveReals)
-            md.pi_RET = pyo.Var([(tau, k) for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)], within=pyo.NonPositiveReals)
+            md.pi_OUT = pyo.Var(Tset, within=pyo.NonPositiveReals)
+            md.pi_RET = pyo.Var(Tset, within=pyo.NonPositiveReals)
 
             # Dual feasibility: one constraint per primal variable.
             #   primal x[t,tau,k], cost (tau-t) + fill_eps*k  ->  a[t] + pi[tau,k] <= cost
             #   primal u[t],       cost p                     ->  a[t]            <= p
-            def df_out_rule(m, t, tau, k):
+            def df_out_rule(m, t, tau):
                 # active arc iff (t+1) <= tau <= min(T-1, t+W)
                 if not ((t + 1) <= tau <= min(T_ - 1, t + Wmax_slots)):
                     return pyo.Constraint.Skip
-                return m.a_OUT[t] + m.pi_OUT[tau, k] <= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
-            md.DF_OUT = pyo.Constraint([(t, tau, k) for t in Tset for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)],
-                                       rule=lambda m, t, tau, k: df_out_rule(m, t, tau, k))
+                return m.a_OUT[t] + m.pi_OUT[tau] <= float(max(0, tau - t))
+            md.DF_OUT = pyo.Constraint([(t, tau) for t in Tset for tau in Tset],
+                                       rule=lambda m, t, tau: df_out_rule(m, t, tau))
             # Dual feasibility for RET
-            def df_ret_rule(m, t, tau, k):
+            def df_ret_rule(m, t, tau):
                 if not ((t + 1) <= tau <= min(T_ - 1, t + Wmax_slots)):
                     return pyo.Constraint.Skip
-                return m.a_RET[t] + m.pi_RET[tau, k] <= float(max(0, tau - t)) + max(0.0, float(params.get("fill_first_epsilon", 0.0))) * float(k)
-            md.DF_RET = pyo.Constraint([(t, tau, k) for t in Tset for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0)],
-                                       rule=lambda m, t, tau, k: df_ret_rule(m, t, tau, k))
+                return m.a_RET[t] + m.pi_RET[tau] <= float(max(0, tau - t))
+            md.DF_RET = pyo.Constraint([(t, tau) for t in Tset for tau in Tset],
+                                       rule=lambda m, t, tau: df_ret_rule(m, t, tau))
 
             # Dual constraint from the unmet-demand variables u[t] >= 0
             md.A_OUT_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_OUT[t] <= float(p_penalty))
             md.A_RET_CAP = pyo.Constraint(Tset, rule=lambda m, t: m.a_RET[t] <= float(p_penalty))
 
             # Optimality face equality: dual objective equals primal UB at incumbent
-            cap_out_rhs = [min(float(S_cap), float(C_out_vec[tau])) for tau in Tset]
-            cap_ret_rhs = [min(float(S_cap), float(C_ret_vec[tau])) for tau in Tset]
+            cap_out_rhs = [float(C_out_vec[tau]) for tau in Tset]
+            cap_ret_rhs = [float(C_ret_vec[tau]) for tau in Tset]
             def dual_obj_expr(m):
                 term_dem = sum(float(R_out_vec[t]) * m.a_OUT[t] for t in Tset) + sum(float(R_ret_vec[t]) * m.a_RET[t] for t in Tset)
-                term_cap = sum(cap_out_rhs[tau] * m.pi_OUT[tau, k] for tau in Tset for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0)) \
-                           + sum(cap_ret_rhs[tau] * m.pi_RET[tau, k] for tau in Tset for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0))
+                term_cap = sum(cap_out_rhs[tau] * m.pi_OUT[tau] for tau in Tset) \
+                           + sum(cap_ret_rhs[tau] * m.pi_RET[tau] for tau in Tset)
                 return term_dem + term_cap
             # Restrict to the optimal face. Weak duality gives dual_obj <= ub_base for
             # every dual-feasible point, so ">= ub_base - tol" carves out the (near-)
@@ -309,12 +309,12 @@ class ProblemSubproblem(Subproblem):
                 expr=(
                     sum(
                         (float(S_cap) * float(Ybar_out_vec[tau]) - float(C_out_vec[tau]))
-                        * sum(md.pi_OUT[tau, k] for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0))
+                        * md.pi_OUT[tau]
                         for tau in Tset
                     )
                     + sum(
                         (float(S_cap) * float(Ybar_ret_vec[tau]) - float(C_ret_vec[tau]))
-                        * sum(md.pi_RET[tau, k] for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0))
+                        * md.pi_RET[tau]
                         for tau in Tset
                     )
                 ),
@@ -346,8 +346,8 @@ class ProblemSubproblem(Subproblem):
             dm_out = {}
             dm_ret = {}
             for tau in range(T_):
-                dm_out[tau] = float(S_cap) * sum(float(pyo.value(md.pi_OUT[tau, k])) for k in range(int(K_out_use[tau]) if tau < len(K_out_use) else 0))
-                dm_ret[tau] = float(S_cap) * sum(float(pyo.value(md.pi_RET[tau, k])) for k in range(int(K_ret_use[tau]) if tau < len(K_ret_use) else 0))
+                dm_out[tau] = float(S_cap) * float(pyo.value(md.pi_OUT[tau]))
+                dm_ret[tau] = float(S_cap) * float(pyo.value(md.pi_RET[tau]))
             return dm_out, dm_ret
 
         # Finite-difference coefficient builder: for each tau, solve with +S capacity
@@ -769,8 +769,10 @@ class ProblemSubproblem(Subproblem):
                 if mw_enabled:
                     # MW-selected dual slopes on optimal face
                     # Ensure at least one capacity layer per tau for dual π variables
-                    K_out_mw = [max(1, int(K_out_lp[t])) for t in range(T)]
-                    K_ret_mw = [max(1, int(K_ret_lp[t])) for t in range(T)]
+                    # Layer counts no longer shape the dual: there is one pi per slot
+                    # regardless. Passed through only for signature compatibility.
+                    K_out_mw = list(K_out_lp)
+                    K_ret_mw = list(K_ret_lp)
                     dm_pair = solve_mw_dual(
                         T, Wmax, p_pen, S,
                         K_out_mw, K_ret_mw,
@@ -1663,18 +1665,29 @@ def solve_subproblem(
     Arcs_list = [(t, tau) for t in Tset for tau in Tset if (t + 1) <= tau <= min(P.T - 1, t + W)]
     m.Arcs = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
 
-    # Layered arcs per departure time based on number of vehicles at tau
-    OutLayers = [(tau, k) for tau in Tset for k in range(int(P.K_out[tau]) if tau < len(P.K_out) else 0)]
-    RetLayers = [(tau, k) for tau in Tset for k in range(int(P.K_ret[tau]) if tau < len(P.K_ret) else 0)]
-    m.OutLayers = pyo.Set(initialize=OutLayers, dimen=2, ordered=False)
-    m.RetLayers = pyo.Set(initialize=RetLayers, dimen=2, ordered=False)
+    # Arcs carry no layer index.
+    #
+    # This model used to split each departure slot into K_d[tau] "layers", one per
+    # vehicle, so that a per-layer epsilon could encourage packing the first vehicle
+    # before the second. K_d[tau] comes from the master's y, so the LAYERS -- and
+    # therefore the variable set AND the constraint set -- changed with y.
+    #
+    # Benders duality requires y to enter only through the right-hand side. When the
+    # constraint matrix itself moves with y, the dual of one instance is not a
+    # subgradient of the recourse across y, and NO cut generator can be valid on top
+    # of it. Measured before this change: cuts forced theta to 6893 (directional),
+    # 5290 (single theta) and 6087 (plain dual) at a schedule whose true recourse is
+    # 4183.00. The mechanism was pi[tau] summing K layer duals with dm = S*pi, giving
+    # slopes about K times too steep, which over-estimates whenever the evaluated y
+    # has less capacity than the incumbent.
+    #
+    # The layers were redundant in capacity: K layers of min(S, S*K) = S each total
+    # K*S = S*sum_q y_d[q,tau], which is exactly the aggregated right-hand side used
+    # below. K = 0 gives no arcs, matching zero capacity. Only the fill_first_epsilon
+    # tie-break between otherwise identical assignments is lost.
+    m.ArcsOut = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
+    m.ArcsRet = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
 
-    ArcsOut = [(t, tau, k) for (t, tau) in Arcs_list for (tau2, k) in OutLayers if tau2 == tau]
-    ArcsRet = [(t, tau, k) for (t, tau) in Arcs_list for (tau2, k) in RetLayers if tau2 == tau]
-    m.ArcsOut = pyo.Set(initialize=ArcsOut, dimen=3, ordered=False)
-    m.ArcsRet = pyo.Set(initialize=ArcsRet, dimen=3, ordered=False)
-
-    # Variables defined on layered arcs only
     m.x_OUT = pyo.Var(m.ArcsOut, within=pyo.NonNegativeReals)
     m.x_RET = pyo.Var(m.ArcsRet, within=pyo.NonNegativeReals)
     m.u_OUT = pyo.Var(Tset, within=pyo.NonNegativeReals)
@@ -1683,49 +1696,42 @@ def solve_subproblem(
     def wait_cost(t: int, tau: int) -> float:
         return float(max(0, tau - t))
 
-    # Objective sums over layered arcs; small per-layer epsilon encourages packing into lower k first
-    def layer_cost(t: int, tau: int, k: int) -> float:
-        return float(max(0, tau - t)) + max(0.0, float(P.fill_eps)) * float(k)
-
     m.obj = pyo.Objective(
         expr=
-            sum(layer_cost(t, tau, k) * m.x_OUT[t, tau, k] for (t, tau, k) in m.ArcsOut)
-            + sum(layer_cost(t, tau, k) * m.x_RET[t, tau, k] for (t, tau, k) in m.ArcsRet)
+            sum(wait_cost(t, tau) * m.x_OUT[t, tau] for (t, tau) in m.ArcsOut)
+            + sum(wait_cost(t, tau) * m.x_RET[t, tau] for (t, tau) in m.ArcsRet)
             + P.p * (sum(m.u_OUT[t] for t in Tset) + sum(m.u_RET[t] for t in Tset)),
         sense=pyo.minimize,
     )
 
     def cons_dem_OUT(m, t):
-        taus = [tau for tau in Tset if t <= tau <= min(P.T - 1, t + W)]
-        return sum(m.x_OUT[t, tau, k] for tau in taus for k in range(int(P.K_out[tau]) if tau < len(P.K_out) else 0) if (t, tau, k) in m.ArcsOut) + m.u_OUT[t] == R_out[t]
+        return sum(m.x_OUT[t, tau] for tau in Tset if (t, tau) in m.ArcsOut) + m.u_OUT[t] == R_out[t]
 
     m.D_out = pyo.Constraint(Tset, rule=cons_dem_OUT)
 
     def cons_dem_RET(m, t):
-        taus = [tau for tau in Tset if t <= tau <= min(P.T - 1, t + W)]
-        return sum(m.x_RET[t, tau, k] for tau in taus for k in range(int(P.K_ret[tau]) if tau < len(P.K_ret) else 0) if (t, tau, k) in m.ArcsRet) + m.u_RET[t] == R_ret[t]
+        return sum(m.x_RET[t, tau] for tau in Tset if (t, tau) in m.ArcsRet) + m.u_RET[t] == R_ret[t]
 
     m.D_ret = pyo.Constraint(Tset, rule=cons_dem_RET)
 
-    # No same-slot or last-slot caps in the original model
-
-    # Per-layer capacities: each vehicle layer is one shuttle => up to S seats
-    def cap_out_layer(m, tau, k):
-        ts = [t for t in Tset if t <= tau <= min(P.T - 1, t + W)]
-        # If no valid arcs exist for this layer, skip the constraint
-        if not any((t, tau, k) in m.ArcsOut for t in ts):
+    # One capacity row per departure slot, right-hand side linear in y:
+    #   sum_t x_d[t,tau] <= C_d[tau] = S * sum_q y_d[q,tau]
+    # Fixed structure, so pi_d[tau] is a genuine dual and dm = S*pi a valid subgradient.
+    def cap_out_rule(m, tau):
+        ts = [t for t in Tset if (t, tau) in m.ArcsOut]
+        if not ts:
             return pyo.Constraint.Skip
-        return sum(m.x_OUT[t, tau, k] for t in ts if (t, tau, k) in m.ArcsOut) <= min(float(P.S), float(C_out[tau]))
+        return sum(m.x_OUT[t, tau] for t in ts) <= float(C_out[tau])
 
-    m.Cap_out = pyo.Constraint(m.OutLayers, rule=cap_out_layer)
+    m.Cap_out = pyo.Constraint(Tset, rule=cap_out_rule)
 
-    def cap_ret_layer(m, tau, k):
-        ts = [t for t in Tset if t <= tau <= min(P.T - 1, t + W)]
-        if not any((t, tau, k) in m.ArcsRet for t in ts):
+    def cap_ret_rule(m, tau):
+        ts = [t for t in Tset if (t, tau) in m.ArcsRet]
+        if not ts:
             return pyo.Constraint.Skip
-        return sum(m.x_RET[t, tau, k] for t in ts if (t, tau, k) in m.ArcsRet) <= min(float(P.S), float(C_ret[tau]))
+        return sum(m.x_RET[t, tau] for t in ts) <= float(C_ret[tau])
 
-    m.Cap_ret = pyo.Constraint(m.RetLayers, rule=cap_ret_layer)
+    m.Cap_ret = pyo.Constraint(Tset, rule=cap_ret_rule)
 
     # Dual suffix required to read duals
     m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
@@ -1799,22 +1805,10 @@ def solve_subproblem(
 
     alpha_OUT = {t: float(m.dual.get(m.D_out[t], 0.0)) for t in Tset}
     alpha_RET = {t: float(m.dual.get(m.D_ret[t], 0.0)) for t in Tset}
-    pi_OUT = {}
-    for tau in Tset:
-        total = 0.0
-        kmax = int(P.K_out[tau]) if tau < len(P.K_out) else 0
-        for k in range(kmax):
-            if (tau, k) in m.Cap_out:
-                total += float(m.dual.get(m.Cap_out[tau, k], 0.0))
-        pi_OUT[tau] = total
-    pi_RET = {}
-    for tau in Tset:
-        total = 0.0
-        kmax = int(P.K_ret[tau]) if tau < len(P.K_ret) else 0
-        for k in range(kmax):
-            if (tau, k) in m.Cap_ret:
-                total += float(m.dual.get(m.Cap_ret[tau, k], 0.0))
-        pi_RET[tau] = total
+    # One dual per departure slot. This used to sum K layer duals, which is what made
+    # dm = S*pi about K times too steep and the cuts invalid.
+    pi_OUT = {tau: (float(m.dual.get(m.Cap_out[tau], 0.0)) if tau in m.Cap_out else 0.0) for tau in Tset}
+    pi_RET = {tau: (float(m.dual.get(m.Cap_ret[tau], 0.0)) if tau in m.Cap_ret else 0.0) for tau in Tset}
 
     # Gather simple primal summaries
     served_out_by_tau = [0.0 for _ in Tset]
@@ -1822,37 +1816,44 @@ def solve_subproblem(
     # Also collect per-layer (per shuttle) served counts at each departure slot
     served_out_by_tau_k = [[] for _ in Tset]
     served_ret_by_tau_k = [[] for _ in Tset]
+    def _split_across_vehicles(total: float, kmax: int, seats: float) -> list[float]:
+        """Assign an aggregated flow to individual vehicles, filling each in turn.
+
+        Capacity is now one row per slot, so the model no longer says which vehicle
+        carried whom -- and it never needed to: the vehicles at a slot are identical.
+        This reproduces what the per-layer fill_first_epsilon used to arrange, so the
+        per-shuttle report still accounts for every served passenger.
+        """
+        out = [0.0 for _ in range(max(0, kmax))]
+        left = float(total)
+        for k in range(len(out)):
+            take = min(float(seats), max(0.0, left))
+            out[k] = take
+            left -= take
+        if left > 1e-9 and out:
+            out[-1] += left
+        return out
+
     for tau in Tset:
-        # Aggregate across demand time t for each layer k
         kmax_out = int(P.K_out[tau]) if tau < len(P.K_out) else 0
         kmax_ret = int(P.K_ret[tau]) if tau < len(P.K_ret) else 0
-        # Initialize per-layer arrays
-        if kmax_out > 0:
-            served_out_by_tau_k[tau] = [0.0 for _ in range(kmax_out)]
-        if kmax_ret > 0:
-            served_ret_by_tau_k[tau] = [0.0 for _ in range(kmax_ret)]
-        # Sum flows
-        total_out_tau = 0.0
-        total_ret_tau = 0.0
-        for k in range(kmax_out):
-            val_k = sum(float(pyo.value(m.x_OUT[t, tau, k])) for t in Tset if (t, tau, k) in m.ArcsOut)
-            served_out_by_tau_k[tau][k] = val_k
-            total_out_tau += val_k
-        for k in range(kmax_ret):
-            val_k = sum(float(pyo.value(m.x_RET[t, tau, k])) for t in Tset if (t, tau, k) in m.ArcsRet)
-            served_ret_by_tau_k[tau][k] = val_k
-            total_ret_tau += val_k
+        total_out_tau = sum(float(pyo.value(m.x_OUT[t, tau])) for t in Tset if (t, tau) in m.ArcsOut)
+        total_ret_tau = sum(float(pyo.value(m.x_RET[t, tau])) for t in Tset if (t, tau) in m.ArcsRet)
         served_out_by_tau[tau] = total_out_tau
         served_ret_by_tau[tau] = total_ret_tau
+        if kmax_out > 0:
+            served_out_by_tau_k[tau] = _split_across_vehicles(total_out_tau, kmax_out, float(P.S))
+        if kmax_ret > 0:
+            served_ret_by_tau_k[tau] = _split_across_vehicles(total_ret_tau, kmax_ret, float(P.S))
 
     # Component costs (per direction)
     try:
-        out_cost_val = sum(layer_cost(t, tau, k) * float(pyo.value(m.x_OUT[t, tau, k])) for (t, tau, k) in m.ArcsOut)
+        out_cost_val = sum(wait_cost(t, tau) * float(pyo.value(m.x_OUT[t, tau])) for (t, tau) in m.ArcsOut)
         out_cost_val += float(P.p) * sum(float(pyo.value(m.u_OUT[t])) for t in Tset)
     except Exception:
         out_cost_val = 0.0
     try:
-        ret_cost_val = sum(layer_cost(t, tau, k) * float(pyo.value(m.x_RET[t, tau, k])) for (t, tau, k) in m.ArcsRet)
+        ret_cost_val = sum(wait_cost(t, tau) * float(pyo.value(m.x_RET[t, tau])) for (t, tau) in m.ArcsRet)
         ret_cost_val += float(P.p) * sum(float(pyo.value(m.u_RET[t])) for t in Tset)
     except Exception:
         ret_cost_val = 0.0
@@ -1861,23 +1862,21 @@ def solve_subproblem(
     wait_cost_slots = 0.0
     fill_eps_cost = 0.0
     neg_contribs: list[tuple[float, int, int, int, float]] = []
-    for (t, tau, k) in m.ArcsOut:
-        val = float(pyo.value(m.x_OUT[t, tau, k]) or 0.0)
+    for (t, tau) in m.ArcsOut:
+        val = float(pyo.value(m.x_OUT[t, tau]) or 0.0)
         if val == 0.0:
             continue
         w = float(max(0, tau - t))
         wait_cost_slots += w * val
-        fill_eps_cost += float(max(0.0, float(P.fill_eps))) * float(k) * val
         contrib = w * val
         if contrib < -1e-9:
-            neg_contribs.append((contrib, int(t), int(tau), int(k), val))
-    for (t, tau, k) in m.ArcsRet:
-        val = float(pyo.value(m.x_RET[t, tau, k]) or 0.0)
+            neg_contribs.append((contrib, int(t), int(tau), 0, val))
+    for (t, tau) in m.ArcsRet:
+        val = float(pyo.value(m.x_RET[t, tau]) or 0.0)
         if val == 0.0:
             continue
         w = float(max(0, tau - t))
         wait_cost_slots += w * val
-        fill_eps_cost += float(max(0.0, float(P.fill_eps))) * float(k) * val
         contrib = w * val
         if contrib < -1e-9:
             neg_contribs.append((contrib, int(t), int(tau), int(k), val))
@@ -1888,8 +1887,10 @@ def solve_subproblem(
     obj_val = float(pyo.value(m.obj))
     # Strong duality check
     try:
-        cap_out_rhs = [min(float(P.S), float(C_out[tau])) for tau in Tset]
-        cap_ret_rhs = [min(float(P.S), float(C_ret[tau])) for tau in Tset]
+        # One capacity row per slot with right-hand side C[tau] = S*sum_q y[q,tau].
+        # This used to be min(S, C[tau]) because the row was per vehicle layer.
+        cap_out_rhs = [float(C_out[tau]) for tau in Tset]
+        cap_ret_rhs = [float(C_ret[tau]) for tau in Tset]
         dual_obj = sum(float(R_out[t]) * alpha_OUT[t] for t in Tset) + sum(float(R_ret[t]) * alpha_RET[t] for t in Tset)
         dual_obj += sum(cap_out_rhs[tau] * pi_OUT[tau] for tau in Tset)
         dual_obj += sum(cap_ret_rhs[tau] * pi_RET[tau] for tau in Tset)

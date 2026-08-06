@@ -124,7 +124,6 @@ class SubproblemSection:
     Wmax_minutes: int | None = None
     Wmax_slots: int | None = None
     p: float = 0.0
-    fill_first_epsilon: float = 0.0
     degenerate_cut_probe_top_k: int = 6
     degenerate_cut_probe_top_k_out: int | None = None
     degenerate_cut_probe_top_k_ret: int | None = None
@@ -442,7 +441,6 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
             "Wmax_minutes": sub_params.get("Wmax_minutes"),
             "Wmax_slots": sub_params.get("Wmax_slots"),
             "p": sub_params.get("p"),
-            "fill_first_epsilon": sub_params.get("fill_first_epsilon", 0.0),
             "degenerate_cut_probe_top_k": sub_params.get("degenerate_cut_probe_top_k", 6),
             "degenerate_cut_probe_top_k_out": sub_params.get("degenerate_cut_probe_top_k_out"),
             "degenerate_cut_probe_top_k_ret": sub_params.get("degenerate_cut_probe_top_k_ret"),
@@ -726,7 +724,6 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "Wmax_minutes",
             "Wmax_slots",
             "p",
-            "fill_first_epsilon",
             "degenerate_cut_probe_top_k",
             "degenerate_cut_probe_top_k_out",
             "degenerate_cut_probe_top_k_ret",
@@ -767,10 +764,6 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             else None
         ),
         p=_ensure_float(_disallow_expr(sub_raw.get("p"), "subproblem.p"), "subproblem.p"),
-        fill_first_epsilon=_ensure_float(
-            _disallow_expr(sub_raw.get("fill_first_epsilon", 0.0), "subproblem.fill_first_epsilon"),
-            "subproblem.fill_first_epsilon",
-        ),
         degenerate_cut_probe_top_k=_ensure_int(
             _disallow_expr(sub_raw.get("degenerate_cut_probe_top_k", 6), "subproblem.degenerate_cut_probe_top_k"),
             "subproblem.degenerate_cut_probe_top_k",

@@ -203,6 +203,12 @@ class TestRecourseLowerBound(unittest.TestCase):
         from mobauto2_benders.app import _prepare_params
 
         raw = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))
+        # default.yaml is a live experiment file; pin the data section so these
+        # tests describe the inequality, not whatever run is being set up in it.
+        # Multi-scenario legitimately disables the bound (it needs the expectation
+        # over scenarios), so a scenario list left there would fail them for the
+        # wrong reason.
+        raw["data"] = {**raw["data"], "scenario_files": None, "scenarios": None}
         raw["model"]["time"]["slot_resolution"] = res
         raw["model"]["fleet"]["Q"] = q
         raw["model"]["fleet"]["initial_battery"] = [150.0]
@@ -221,16 +227,16 @@ class TestRecourseLowerBound(unittest.TestCase):
         return mp
 
     def test_on_in_the_shipped_default_config(self):
-        """D29 flipped this on. Read the shipped config rather than the schema
-        default, so a config that forgets the key is caught too."""
+        """D29 flipped this on. Assert the shipped config asks for it, rather than
+        that the constraint gets built: whether it is built also depends on the
+        data section, which is legitimately multi-scenario at times."""
         from mobauto2_benders.config import load_config
-        from mobauto2_benders.app import _prepare_params
 
         cfg = load_config(str(CONFIGS / "default.yaml"))
-        mp, _ = _prepare_params(cfg, {})
-        if mp.get("T") is None:
-            mp["T"] = max(1, int(mp["T_minutes"]) // int(mp["slot_resolution"]))
-        pm = build_master(mp)
+        self.assertTrue(cfg.master.recourse_lower_bound)
+
+    def test_built_when_asked_on_single_scenario_data(self):
+        pm = build_master(self._params(True))
         self.assertIn("C_recourse_lb_out", constraint_names(pm.m))
 
     def test_can_be_disabled(self):

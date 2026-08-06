@@ -180,7 +180,6 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     _set_if_not_none(sp, "Wmax_minutes", cfg.subproblem.Wmax_minutes)
     _set_if_not_none(sp, "Wmax_slots", cfg.subproblem.Wmax_slots)
     sp["p"] = cfg.subproblem.p
-    sp["fill_first_epsilon"] = float(cfg.subproblem.fill_first_epsilon)
     sp["degenerate_cut_probe_top_k"] = int(cfg.subproblem.degenerate_cut_probe_top_k)
     _set_if_not_none(sp, "degenerate_cut_probe_top_k_out", cfg.subproblem.degenerate_cut_probe_top_k_out)
     _set_if_not_none(sp, "degenerate_cut_probe_top_k_ret", cfg.subproblem.degenerate_cut_probe_top_k_ret)
@@ -299,13 +298,12 @@ def _print_cfg(cfg, mp: dict, sp: dict) -> None:
     except Exception:
         pass
     print(
-        "  subproblem: solver=%s S=%s Wmax=%s p=%s fill_eps=%s (slot_res=%s)"
+        "  subproblem: solver=%s S=%s Wmax=%s p=%s (slot_res=%s)"
         % (
             sp.get("lp_solver", "-"),
             sp.get("S", "-"),
             sp.get("Wmax_minutes", sp.get("Wmax_slots", sp.get("Wmax", "-"))),
             sp.get("p", "-"),
-            sp.get("fill_first_epsilon", "-"),
             sp.get("slot_resolution", mp.get("slot_resolution", "-")),
         )
     )
