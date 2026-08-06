@@ -79,7 +79,7 @@ master:
   mipgap: 0.01
   # Optional CPLEX parameters
   cplex_options:
-    CPXPARAM_MIP_Strategy_Symmetry: 5
+    CPXPARAM_Preprocessing_Symmetry: 5
     CPXPARAM_Threads: 0
   # Master solver backend (preferred: cplex_direct)
   solver_backend: cplex_direct
