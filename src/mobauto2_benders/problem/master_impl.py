@@ -447,7 +447,7 @@ class ProblemMaster(MasterProblem):
         m = self.m
         solver = self._get_solver()
         tee_flag = bool(self._p("solver_tee", self._p("mp_solve_tee", False)))
-        emit_reports = bool(self._p("emit_reports", True))
+        emit_reports = bool(self._p("emit_reports", False))
         # Per-iteration solver controls
         try:
             time_limit = self._p("solve_time_limit_s")
@@ -707,7 +707,9 @@ class ProblemMaster(MasterProblem):
                     gap_val = 0.0
                 stats["gap"] = gap_val
                 sources["gap"] = "computed"
-            except Exception:
+            except (TypeError, ValueError):
+                # Only a bad numeric conversion is expected here. Anything else is a
+                # real error and must not be swallowed on the bound-provenance path.
                 pass
 
         if stats.get("best_integer") is None:
@@ -716,9 +718,12 @@ class ProblemMaster(MasterProblem):
             elif parsed_best_int is not None:
                 stats["best_integer"] = parsed_best_int
 
-        stats["incumbent_source"] = sources.get("incumbent")
-        stats["best_bound_source"] = sources.get("best_bound")
-        stats["gap_source"] = sources.get("gap")
+        # Never leave provenance blank. A missing source means the value could not be
+        # obtained from any of solver_results / cplex_api / cplex_log / computed, and
+        # that should be visible rather than reading as an absent field (M3).
+        stats["incumbent_source"] = sources.get("incumbent") or "unavailable"
+        stats["best_bound_source"] = sources.get("best_bound") or "unavailable"
+        stats["gap_source"] = sources.get("gap") or "unavailable"
 
         if stats.get("best_bound") is None:
             if self._last_log_path is None:

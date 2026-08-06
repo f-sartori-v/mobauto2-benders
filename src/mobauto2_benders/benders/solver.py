@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Optional, Iterable, Mapping, Any
 
 from ..config import RootConfig
-from .core import CorePoint
 from .master import MasterProblem
 from .subproblem import Subproblem
 from .types import SolveStatus, SubproblemResult

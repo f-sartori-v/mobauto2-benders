@@ -105,7 +105,12 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     mp["solver"] = cfg.solver.master_solver
     mp["solver_tee"] = bool(cfg.solver.solver_tee)
     mp["log_level"] = str(cfg.run.log_level)
-    mp["emit_reports"] = str(cfg.run.log_level).upper() != "REPORT"
+    # Off by default (M5). Writing a symbolic LP plus a solver log on every master
+    # solve is a debugging aid, not something a normal run should produce -- a
+    # 10-iteration run left 20 files behind. Previously this was derived from
+    # log_level != "REPORT", i.e. on unless you set a log level that reads as if it
+    # would enable reports rather than disable them.
+    mp["emit_reports"] = bool(cfg.run.emit_reports)
 
     sp["lp_solver"] = cfg.solver.subproblem_solver
     sp["multi_cuts_by_scenario"] = bool(cfg.subproblem.multi_cuts_by_scenario)

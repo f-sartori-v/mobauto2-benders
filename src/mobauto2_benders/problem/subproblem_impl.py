@@ -108,6 +108,13 @@ class ProblemSubproblem(Subproblem):
         def _aggregate_requests(container: Any, Tlen: int) -> tuple[list[float], list[float]]:
             R_out = [0.0 for _ in range(Tlen)]
             R_ret = [0.0 for _ in range(Tlen)]
+
+            def _slot_idx_from_minutes(tmin: float) -> int:
+                # Map continuous minutes to slot index via floor:
+                # [0,res)->0, [res,2res)->1, ...
+                res = max(1, slot_res)
+                return max(0, int(math.floor(float(tmin) / res)))
+
             if container is None:
                 return R_out, R_ret
             # Direct arrays
@@ -124,11 +131,6 @@ class ProblemSubproblem(Subproblem):
                 container = container.get("requests") or container.get("req_matrix") or []
             # List of dicts [{dir,time}, ...]
             if isinstance(container, list) and container and isinstance(container[0], dict):
-                import math as _math
-                def _slot_idx_from_minutes(tmin: float) -> int:
-                    # Map continuous minutes to slot index via floor: [0,res)->0, [res,2res)->1, ...
-                    res = max(1, slot_res)
-                    return max(0, int(_math.floor(float(tmin) / res)))
                 for r in container:
                     d = r.get("dir")
                     try:
@@ -155,10 +157,6 @@ class ProblemSubproblem(Subproblem):
                 return R_out, R_ret
             # Matrix [[dir,time], ...]
             if isinstance(container, list):
-                import math as _math
-                def _slot_idx_from_minutes(tmin: float) -> int:
-                    res = max(1, slot_res)
-                    return max(0, int(_math.floor(float(tmin) / res)))
                 for row in container:
                     if not isinstance(row, (list, tuple)) or len(row) < 2:
                         continue

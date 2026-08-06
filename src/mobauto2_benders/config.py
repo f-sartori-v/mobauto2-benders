@@ -32,6 +32,9 @@ class RunSection:
     log_file: str | None = None
     report_dir: str | None = None
     seed: int | None = None
+    # Write a symbolic LP and a solver log for every master solve. Debugging aid,
+    # off by default: it produces two files per iteration (M5).
+    emit_reports: bool = False
 
 
 @dataclass(slots=True)
@@ -481,7 +484,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         raise ValueError("Unsupported schema version; expected mobauto2_benders_config v2")
 
     run_raw = _as_mapping(data.get("run"), "run")
-    _check_unknown_keys(run_raw, {"name", "log_level", "log_file", "report_dir", "seed"}, "run")
+    _check_unknown_keys(run_raw, {"name", "log_level", "log_file", "report_dir", "seed", "emit_reports"}, "run")
     run_name = run_raw.get("name")
     run = RunSection(
         name=(_ensure_str(run_name, "run.name") if run_name is not None else None),
@@ -489,6 +492,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         log_file=run_raw.get("log_file"),
         report_dir=run_raw.get("report_dir"),
         seed=(_ensure_int(run_raw.get("seed"), "run.seed") if "seed" in run_raw and run_raw.get("seed") is not None else None),
+        emit_reports=_ensure_bool(run_raw.get("emit_reports", False), "run.emit_reports"),
     )
 
     data_raw = _as_mapping(data.get("data"), "data")
