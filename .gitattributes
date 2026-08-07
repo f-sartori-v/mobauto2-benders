@@ -1,0 +1,9 @@
+# Reference run logs are compared line-by-line against fresh runs (D31). Git must not
+# rewrite their line endings on checkout, or the comparison differs by platform.
+*.log -text
+
+# Everything else: normalise to LF in the repository, native in the working copy.
+* text=auto
+*.md text
+*.yaml text
+*.py text

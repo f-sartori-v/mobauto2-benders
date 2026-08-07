@@ -1,0 +1,100 @@
+schema:
+  name: mobauto2_benders_config
+  version: 2
+
+# Deterministic regression baseline for the D9 elastic-path deletion.
+#
+# Purpose: this config is NOT for producing results. It exists so the same run
+# can be executed before and after deleting the elastic subproblem path, and the
+# two logs diffed. The deletion must change nothing; this is how we prove it.
+#
+# Determinism requirements (do not "tune" these away):
+#   - CPXPARAM_Threads: 1   -- parallel MIP is not reproducible run to run.
+#   - solve_time_limit_s high enough that the master always terminates on mipgap,
+#     never on wall clock. Time-limited termination depends on machine load.
+#   - max_iterations small and fixed, so the run always stops at the same place.
+#   - seed fixed.
+
+run:
+  name: baseline_d9
+  log_level: INFO
+  log_file: null
+  report_dir: null
+  seed: 42
+
+data:
+  demand_file: setups/base.yaml
+  scenario_files:
+  scenario_weights: null
+  R_out: null
+  R_ret: null
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0, 150.0, 150.0]
+    initial_actions: [IDL, IDL, IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+master:
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  # Pinned OFF, not inherited: these fixtures exist to diff against archived
+  # logs, so their model must not move when a default changes (D29).
+  recourse_lower_bound: false
+  # Generous: the master must terminate on mipgap, not on the clock.
+  per_iteration_time_limit_s: 120
+  per_iteration_mipgap: 0.05
+  cplex_options:
+    CPXPARAM_Preprocessing_Symmetry: 5
+    # Single-threaded for reproducibility. Slower, deliberately.
+    CPXPARAM_Threads: 1
+  solver_backend: cplex_direct
+  aggregate_cuts_by_tau: true
+  theta_per_scenario: false
+  cut_coeff_threshold: 0.001
+  write_lp_after_cut: false
+
+subproblem:
+  multi_cuts_by_scenario: false
+  use_magnanti_wong: true
+  mw_core_alpha: 0.3
+  use_dual_slopes: true
+  S: 15
+  Wmax_minutes: 60
+  p: 50.0
+  degenerate_cut_probe_top_k: 6
+  degenerate_cut_zero_tol: 1.0e-9
+
+solver:
+  # Fixed, small iteration budget: the run must always stop at the same place.
+  max_iterations: 10
+  tolerance: 0.001
+  # High enough never to bind before max_iterations does.
+  # Safety net only: it MUST NOT bind. The run stops at max_iterations, and a
+  # master solve that stops on the clock makes the log non-reproducible, which
+  # destroys the before/after diff this fixture exists for (D26).
+  total_time_limit_s: 3600
+  stall_max_no_improve_iters: 0
+  stall_min_abs_improve: 1.0
+  stall_min_rel_improve: 0.002
+  master_solver: cplex
+  subproblem_solver: cplex_direct
+  solver_tee: false
+
+tolerances:
+  eps_bin: 1.0e-5
+  eps_feas: 1.0e-7
+  eps_cut: 1.0e-8
+  eps_hash: 1.0e-6
