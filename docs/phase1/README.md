@@ -97,6 +97,8 @@ producing a usable bound at all at this size.
 The obvious objection is that 300 s total with a 30 s per-iteration ceiling starves the
 master, so `configs/phase1/master_headroom.yaml` re-ran `lp_on` inside a 900 s budget with
 the ceiling raised to 300 s. The gap-tied schedule caps the solve at `2 + 5/0.05 = 102 s` regardless (D29
+master, so `master_headroom` re-ran `lp_on` inside a 900 s budget with the ceiling raised
+to 300 s. The gap-tied schedule caps the solve at `2 + 5/0.05 = 102 s` regardless (D29
 recorded the same thing), so what it actually tests is **102 s per solve, 3.4x the A/B**:
 
 | per-solve budget | nodes explored | master best bound | internal gap |
