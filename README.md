@@ -1,152 +1,131 @@
-﻿# mobauto2-benders
-Benders decomposition approach for the MobAuto2 project.
+# mobauto2-benders
 
-Quick start (CLI)
-- From repo root after installing the package:
-- `pip install -e .`
-- `mobauto2-benders run`
-- `python -m mobauto2_benders run`
+Benders decomposition for the MobAuto² shuttle fleet sizing and scheduling problem, with
+the audit that established what its bounds do and do not certify.
 
-Quick start (Python)
-```python
-from mobauto2_benders.app import run
+The master decides the here-and-now schedule — which shuttle departs OUT or RET in which
+slot, and when it charges. The subproblem is an LP that assigns passenger demand to those
+departures and prices waiting time plus a penalty `p` per unserved passenger.
 
-result = run()  # uses configs/default.yaml
-print(result.status, result.iterations, result.best_lower_bound, result.best_upper_bound)
+## Headline result
+
+At **Q=3, T=44 slots (660 min / 15 min), four demand scenarios, 300 s**, the decomposition
+does not produce a usable lower bound. Every master MIP solve terminates on its time
+ceiling at an internal gap of **99.9%** — best bound 0.35 against its own incumbent of 636
+— and giving it 3.4× the time and 7.7× the nodes raises the bound by 1.2%. The monolithic
+MILP solves the same instance to optimality in 39 s.
+
+**Upper bounds are unaffected**: each is an exhibited feasible schedule. **No optimality
+gap may be quoted at Q≥3.** This is not a verdict on Q≤2, where the capacity anchor is
+worth 1662–7737 on the empty master.
+
+Evidence and reading rules: [`docs/phase1/README.md`](docs/phase1/README.md).
+Decision log: [`docs/docs_decisions.md`](docs/docs_decisions.md).
+Formulation: [`docs/BENDERS_SPEC_v4.md`](docs/BENDERS_SPEC_v4.md).
+
+## Requirements
+
+- Python 3.10
+- `pyomo`, `pyyaml`
+- CPLEX with Python bindings installed into the same environment. The configs use
+  `cplex_direct` for both the master and the subproblem.
+
+```bash
+pip install -e .
 ```
 
-Other CLI commands
-- `python -m mobauto2_benders info` prints key config settings.
-- `python -m mobauto2_benders validate` checks config and problem stubs.
+## Reproducing the results
 
-Multi-resolution run (coarse -> fine)
-- `python -m mobauto2_benders run --multi-res 30,15,5,1`
+Every number quoted in `docs/` comes from a config in this repository. Run any of them:
 
-Configuration (v2)
-- Default config: `configs/default.yaml`.
-- Schema header:
-- `schema.name` must be `mobauto2_benders_config`
-- `schema.version` must be `2`
-- Sections:
-- `run`: logging/report paths, run name, optional seed
-- `data`: demand source, scenario files and weights
-- `model`: time discretization, fleet, energy, and cost parameters
-- `master`: master-structure toggles
-- `subproblem`: cut generation and subproblem structure
-- `solver`: Benders loop and backend solver settings
-
-Example `configs/default.yaml` (commented)
-```yaml
-schema:
-  name: mobauto2_benders_config
-  version: 2
-
-run:
-  # Optional run label for logs/outputs
-  name: default
-  # log_level controls verbosity: DEBUG, INFO, WARNING, ERROR, CRITICAL
-  log_level: INFO
-  # Optional paths for log/report outputs
-  log_file: null
-  report_dir: null
-  # Optional random seed (set to null to disable)
-  seed: 42
-
-data:
-  # Demand source (preferred): file with requests or R_out/R_ret arrays
-  demand_file: setups/random.yaml
-  # Optional scenario files for multi-scenario runs
-  scenario_files: []
-  # Optional weights aligned with scenario_files
-  scenario_weights: null
-  # Optional inline demand arrays (single scenario)
-  R_out: null
-  R_ret: null
-
-model:
-  time:
-    # Total horizon length in minutes (T_minutes) or discrete slots (T)
-    T_minutes: 810
-    # Minutes per slot
-    slot_resolution: 30
-    # Trip duration in minutes (converted internally to slots)
-    trip_duration_minutes: 30
-  fleet:
-    # Number of shuttles
-    Q: 2
-    # Initial battery per shuttle (length Q)
-    binit: [150.0, 150.0]
-  energy:
-    # Battery capacity
-    Emax: 150
-    # Energy consumed when starting a trip
-    L: 30
-    # Max charge added per slot when charging; expressions allowed here only
-    delta_chg: 70 / (60 / slot_resolution)
-  costs:
-    # Small penalty on starting trips
-    start_cost_epsilon: 0.01
-    # Small penalty per extra concurrent departure beyond 1 per slot
-    concurrency_penalty: 0.25
-
-master:
-  # Optional FIFO symmetry-breaking across vehicles
-  use_fifo_symmetry: true
-  # Symmetry breaking: order vehicles by total departures
-  symmetry_breaking: true
-  # Stronger aggregated cuts by tau
-  aggregate_cuts_by_tau: true
-  # Use one theta per scenario (requires multi-cuts)
-  theta_per_scenario: true
-  # Drop tiny cut coefficients to improve numerics
-  cut_coeff_threshold: 0.001
-  # Debug: write LP after each new cut
-  write_lp_after_cut: false
-
-subproblem:
-  # Multi-cuts vs averaged cut across scenarios
-  multi_cuts_by_scenario: true
-  # Magnanti–Wong selection for Pareto-optimal cuts
-  use_magnanti_wong: true
-  # Core-point mixing factor alpha in (0,1]
-  mw_core_alpha: 0.3
-  # Use dual slopes for cut generation
-  use_dual_slopes: false
-  # Capacity units contributed by one vehicle starting at time tau
-  S: 15
-  # Max waiting time in minutes or slots
-  Wmax_minutes: 30
-  # Penalty per unit of unserved demand
-  p: 50.0
-  # Tiny tie-breaker cost encouraging packing
-  fill_first_epsilon: 1.0e-6
-  # Penalty per unit of unused seat-capacity
-  unused_capacity_penalty: 0.5
-
-solver:
-  # Benders loop settings
-  max_iterations: 100
-  tolerance: 0.001
-  time_limit_s: 600
-  # Optional stall-based early stopping
-  stall_max_no_improve_iters: 0
-  stall_min_abs_improve: 1.0
-  stall_min_rel_improve: 0.002
-  # Backend solver names (Pyomo)
-  master_solver: cplex
-  subproblem_solver: cplex_direct
-  # Emit solver logs during MP solves
-  solver_tee: false
+```bash
+python -m mobauto2_benders --config configs/phase1/base_off.yaml run
 ```
 
-Requirements (runtime)
-- Python 3.10 venv with `pyomo` available (models are built with Pyomo).
-- A MILP/LP solver supported by Pyomo. Default config uses CPLEX:
-- Master: `solver.master_solver` (default `cplex`)
-- Subproblem: `solver.subproblem_solver` (default `cplex_direct`)
-- `pyyaml` is required if you load YAML configs or demand files.
+### The Phase 1 A/B (4 cells, 300 s each)
 
-Troubleshooting
-- Import errors: add `src` to `PYTHONPATH`, or run `python -m mobauto2_benders`.
-- PyYAML error: install `pyyaml` to read YAML configs/demand files.
-- CPLEX bindings error: make sure you are in the Python 3.10 venv where CPLEX is installed.
+| config | anchor | LP phase | LB obtained | UB obtained |
+|---|---|---|---|---|
+| `configs/phase1/base_off.yaml` | off | off | 0.299040 | 2685.86 |
+| `configs/phase1/anchor_on.yaml` | on | off | 0.313787 | 2267.36 |
+| `configs/phase1/lp_on.yaml` | off | on | 0.350393 | 2310.36 |
+| `configs/phase1/both_on.yaml` | on | on | 0.350915 | 2016.11 |
+
+`configs/phase1/master_headroom.yaml` is the 900 s diagnostic that gives the master 102 s
+per solve to show the bound is not time-starved.
+
+**These runs are budget-truncated and print `NOT REPRODUCIBLE`** when master solves stop on
+the clock rather than the gap. Your numbers will differ in the last digits and in the UB;
+the LB stays in the 0.29–0.36 band. Differences under ~15% in the LB are machine noise, not
+an effect.
+
+### The regression baselines
+
+```bash
+python -m mobauto2_benders --config configs/baseline_d9.yaml run
+python -m mobauto2_benders --config configs/baseline_d9_multi.yaml run
+```
+
+These two converge on the gap and **are** reproducible: `LB 2891.086867 / UB 4962.990000`
+and `LB 879.511303 / UB 3382.240000`. They are computational fingerprints of the post-D30
+implementation, not results about the method. Use them to check that a change to the code
+did not move behaviour unintentionally.
+
+### Tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+72 tests, about 8 seconds. They cover cut soundness invariants, Magnanti–Wong provenance
+and fallback, symmetry validity, the conditions under which a lower bound may be reported,
+the recourse anchor, the LP phase, and configuration combinations that are refused.
+
+## Configuration
+
+`configs/default.yaml` is the annotated reference and is the source of truth — it carries
+the meaning of every key inline, including which of them changes a reported bound. This
+README deliberately does not duplicate it, because the duplicate went stale.
+
+Three limits are easy to confuse:
+
+| key | meaning |
+|---|---|
+| `solver.total_time_limit_s` | wall clock for the whole Benders loop |
+| `solver.tolerance` | relative Benders gap that counts as converged |
+| `master.per_iteration_time_limit_s` | ceiling on ONE master solve |
+| `master.per_iteration_mipgap` | ceiling on the master's internal gap per iteration |
+
+Any table derived from a run must state `(p, W_max)` **and** `concurrency_penalty`, which
+is active in the objective and absent from the published formulation. The run manifest
+records all three.
+
+Other commands:
+
+```bash
+python -m mobauto2_benders --config configs/default.yaml validate
+python -m mobauto2_benders --config configs/default.yaml info
+```
+
+## Layout
+
+```
+src/mobauto2_benders/
+  benders/      decomposition loop, cut filtering, shared types
+  problem/      MobAuto2 master and subproblem models
+  app.py        parameter assembly    config.py  YAML schema (v2)
+configs/        run configurations, including the Phase 1 cells
+setups/         demand scenarios -- the inputs every config reads
+tests/          72 tests, no network, CPLEX required for the soundness fixture
+scripts/        sweep driver and a diagnostics smoke check
+docs/           formulation, audit, decision log, Phase 1 evidence
+```
+
+## What is not in this repository, and why
+
+Run logs, sweep transcripts, run manifests and superseded document versions are not
+tracked. Everything needed to regenerate them is: each result is produced by a config that
+ships here. A published repository should carry what reproduces a result, not the
+transcript of every attempt (D38).
+
+`Report/` holds the source PDFs and is not an input to any run.

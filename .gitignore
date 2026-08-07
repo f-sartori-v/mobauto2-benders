@@ -69,28 +69,29 @@ ENV/
 env.bak/
 venv.bak/
 
-# IDEs/editors
+# IDEs, editors, machine-local helpers
 .vscode/
 .idea/
+p310.cmd
 
 # macOS
 .DS_Store
 
-# Local data
+# ---------------------------------------------------------------------------
+# Run output. None of it is an input to anything, and all of it is regenerated
+# by re-running the config that produced it -- which IS tracked. A published
+# repository carries what is needed to reproduce a result, not the transcript
+# of every attempt (D38).
+# ---------------------------------------------------------------------------
+*.log
 data/
 outputs/
 logs/
+manifests/
 Report/
 aux_py/
-setups/
-docs/
-configs/
 
-# Project-specific generated scenarios; keep only one example
-setups/*
-!setups/demo_cont_demand.yaml
-# Run manifests (provenance for individual runs; regenerated per run)
-manifests/
-
-# CPLEX scratch log written into the working dir
-cplex.log
+# Sweep and experiment scratch: scripts/sweep.py writes both of these, and the
+# tables they produced are quoted in docs/ with their provenance.
+configs/sweep/
+docs/sweep/

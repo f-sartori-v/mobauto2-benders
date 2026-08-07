@@ -1,0 +1,92 @@
+schema:
+  name: mobauto2_benders_config
+  version: 2
+
+# Convergence test for the corrected Magnanti-Wong cut generation.
+#
+# Same instance and parameters as configs/baseline_d9.yaml, but with a real
+# iteration budget instead of the fixed 10 used for regression diffing.
+#
+# Why: MW generates cuts ~61x faster than the finite-difference fallback it
+# replaced (0.39s vs 23.90s over 10 iterations), because fdiff solves 2*T extra
+# LPs per iteration while MW solves one. Comparing the two at equal iteration
+# count is therefore misleading -- this config compares at equal wall clock.
+#
+# Deliberately NOT frozen like the baseline configs: this one is meant to be
+# re-run and re-tuned. Do not use it as a regression fixture.
+
+run:
+  name: mw_convergence
+  log_level: INFO
+  log_file: null
+  report_dir: null
+  seed: 42
+
+data:
+  demand_file: setups/base.yaml
+  scenario_files:
+  scenario_weights: null
+  R_out: null
+  R_ret: null
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0, 150.0, 150.0]
+    initial_actions: [IDL, IDL, IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+master:
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  per_iteration_time_limit_s: 120
+  per_iteration_mipgap: 0.05
+  cplex_options:
+    CPXPARAM_Preprocessing_Symmetry: 5
+    CPXPARAM_Threads: 1
+  solver_backend: cplex_direct
+  aggregate_cuts_by_tau: true
+  theta_per_scenario: false
+  cut_coeff_threshold: 0.001
+  write_lp_after_cut: false
+
+subproblem:
+  multi_cuts_by_scenario: false
+  use_magnanti_wong: true
+  mw_core_alpha: 0.3
+  use_dual_slopes: true
+  S: 15
+  Wmax_minutes: 60
+  p: 50.0
+  degenerate_cut_probe_top_k: 6
+  degenerate_cut_zero_tol: 1.0e-9
+
+solver:
+  # Real budget: let it run until it converges or the time limit bites.
+  max_iterations: 1000
+  tolerance: 0.001
+  # ~2 min, comparable to the old fdiff run's 46s for only 10 iterations.
+  total_time_limit_s: 120
+  stall_max_no_improve_iters: 0
+  stall_min_abs_improve: 1.0
+  stall_min_rel_improve: 0.002
+  master_solver: cplex
+  subproblem_solver: cplex_direct
+  solver_tee: false
+
+tolerances:
+  eps_bin: 1.0e-5
+  eps_feas: 1.0e-7
+  eps_cut: 1.0e-8
+  eps_hash: 1.0e-6
