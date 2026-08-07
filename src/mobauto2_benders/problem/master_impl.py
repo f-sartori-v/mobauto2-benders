@@ -115,6 +115,13 @@ class ProblemMaster(MasterProblem):
             print(*args, **kwargs)
 
     def _extract_solver_stats(self, res) -> dict[str, Any]:
+        """Optional fields a Pyomo results object may or may not expose.
+
+        Absence is legitimate and differs by backend, so this does not raise. What it
+        must not do is lose the reason: M3 requires bound provenance to never read as an
+        absent field, and a bare `except: pass` here erased the distinction between
+        "the backend does not report it" and "reading it blew up".
+        """
         stats: dict[str, Any] = {}
         try:
             stats["termination_condition"] = getattr(
@@ -128,8 +135,10 @@ class ProblemMaster(MasterProblem):
             stats["gap"] = getattr(res.solver, "gap", None)
             stats["best_bound"] = getattr(res.solver, "best_bound", None)
             stats["incumbent"] = getattr(res.solver, "objective", None)
-        except Exception:
-            pass
+        except AttributeError as exc:
+            # `res.solver` itself missing: the results object is not the shape we expect.
+            stats["stats_extraction_error"] = repr(exc)
+            self._vprint(f"[MP] solver results object has no .solver section: {exc!r}")
         return stats
 
     def _parse_cplex_log_bounds(
@@ -1184,9 +1193,21 @@ class ProblemMaster(MasterProblem):
             if stats.get("best_bound") is not None:
                 try:
                     self._lb = float(stats.get("best_bound"))
-                except Exception:
-                    self._lb = objective
+                except (TypeError, ValueError) as exc:
+                    # The old fallback put `objective` here. That is the incumbent, an
+                    # UPPER bound on the master's optimum -- reporting it as the lower
+                    # bound inflates it in the invalid direction, and by a lot: the Fase 1
+                    # runs had best_bound 0.35 against objective 636. Refuse instead.
+                    raise RuntimeError(
+                        f"master reported an unparseable best_bound "
+                        f"{stats.get('best_bound')!r}: {exc}. Refusing to substitute the "
+                        f"incumbent objective, which is an upper bound."
+                    ) from exc
             else:
+                # No branch-and-bound bound was available at all. `objective` is the
+                # incumbent; solver.py ignores self._lb for best_lb and uses
+                # stats["best_bound"], so this stays a diagnostic value and the run
+                # reports "[CHECK] MP best bound unavailable; LB not updated."
                 self._lb = objective
 
         # Assert representative variable has a value
@@ -1348,13 +1369,19 @@ class ProblemMaster(MasterProblem):
         assert self.m is not None
         m = self.m
         # Include theta values (if available) for early-exit checks in subproblem
+        # Narrow catches on purpose. A missing theta silently dropped from the candidate
+        # disables the subproblem's early-exit check and makes the end-of-run report fall
+        # back to live model values -- the defect that printed a schedule from one
+        # solution beside passenger counts from another.
         try:
             if hasattr(m, "theta"):
                 val = pyo.value(m.theta, exception=False)
                 if val is not None:
                     cand["__theta"] = float(val)
-        except Exception:
-            pass
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"theta present on the model but unreadable: {exc}"
+            ) from exc
         # Directional thetas, when disaggregation is active. Without these the
         # candidate carries no theta at all under theta_out/theta_ret, and the end
         # of run report falls back to the LIVE model values -- i.e. the last master
@@ -1367,8 +1394,10 @@ class ProblemMaster(MasterProblem):
                     cand["__theta_out"] = float(v_out)
                 if v_ret is not None:
                     cand["__theta_ret"] = float(v_ret)
-        except Exception:
-            pass
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"directional theta present but unreadable: {exc}"
+            ) from exc
         try:
             if hasattr(m, "theta_s"):
                 try:
@@ -1689,31 +1718,38 @@ class ProblemMaster(MasterProblem):
             return "|".join(starts) if starts else "candidate:idle"
 
         def _theta_snapshot() -> tuple[float | None, float | None, float | None]:
-            try:
-                theta_out_val = (
-                    float(pyo.value(m.theta_out, exception=False))
-                    if hasattr(m, "theta_out")
-                    else None
-                )
-            except Exception:
-                theta_out_val = None
-            try:
-                theta_ret_val = (
-                    float(pyo.value(m.theta_ret, exception=False))
-                    if hasattr(m, "theta_ret")
-                    else None
-                )
-            except Exception:
-                theta_ret_val = None
-            try:
-                if hasattr(m, "theta"):
-                    theta_total_val = float(pyo.value(m.theta, exception=False))
-                else:
-                    theta_total_val = float(theta_out_val or 0.0) + float(
-                        theta_ret_val or 0.0
-                    )
-            except Exception:
+            """Theta as the master currently holds it.
+
+            These values feed the re-anchoring accounting below, which raises when the
+            cut constant moves by more than it is entitled to. Swallowing a read error
+            here handed that check a None and disarmed it, so the narrow catches are the
+            point: an unset theta before the first solve is expected and yields None; a
+            theta that exists but will not convert to a float is a bug worth surfacing.
+            """
+
+            def _read(attr: str) -> float | None:
+                if not hasattr(m, attr):
+                    return None
+                val = pyo.value(getattr(m, attr), exception=False)
+                if val is None:
+                    return None
+                try:
+                    return float(val)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"master {attr} is set but unreadable: {exc}"
+                    ) from exc
+
+            theta_out_val = _read("theta_out")
+            theta_ret_val = _read("theta_ret")
+            if hasattr(m, "theta"):
+                theta_total_val = _read("theta")
+            elif theta_out_val is None and theta_ret_val is None:
                 theta_total_val = None
+            else:
+                theta_total_val = float(theta_out_val or 0.0) + float(
+                    theta_ret_val or 0.0
+                )
             return theta_out_val, theta_ret_val, theta_total_val
 
         def _raw_cut_value(constant: float | None, coeffs: Any, prefix: str) -> float:

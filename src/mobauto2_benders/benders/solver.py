@@ -10,7 +10,7 @@ from typing import Optional, Iterable, Mapping, Any
 from ..config import RootConfig
 from .master import MasterProblem
 from .subproblem import Subproblem
-from .types import SolveStatus, SubproblemResult
+from .types import CutValidity, SolveStatus, SubproblemResult, classify_cut_validity
 from .cplex_log import parse_cplex_log_bounds
 import pyomo.environ as pyo
 
@@ -1601,17 +1601,30 @@ class BendersSolver:
                 last_diag = dict(getattr(sres, "diagnostics", {}) or {})
             except Exception:
                 last_diag = None
-            try:
-                current_cut_lb_valid = (
-                    bool(last_diag.get("cut_valid_lower_bound", True))
-                    if isinstance(last_diag, dict)
-                    else True
-                )
-            except Exception:
-                current_cut_lb_valid = True
-            if not current_cut_lb_valid:
+            # Four situations, not two (see CutValidity). The old form read the key with
+            # a default of True, so a missing key -- and a diagnostics dict that failed to
+            # build -- both certified the bound. The same key was read with a default of
+            # False three files away; the disagreement was the type being too small.
+            cut_validity = classify_cut_validity(sres)
+            if cut_validity is CutValidity.INVALID:
                 lower_bound_semantics_valid = False
                 best_lb = None
+                log.warning(
+                    "[CHECK] cut generator gave no lower-bound guarantee this iteration; "
+                    "LB dropped and no longer claimed for this run."
+                )
+            elif cut_validity is CutValidity.UNKNOWN:
+                # A cut was added to the master and nothing said whether it is valid.
+                # Failing closed costs a weaker claim; failing open costs the claim's
+                # meaning, which is what D30 had to undo.
+                lower_bound_semantics_valid = False
+                best_lb = None
+                log.warning(
+                    "[CHECK] a cut was generated but carries no cut_valid_lower_bound "
+                    "flag; validity cannot be established, so the LB is not claimed."
+                )
+            # NO_CUT leaves the bound alone on purpose: nothing was added to the master,
+            # so whatever certified it last iteration still certifies it.
             rep.sp_feasible = (
                 bool(sres.is_feasible) if sres.is_feasible is not None else None
             )
@@ -1687,7 +1700,7 @@ class BendersSolver:
                             float(last_diag.get("timing_postprocess_s", 0.0) or 0.0),
                             float(last_diag.get("timing_cutgen_s", 0.0) or 0.0),
                             str(last_diag.get("cut_generation_mode", "-")),
-                            str(bool(last_diag.get("cut_valid_lower_bound", True))),
+                            str(cut_validity.value),
                             str(bool(last_diag.get("time_limited_incumbent", False))),
                             str(last_diag.get("model_num_variables", "-")),
                             str(last_diag.get("model_num_binary_variables", "-")),
@@ -1706,7 +1719,18 @@ class BendersSolver:
                         float(sp_total_obj or 0.0),
                     )
                 )
-            # Correctness checks (warnings only)
+            # Correctness checks (warnings only).
+            #
+            # These four guards used to sit inside one `try: ... except Exception: pass`.
+            # A TypeError in the first comparison skipped the other three AND the LB
+            # revert below, and produced exactly the output a clean run produces: no
+            # [CHECK FAIL] line. Silence meant either "all four passed" or "the checks
+            # died", and nothing downstream -- including the test that asserts no
+            # [CHECK FAIL] appears -- could tell the two apart.
+            #
+            # The comparisons operate on floats that are already known to be non-None, so
+            # a raise here is a bug in this file, not a runtime condition to absorb. It is
+            # reported as [CHECK ERROR] and re-raised.
             try:
                 if (
                     lower_bound_semantics_valid
@@ -1760,8 +1784,14 @@ class BendersSolver:
                             float(prev_best_ub),
                             float(best_ub),
                         )
-            except Exception:
-                pass
+            except (TypeError, ValueError) as exc:
+                log.error(
+                    "[CHECK ERROR] bound consistency checks could not run at iteration %d: %r. "
+                    "The absence of [CHECK FAIL] does NOT mean the bounds were verified.",
+                    it,
+                    exc,
+                )
+                raise
             # Cut tightness check: evaluate line(y) from the raw cut metadata and compare to SP upper bound
             try:
                 if (

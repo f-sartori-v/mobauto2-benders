@@ -901,3 +901,61 @@ tracked.
 **History rewritten.** The two commits that carried the logs were replaced rather than
 followed by a removal commit, so the public history does not contain them either. Safe
 because they had been on the remote for minutes, with no PR and no other collaborator.
+
+### D39 — Cut validity is a four-state fact, not a boolean, and guards no longer die quietly
+Seven swallowed-exception sites were opened. Two of them could turn an uncertified run into
+a certified-looking one; the rest degraded information that other checks consume.
+
+**The type was too small.** `cut_valid_lower_bound` was read with a default of `True` in
+`solver.py` and a default of `False` in `subproblem_impl.py` — same key, same dict, opposite
+answers, and neither author wrong locally. `manifest.py` was the tell: it passes no default
+and writes `null`, because a file can represent "unknown" and a `bool` cannot.
+
+Tracing where the key is actually emitted settled the design. It appears **if and only if a
+cut was generated**: the six returns that omit it are the infeasible paths, the theta early
+exit and the debug skip, all with `cuts=[]`. So absence never meant "we forgot":
+
+| state | meaning | policy |
+|---|---|---|
+| `VALID` | a cut was generated with a lower-bound guarantee | LB stands |
+| `INVALID` | a cut was generated without one (MW fallback, finite differences) | drop the LB, warn |
+| `NO_CUT` | nothing was added to the master this iteration | **leave the bound alone** — whatever certified it still does |
+| `UNKNOWN` | a cut exists and nothing said whether it is valid | drop the LB, warn |
+
+`CutValidity` and `classify_cut_validity` live in `benders/types.py` so every consumer asks
+the same question the same way, and the fail-closed policy is one visible block in the loop
+instead of a default re-litigated at each `.get()`. The old form also reached `True` when
+the diagnostics dict merely failed to build.
+
+Correction to a claim made while doing this: I first reported that six of nine returns omit
+the key on ordinary feasible paths, implying the producers were negligent. That came from an
+AST pass that only inspected the `return` expression, so dicts assembled into a variable
+looked empty. The producers are consistent; the consumer was collapsing four cases into two.
+
+**A crashed guard no longer looks like a passed guard.** The four `[CHECK FAIL]` bound
+comparisons sat inside one `try: ... except Exception: pass`. A `TypeError` in the first
+skipped the other three and the LB revert, and produced exactly what a clean run produces —
+no `[CHECK FAIL]` line. `test_no_check_fail_lines` asserts that absence, so the test agreed.
+Now `(TypeError, ValueError)` logs `[CHECK ERROR]`, says the absence of `[CHECK FAIL]` does
+not mean the bounds were verified, and re-raises.
+
+Also closed: `master_impl` fell back from the branch-and-bound bound to the **incumbent
+objective** on a parse failure — an upper bound reported as a lower bound, 0.35 against 636
+on the Fase 1 runs. It raises now. The theta readbacks in `_collect_theta_into` and
+`_theta_snapshot` no longer swallow, because the first feeds the report that D-record showed
+mixing two solutions and the second feeds the re-anchoring check that raises on its own.
+Stats extraction keeps its reason rather than erasing the M3 provenance.
+
+**Behaviour-preserving, and measured rather than asserted.** 72 tests pass; `baseline_d9`
+reproduces `LB 2891.09 / UB 4962.99` and `baseline_d9_multi` reproduces
+`LB 879.511 / UB 3382.24`, both matching D31 to the digit, and no new `[CHECK]` line appears.
+The `INVALID` and `UNKNOWN` branches are guards that do not fire on a healthy run — which is
+the right shape: unlike a skipped test, when they do fire they fail rather than pass.
+
+Reviewed and deliberately kept: `_emit_manifest`'s broad catch, which logs the exception
+object and exists so provenance cannot break a solve; and `solver.py`'s best-bound recovery,
+which already fails closed with `[CHECK] MP best bound unavailable; LB not updated`.
+
+The six rules these came from are recorded outside the repository as the `receitas-basicas`
+skill; `scan_exception_handlers.py` there ranks handlers by what a reader would wrongly
+believe if one fires, which is how the seven were selected out of 237.
