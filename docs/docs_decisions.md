@@ -862,3 +862,42 @@ D29 measured gains on both axes. The failure is specific to a fleet large enough
 the capacity anchor slack. If the decomposition is to be revived at Q=3 it needs a valid
 inequality that binds when capacity is ample — the binding difficulty there is timing and
 energy, not capacity — and that is a modelling question, not a solver-tuning one.
+
+### D38 — The published repository carries what reproduces a result, not the transcript
+D32 versioned `docs/` and `configs/` wholesale, on the argument that a whole-directory rule
+needs no judgement call per file. That was right for the working repository and wrong for a
+public one. The first push under it put ~80 run logs and 29 sweep configs into a repository
+whose readers — a supervisor, a reviewer — need the final state, not the record of every
+attempt.
+
+The distinction D32 missed is between **evidence** and **the means to regenerate it**. Every
+number quoted in `docs/` is produced by a config that ships here. `configs/phase1/*.yaml`
+regenerates the Fase 1 A/B; `configs/baseline_d9*.yaml` regenerates the D31 fingerprints,
+and those two converge on the gap, so they reproduce exactly rather than approximately.
+Shipping the logs adds nothing a reader can check that re-running does not.
+
+Untracked, and now ignored: `*.log` anywhere, `configs/sweep/`, `docs/sweep/`, `manifests/`,
+`Report/`, `aux_py/`, `.idea/`, `p310.cmd`. Removed from the tree as superseded:
+`AUDIT_v3.md`, `BENDERS_SPEC_v3.md`, `HANDLER_CENSUS.md`, `design.md` — the first two are
+superseded by their v4, and `design.md` described the skeleton before the model existed.
+
+**Added, and this was the real defect:** `setups/base.yaml`,
+`base_plus100_out_noon.yaml`, `base_ret_peak_adv.yaml` and `base_vol20_pm60.yaml`. Every
+config in the repository reads them and only `demo_cont_demand.yaml` was tracked, so a
+clone could not run **anything** — including the baselines D31 calls the reference. The
+whole-directory rule versioned 3.5 MB of logs and missed the four files without which none
+of it runs.
+
+`README.md` was rewritten at the same time. It documented `solver.time_limit_s` (renamed in
+D22), `fill_first_epsilon` (deleted in D30) and `unused_capacity_penalty` (deleted in D19),
+and its example set `multi_cuts_by_scenario: true` with `theta_per_scenario: true` — a
+combination D35 now refuses. It duplicated `configs/default.yaml` and the duplicate went
+stale, so it now points at that file rather than copying it.
+
+Where an entry above cites a log by name — D31's `baseline_d9_D30.log`, the sweep tables —
+read the citation as naming the run, not a file in the tree. The config that produced it is
+tracked.
+
+**History rewritten.** The two commits that carried the logs were replaced rather than
+followed by a removal commit, so the public history does not contain them either. Safe
+because they had been on the remote for minutes, with no PR and no other collaborator.
