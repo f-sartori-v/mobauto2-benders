@@ -13,6 +13,17 @@ from ..benders.cplex_log import parse_cplex_log_bounds
 from ..tolerances import project_binary_value
 
 
+# CPLEX raises "Error 3003: Not a mixed-integer problem" for these on an LP
+# instead of ignoring them, so the LP phase drops them from the option set.
+_MIP_ONLY_CPLEX_OPTIONS = frozenset({
+    "CPXPARAM_Preprocessing_Symmetry",
+    "CPXPARAM_MIP_Tolerances_MIPGap",
+    "CPXPARAM_MIP_Strategy_Search",
+    "CPXPARAM_MIP_Display",
+    "mipgap",
+})
+
+
 def _cplex_direct_option_name(key: str) -> str:
     """Map a CPLEX C-API parameter name onto the name `cplex_direct` expects.
 
@@ -560,6 +571,31 @@ class ProblemMaster(MasterProblem):
 
                     m.C_recourse_lb_out = pyo.Constraint(m.T, rule=_c_rlb_out_rule)
                     m.C_recourse_lb_ret = pyo.Constraint(m.T, rule=_c_rlb_ret_rule)
+                elif hasattr(m, "theta_s"):
+                    # Per-scenario thetas. The inequality holds for each scenario,
+                    # so the weighted sum -- which is exactly the recourse term in
+                    # the objective -- is bounded by the weighted mean demand that
+                    # app.py already folded into R_out/R_ret. Direction split does
+                    # not exist in this branch (see the disagg_dir guard above), so
+                    # both directions go on one row.
+                    _wts = list(self._p("scenario_weights", []) or [])
+                    _S = int(self._p("num_scenarios", 0) or 0)
+                    if not _wts or len(_wts) != _S:
+                        _wts = [1.0 / float(max(1, _S))] * max(1, _S)
+                    _tw = sum(float(w) for w in _wts) or 1.0
+
+                    def _c_rlb_scen_rule(mm, j):
+                        tmax = min(T - 1, int(j) + W_sl)
+                        theta_expr = sum(
+                            (float(_wts[s]) / _tw) * mm.theta_s[s] for s in mm.Scenarios
+                        )
+                        return theta_expr >= p_pen * (
+                            cum_out[int(j)] - S_cap * _cap_upto(mm, mm.yOUT, tmax)
+                        ) + p_pen * (
+                            cum_ret[int(j)] - S_cap * _cap_upto(mm, mm.yRET, tmax)
+                        )
+
+                    m.C_recourse_lb_scen = pyo.Constraint(m.T, rule=_c_rlb_scen_rule)
                 elif hasattr(m, "theta"):
                     def _c_recourse_lb_rule(mm, j):
                         tmax = min(T - 1, int(j) + W_sl)
@@ -600,7 +636,51 @@ class ProblemMaster(MasterProblem):
         assert self.m is not None
         return self._solver
 
+    def _relax_integrality(self) -> list:
+        """Drop integrality for one solve. Returns what `_restore_integrality` needs.
+
+        Every integer variable in this master is Binary (yOUT, yRET, atL, atM,
+        inTrip), so UnitInterval is the exact continuous counterpart: same bounds,
+        no integrality. Anything else would be a modelling change rather than a
+        relaxation, so it raises instead of guessing.
+        """
+        assert self.m is not None
+        saved: list = []
+        for v in self.m.component_data_objects(pyo.Var, active=True, descend_into=True):
+            if v.is_binary():
+                saved.append((v, v.domain))
+                v.domain = pyo.UnitInterval
+            elif v.is_integer():
+                for var, dom in saved:
+                    var.domain = dom
+                raise RuntimeError(
+                    f"LP phase expects only binary integrality; {v.name} is a general "
+                    "integer. Relaxing it would need explicit bounds handling."
+                )
+        return saved
+
+    def _restore_integrality(self, saved: list) -> None:
+        for var, dom in saved:
+            var.domain = dom
+
     def solve(self) -> SolveResult:
+        assert self.m is not None, "Call initialize() before solve()"
+        m = self.m
+        # LP phase (see BendersSolver): solve without integrality while the cut set
+        # is still poor. The candidate is fractional, so the caller must not treat
+        # its subproblem value as an upper bound -- only integer-feasible schedules
+        # are exhibitable. The cuts are valid either way: Q(y) is the value function
+        # of an LP in the right-hand side, hence convex in y, so a dual at any y --
+        # fractional included -- supports it everywhere.
+        lp_relax = bool(self._p("lp_relaxation", False))
+        saved_domains: list = self._relax_integrality() if lp_relax else []
+        try:
+            return self._solve_inner(lp_relax)
+        finally:
+            if saved_domains:
+                self._restore_integrality(saved_domains)
+
+    def _solve_inner(self, lp_relax: bool = False) -> SolveResult:
         assert self.m is not None, "Call initialize() before solve()"
         m = self.m
         solver = self._get_solver()
@@ -612,9 +692,22 @@ class ProblemMaster(MasterProblem):
             if time_limit is not None:
                 solver.options["timelimit"] = float(time_limit)
             mipgap = self._p("mipgap")
-            if mipgap is not None:
+            if mipgap is not None and not lp_relax:
                 solver.options["mipgap"] = float(mipgap)
             cplex_opts = self._p("cplex_options", {}) or {}
+            if lp_relax:
+                # CPLEX rejects MIP-only parameters on an LP with error 3003 rather
+                # than ignoring them. The solver object is persistent and its option
+                # dict was populated at initialize(), so they have to be removed from
+                # it, not merely skipped here. Every MIP solve re-applies the full
+                # set below, so this does not leak past the LP phase.
+                for k in _MIP_ONLY_CPLEX_OPTIONS:
+                    solver.options.pop(k, None)
+                    solver.options.pop(_cplex_direct_option_name(k), None)
+                cplex_opts = {
+                    k: v for k, v in cplex_opts.items()
+                    if k not in _MIP_ONLY_CPLEX_OPTIONS
+                }
             backend = str(self._p("solver_backend", "")).lower()
             # CPLEX file-based plugin accepts CPXPARAM_* keys; cplex_direct wants the
             # dotted parameter path with '_' separators. Translate rather than skip:
@@ -757,6 +850,11 @@ class ProblemMaster(MasterProblem):
             except Exception:
                 log_path = None
         self._last_log_path = str(log_path) if log_path is not None else None
+
+        # A MIP start has no meaning for an LP, and the file-based CPLEX interface
+        # writes a .mst for it regardless.
+        if lp_relax:
+            use_ws = False
 
         res = solver.solve(
             m,
@@ -939,6 +1037,16 @@ class ProblemMaster(MasterProblem):
         if val_obj is None:
             objective = None
             self._lb = None
+        elif lp_relax:
+            # For an LP there is no branch-and-bound best bound to read, and any
+            # value left in the stats by the log parser belongs to an earlier MIP
+            # solve. The LP optimum IS the bound, so say so rather than letting the
+            # fallback below arrive at the same number by accident.
+            objective = float(val_obj)
+            self._lb = objective
+            stats["best_bound"] = objective
+            stats["best_bound_source"] = "lp_relaxation"
+            stats.pop("best_bound_reason", None)
         else:
             objective = float(val_obj)
             if stats.get("best_bound") is not None:
@@ -1033,6 +1141,22 @@ class ProblemMaster(MasterProblem):
         cand: Candidate = {}
         eps_bin = float(self._p("eps_bin", 1e-6))
         offenders: list[tuple[str, float]] = []
+        # During the LP phase a fractional y is the expected answer, not a symptom
+        # of a solver returning garbage from a MIP. The guard below stays in force
+        # for every MIP solve, which is where a fractional value would mean the
+        # schedule about to be priced as an upper bound is not implementable.
+        lp_relax = bool(self._p("lp_relaxation", False))
+        if lp_relax:
+            for q in m.Q:
+                for t in m.T:
+                    cand[f"yOUT[{int(q)},{int(t)}]"] = float(m.yOUT[q, t].value or 0.0)
+                    cand[f"yRET[{int(q)},{int(t)}]"] = float(m.yRET[q, t].value or 0.0)
+                    try:
+                        cand[f"c[{int(q)},{int(t)}]"] = float(m.c[q, t].value or 0.0)
+                    except Exception:
+                        pass
+            self._collect_theta_into(cand)
+            return cand
         for q in m.Q:
             for t in m.T:
                 try:
@@ -1064,6 +1188,12 @@ class ProblemMaster(MasterProblem):
                 "Non-binary master solution; refusing SP evaluation. Offenders: "
                 + ", ".join(f"{k}={v:.6g}" for k, v in top)
             )
+        self._collect_theta_into(cand)
+        return cand
+
+    def _collect_theta_into(self, cand: Candidate) -> None:
+        assert self.m is not None
+        m = self.m
         # Include theta values (if available) for early-exit checks in subproblem
         try:
             if hasattr(m, "theta"):
@@ -1101,7 +1231,6 @@ class ProblemMaster(MasterProblem):
                         cand[f"__theta_s[{int(s)}]"] = float(v)
         except Exception:
             pass
-        return cand
 
     def set_report_solution(
         self,

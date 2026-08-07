@@ -204,10 +204,9 @@ class TestRecourseLowerBound(unittest.TestCase):
 
         raw = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))
         # default.yaml is a live experiment file; pin the data section so these
-        # tests describe the inequality, not whatever run is being set up in it.
-        # Multi-scenario legitimately disables the bound (it needs the expectation
-        # over scenarios), so a scenario list left there would fail them for the
-        # wrong reason.
+        # tests describe the single-scenario form of the inequality, not whatever
+        # run is being set up in it. The multi-scenario form is exercised in
+        # TestRecourseLowerBoundMultiScenario below.
         raw["data"] = {**raw["data"], "scenario_files": None, "scenarios": None}
         raw["model"]["time"]["slot_resolution"] = res
         raw["model"]["fleet"]["Q"] = q
@@ -294,6 +293,174 @@ class TestRecourseLowerBound(unittest.TestCase):
         for late in range(j + W + 1, T):
             self.assertNotIn(f"yOUT[0,{late}]", body,
                              f"slot {late} must not appear in the row for j={j}")
+
+
+class TestRecourseLowerBoundMultiScenario(unittest.TestCase):
+    """The anchor across scenarios.
+
+    The inequality holds per scenario, so weighting the scenario rows by w_s and
+    summing gives one row on the recourse term the master actually minimises:
+
+        sum_s w_s theta_s >= p * ( sum_s w_s R_s_cum[j] - S * Y_cum[j+W] )
+
+    Y_cum is common to every scenario because the first stage is here-and-now, so
+    it survives the sum unchanged. Before this the multi-scenario master carried
+    no anchor at all and its bound sat at 0.31 on the four-scenario instance.
+    """
+
+    def _params(self, on=True, weights=None, res=15):
+        import yaml, tempfile, os
+        from mobauto2_benders.config import load_config
+        from mobauto2_benders.app import _prepare_params
+
+        raw = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))
+        raw["data"] = {**raw["data"], "scenarios": None, "scenario_weights": weights}
+        raw["model"]["time"]["slot_resolution"] = res
+        raw["model"]["fleet"]["Q"] = 2
+        raw["model"]["fleet"]["initial_battery"] = [150.0]
+        raw["model"]["fleet"]["initial_actions"] = ["IDL"]
+        raw["master"]["recourse_lower_bound"] = on
+        fd, tmp = tempfile.mkstemp(suffix=".yaml")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(raw, fh)
+            cfg = load_config(tmp)
+            mp, _ = _prepare_params(cfg, {})
+        finally:
+            os.unlink(tmp)
+        if mp.get("T") is None:
+            mp["T"] = max(1, int(mp["T_minutes"]) // int(mp["slot_resolution"]))
+        return mp
+
+    def test_scenario_runs_now_carry_the_bound(self):
+        params = self._params(True)
+        self.assertEqual(params["recourse_bound_data"]["num_scenarios"], 4)
+        pm = build_master(params)
+        self.assertIn("C_recourse_lb_out", constraint_names(pm.m))
+
+    def test_demand_is_the_weighted_mean_of_the_scenarios(self):
+        """Computed here from the files directly, so a change to the folding in
+        app.py cannot make this test agree with it by construction."""
+        import yaml
+        from pathlib import Path as _Path
+        from mobauto2_benders.problem.subproblem_impl import aggregate_requests, load_demand_doc
+
+        params = self._params(True)
+        rlb = params["recourse_bound_data"]
+        T, res = int(params["T"]), int(params["slot_resolution"])
+        files = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))["data"]["scenario_files"]
+        exp_out = [0.0] * T
+        exp_ret = [0.0] * T
+        for f in files:
+            r_o, r_r = aggregate_requests(load_demand_doc(_Path(str(f))), T, res)
+            for t in range(T):
+                exp_out[t] += r_o[t] / len(files)
+                exp_ret[t] += r_r[t] / len(files)
+        for t in range(T):
+            self.assertAlmostEqual(rlb["R_out"][t], exp_out[t], places=9)
+            self.assertAlmostEqual(rlb["R_ret"][t], exp_ret[t], places=9)
+
+    def test_weights_are_normalised_before_use(self):
+        """Unnormalised weights would scale the anchor differently from the cuts,
+        which normalise. Same demand vectors either way."""
+        uniform = self._params(True)["recourse_bound_data"]
+        doubled = self._params(True, weights=[2.0, 2.0, 2.0, 2.0])["recourse_bound_data"]
+        self.assertEqual(uniform["R_out"], doubled["R_out"])
+        self.assertEqual(uniform["R_ret"], doubled["R_ret"])
+
+    def test_mean_never_exceeds_the_worst_scenario(self):
+        """Under multi-cut with a single theta the master's theta is pushed above
+        EVERY scenario, not their mean. The mean form stays valid there because
+        mean <= max -- weaker, not wrong. This asserts that ordering holds."""
+        import yaml
+        from pathlib import Path as _Path
+        from mobauto2_benders.problem.subproblem_impl import aggregate_requests, load_demand_doc
+
+        params = self._params(True)
+        rlb = params["recourse_bound_data"]
+        T, res = int(params["T"]), int(params["slot_resolution"])
+        files = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))["data"]["scenario_files"]
+        per_scen = [aggregate_requests(load_demand_doc(_Path(str(f))), T, res) for f in files]
+        for t in range(T):
+            self.assertLessEqual(rlb["R_out"][t], max(s[0][t] for s in per_scen) + 1e-9)
+            self.assertLessEqual(rlb["R_ret"][t], max(s[1][t] for s in per_scen) + 1e-9)
+
+    def test_asking_for_it_without_data_raises(self):
+        """It used to return None and build nothing -- the run looked configured
+        and behaved as if it were not (D19/D22)."""
+        import yaml, tempfile, os
+        from mobauto2_benders.config import load_config
+        from mobauto2_benders.app import _prepare_params
+
+        raw = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))
+        raw["data"] = {**raw["data"], "scenario_files": None, "scenarios": None,
+                       "demand_file": None, "R_out": None, "R_ret": None}
+        raw["master"]["recourse_lower_bound"] = True
+        fd, tmp = tempfile.mkstemp(suffix=".yaml")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(raw, fh)
+            cfg = load_config(tmp)
+            with self.assertRaises(ValueError) as ctx:
+                _prepare_params(cfg, {})
+        finally:
+            os.unlink(tmp)
+        self.assertIn("recourse_lower_bound", str(ctx.exception))
+
+
+class TestLpPhase(unittest.TestCase):
+    """Solving the master without integrality while the cut set is still poor.
+
+    Valid because the recourse value function is convex in y, so its dual at a
+    fractional y supports it everywhere. The thing that is NOT valid is calling
+    the fractional schedule's cost an upper bound, and the guard for that lives
+    in BendersSolver; here we check the model-side machinery.
+    """
+
+    def test_off_by_default(self):
+        from mobauto2_benders.config import load_config
+
+        cfg = load_config(str(CONFIGS / "default.yaml"))
+        self.assertFalse(cfg.master.lp_phase)
+
+    def test_relaxation_is_reversible(self):
+        pm = build_master(master_params())
+        self.assertTrue(pm.m.yOUT[0, 0].is_binary())
+        saved = pm._relax_integrality()
+        self.assertFalse(pm.m.yOUT[0, 0].is_binary())
+        self.assertFalse(pm.m.inTrip[0, 0].is_binary())
+        self.assertEqual(pm.m.yOUT[0, 0].bounds, (0, 1))
+        pm._restore_integrality(saved)
+        self.assertTrue(pm.m.yOUT[0, 0].is_binary())
+        self.assertTrue(pm.m.inTrip[0, 0].is_binary())
+
+    def test_fractional_candidate_is_refused_outside_the_lp_phase(self):
+        """The binary guard must stay in force for every MIP solve: there a
+        fractional y means the schedule about to be priced as an upper bound is
+        not one anybody can operate."""
+        pm = build_master(master_params())
+        for q in pm.m.Q:
+            for t in pm.m.T:
+                pm.m.yOUT[q, t].value = 0.0
+                pm.m.yRET[q, t].value = 0.0
+        pm.m.yOUT[0, 1].value = 0.4
+        with self.assertRaises(RuntimeError) as ctx:
+            pm._collect_candidate()
+        self.assertIn("Non-binary", str(ctx.exception))
+
+    def test_fractional_candidate_passes_through_during_the_lp_phase(self):
+        pm = build_master(master_params())
+        for q in pm.m.Q:
+            for t in pm.m.T:
+                pm.m.yOUT[q, t].value = 0.0
+                pm.m.yRET[q, t].value = 0.0
+        pm.m.yOUT[0, 1].value = 0.4
+        pm.params["lp_relaxation"] = True
+        try:
+            cand = pm._collect_candidate()
+        finally:
+            pm.params.pop("lp_relaxation", None)
+        self.assertAlmostEqual(cand["yOUT[0,1]"], 0.4)
 
 
 if __name__ == "__main__":

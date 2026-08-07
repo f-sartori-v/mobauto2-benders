@@ -718,6 +718,32 @@ class BendersSolver:
         stall_ctr = 0
         prev_gap: Optional[float] = None
 
+        # LP phase. The early iterations spend thousands of branch-and-bound nodes
+        # producing one cut from a cut set that is still nearly empty. Solving the
+        # master without integrality is far cheaper and yields a fractional y whose
+        # subproblem dual is still a valid cut, because the recourse value function
+        # is convex in y (it is an LP parameterised by its right-hand side).
+        #
+        # What the phase must NOT do is claim an upper bound: a fractional schedule
+        # is not exhibitable, so its recourse cost bounds nothing. The guards below
+        # keep best_ub, the incumbent and the reported pax counts untouched while
+        # the phase is active. The LB is safe -- the LP master's optimum is a lower
+        # bound on the MIP master's, which is a lower bound on the true optimum.
+        lp_phase_enabled = bool(getattr(self.cfg.master, "lp_phase", False))
+        lp_phase_max_iters = int(getattr(self.cfg.master, "lp_phase_max_iters", 0) or 0)
+        lp_phase_stall_iters = int(getattr(self.cfg.master, "lp_phase_stall_iters", 0) or 0)
+        lp_phase_min_rel_improve = float(getattr(self.cfg.master, "lp_phase_min_rel_improve", 0.0) or 0.0)
+        lp_phase_active = bool(lp_phase_enabled and lp_phase_max_iters > 0)
+        lp_phase_iters = 0
+        lp_phase_stall_ctr = 0
+        lp_phase_prev_obj: Optional[float] = None
+        lp_phase_exit_reason: Optional[str] = None
+        if lp_phase_active:
+            _vprint(
+                f"[LP-PHASE] on: max_iters={lp_phase_max_iters} "
+                f"stall_iters={lp_phase_stall_iters} min_rel_improve={lp_phase_min_rel_improve:g}"
+            )
+
         last_diag: dict | None = None
 
         def _report_diag() -> dict[str, Any] | None:
@@ -759,6 +785,20 @@ class BendersSolver:
             }
 
         def _make_result(status: SolveStatus, iterations: int) -> BendersRunResult:
+            if lp_phase_active:
+                # The run never left the LP phase, so no integer-feasible schedule
+                # was ever priced. Everything downstream that reads like a solution
+                # -- the printed schedule, the served-passenger counts -- belongs to
+                # a fractional y. Say so rather than let it read as a result.
+                msg = (
+                    f"Run ended inside the LP phase after {iterations} iteration(s): no "
+                    "integer-feasible schedule was evaluated, so there is no upper "
+                    "bound and the printed schedule is fractional. The lower bound is "
+                    "valid. Lower master.lp_phase_max_iters or raise "
+                    "solver.total_time_limit_s."
+                )
+                log.warning(msg)
+                print(f"\n[LP-PHASE] {msg}")
             extra = _extract_sp_diag(_report_diag())
             _diag = _report_diag()
             _mode = _diag.get("cut_generation_mode") if isinstance(_diag, dict) else None
@@ -904,6 +944,11 @@ class BendersSolver:
                         self.master.params["mipgap"] = mp_gap
                 except Exception:
                     pass
+            try:
+                if isinstance(getattr(self.master, "params", None), dict):
+                    self.master.params["lp_relaxation"] = bool(lp_phase_active)
+            except Exception:
+                pass
             mp_t0 = time.perf_counter()
             mres = self.master.solve()
             mp_t1 = time.perf_counter()
@@ -1301,10 +1346,17 @@ class BendersSolver:
                 sp_recourse_obj = float(sres.upper_bound)
                 sp_first_stage = float(fcost)
                 sp_total_obj = float(sp_recourse_obj) + float(sp_first_stage)
-                prev_ub = best_ub
-                is_new_best_incumbent = prev_ub is None or float(sp_total_obj) < float(prev_ub) - 1e-9
-                # Use sp_total_obj consistently for UB updates
-                best_ub = sp_total_obj if best_ub is None else min(best_ub, sp_total_obj)
+                if lp_phase_active:
+                    # The candidate is fractional. Its recourse cost is a real number
+                    # for a schedule nobody can operate, so it is not an upper bound
+                    # on anything and must not become the incumbent. The cut derived
+                    # from the same solve is still valid and is still added below.
+                    is_new_best_incumbent = False
+                else:
+                    prev_ub = best_ub
+                    is_new_best_incumbent = prev_ub is None or float(sp_total_obj) < float(prev_ub) - 1e-9
+                    # Use sp_total_obj consistently for UB updates
+                    best_ub = sp_total_obj if best_ub is None else min(best_ub, sp_total_obj)
             # Keep last diagnostics for end-of-run reporting
             try:
                 last_diag = dict(getattr(sres, "diagnostics", {}) or {})
@@ -1319,7 +1371,9 @@ class BendersSolver:
                 best_lb = None
             rep.sp_feasible = bool(sres.is_feasible) if sres.is_feasible is not None else None
             rep.sp_recourse = sp_recourse_obj
-            rep.candidate_ub = sp_total_obj
+            # Reporting a candidate UB for a fractional schedule would put a number
+            # in the UB column that no schedule achieves.
+            rep.candidate_ub = None if lp_phase_active else sp_total_obj
             try:
                 served, total = _calc_pax_totals_from_diag(last_diag)
             except Exception:
@@ -1667,6 +1721,50 @@ class BendersSolver:
             rep.t_iter_s = time.perf_counter() - iter_t0
             if report_mode:
                 print(format_report_line(rep))
+
+            # Decide whether the LP phase has stopped paying. Evaluated at the end
+            # of the iteration so that the candidate just priced, the cut just
+            # added and the bound just recorded all belong to the same regime.
+            if lp_phase_active:
+                lp_phase_iters += 1
+                cur_obj = float(mres.objective) if mres.objective is not None else None
+                rel_improve = None
+                if cur_obj is not None and lp_phase_prev_obj is not None:
+                    rel_improve = (cur_obj - float(lp_phase_prev_obj)) / max(1.0, abs(cur_obj))
+                    if rel_improve < lp_phase_min_rel_improve:
+                        lp_phase_stall_ctr += 1
+                    else:
+                        lp_phase_stall_ctr = 0
+                lp_phase_prev_obj = cur_obj
+                if added <= 0:
+                    lp_phase_exit_reason = "no cut generated"
+                elif lp_phase_iters >= lp_phase_max_iters:
+                    lp_phase_exit_reason = f"iteration budget ({lp_phase_max_iters})"
+                elif lp_phase_stall_iters > 0 and lp_phase_stall_ctr >= lp_phase_stall_iters:
+                    lp_phase_exit_reason = (
+                        f"LP objective stalled for {lp_phase_stall_ctr} iters "
+                        f"(last rel improve {rel_improve:.3g})"
+                        if rel_improve is not None
+                        else f"LP objective stalled for {lp_phase_stall_ctr} iters"
+                    )
+                _vprint(
+                    "[LP-PHASE] it=%d obj=%s rel_improve=%s stall=%d/%d cuts=%d"
+                    % (
+                        it,
+                        (f"{cur_obj:.6g}" if cur_obj is not None else "-"),
+                        (f"{rel_improve:.3g}" if rel_improve is not None else "-"),
+                        lp_phase_stall_ctr,
+                        lp_phase_stall_iters,
+                        int(added),
+                    )
+                )
+                if lp_phase_exit_reason is not None:
+                    lp_phase_active = False
+                    print(
+                        f"[LP-PHASE] off after {lp_phase_iters} iteration(s): {lp_phase_exit_reason}. "
+                        f"{int(getattr(self.master, 'cuts_count', lambda: 0)())} cut(s) carried into the MIP phase. "
+                        "No upper bound was claimed while it was on."
+                    )
 
             # Check gap if we have both bounds
             if lower_bound_semantics_valid and best_lb is not None and best_ub is not None:
