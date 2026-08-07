@@ -1,4 +1,5 @@
 """Shared helpers. Keeps the src/ layout importable without installing."""
+
 from __future__ import annotations
 
 import sys
@@ -14,12 +15,14 @@ CONFIGS = REPO_ROOT / "configs"
 
 def load_cfg(name: str):
     from mobauto2_benders.config import load_config
+
     return load_config(CONFIGS / name)
 
 
 def master_params(name: str = "baseline_d9.yaml") -> dict:
     """Master params exactly as app.py would assemble them."""
     from mobauto2_benders.app import _prepare_params
+
     mp, _sp = _prepare_params(load_cfg(name), {})
     mp = dict(mp)
     # _prepare_params leaves T implicit when the config gives T_minutes; the
@@ -33,6 +36,7 @@ def master_params(name: str = "baseline_d9.yaml") -> dict:
 
 def build_master(params: dict):
     from mobauto2_benders.problem.master_impl import ProblemMaster
+
     pm = ProblemMaster(params)
     pm.initialize()
     return pm
@@ -40,4 +44,5 @@ def build_master(params: dict):
 
 def constraint_names(model) -> set[str]:
     import pyomo.environ as pyo
+
     return {c.name for c in model.component_objects(pyo.Constraint)}

@@ -44,6 +44,8 @@ def project_candidate(
         else:
             proj[str(k)] = pv
     if offenders:
-        offenders.sort(key=lambda kv: abs((kv[1] - 0.5) if kv[1] == kv[1] else 1.0), reverse=True)
+        offenders.sort(
+            key=lambda kv: abs((kv[1] - 0.5) if kv[1] == kv[1] else 1.0), reverse=True
+        )
         offenders = offenders[: max(0, int(max_offenders))]
     return proj, offenders

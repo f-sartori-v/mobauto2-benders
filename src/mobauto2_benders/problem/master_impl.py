@@ -12,16 +12,17 @@ from ..benders.types import Candidate, Cut, SolveResult, SolveStatus
 from ..benders.cplex_log import parse_cplex_log_bounds
 from ..tolerances import project_binary_value
 
-
 # CPLEX raises "Error 3003: Not a mixed-integer problem" for these on an LP
 # instead of ignoring them, so the LP phase drops them from the option set.
-_MIP_ONLY_CPLEX_OPTIONS = frozenset({
-    "CPXPARAM_Preprocessing_Symmetry",
-    "CPXPARAM_MIP_Tolerances_MIPGap",
-    "CPXPARAM_MIP_Strategy_Search",
-    "CPXPARAM_MIP_Display",
-    "mipgap",
-})
+_MIP_ONLY_CPLEX_OPTIONS = frozenset(
+    {
+        "CPXPARAM_Preprocessing_Symmetry",
+        "CPXPARAM_MIP_Tolerances_MIPGap",
+        "CPXPARAM_MIP_Strategy_Search",
+        "CPXPARAM_MIP_Display",
+        "mipgap",
+    }
+)
 
 
 def _cplex_direct_option_name(key: str) -> str:
@@ -39,7 +40,7 @@ def _cplex_direct_option_name(key: str) -> str:
     name = str(key)
     if not name.upper().startswith("CPXPARAM_"):
         return name
-    return name[len("CPXPARAM_"):].lower()
+    return name[len("CPXPARAM_") :].lower()
 
 
 def _validate_cplex_options(options: dict, backend: str) -> None:
@@ -96,7 +97,9 @@ class ProblemMaster(MasterProblem):
         self._last_solution: dict[str, float] | None = None
         # Best-incumbent snapshot for final reporting
         self._report_candidate: Candidate | None = None
-        self._report_realized_departure_min_map: dict[tuple[int, int], float] | None = None
+        self._report_realized_departure_min_map: dict[tuple[int, int], float] | None = (
+            None
+        )
         self._last_cut_attempt: dict[str, Any] | None = None
 
     def _p(self, key: str, default: Any | None = None) -> Any:
@@ -114,7 +117,9 @@ class ProblemMaster(MasterProblem):
     def _extract_solver_stats(self, res) -> dict[str, Any]:
         stats: dict[str, Any] = {}
         try:
-            stats["termination_condition"] = getattr(res.solver, "termination_condition", None)
+            stats["termination_condition"] = getattr(
+                res.solver, "termination_condition", None
+            )
             stats["status"] = getattr(res.solver, "status", None)
             stats["solver_time"] = getattr(res.solver, "time", None)
             stats["wall_time"] = getattr(res.solver, "wall_time", None)
@@ -127,7 +132,9 @@ class ProblemMaster(MasterProblem):
             pass
         return stats
 
-    def _parse_cplex_log_bounds(self, log_path: str | None) -> dict[str, Optional[float] | str]:
+    def _parse_cplex_log_bounds(
+        self, log_path: str | None
+    ) -> dict[str, Optional[float] | str]:
         return parse_cplex_log_bounds(log_path)
 
     def _extract_cplex_api_stats(self, solver) -> dict[str, Any]:
@@ -167,6 +174,7 @@ class ProblemMaster(MasterProblem):
         Q = int(self._p("Q"))
         # Time discretization: prefer minutes + slot_resolution + trip_duration_minutes
         import math
+
         slot_res = int(self._p("slot_resolution", 1))
         T_minutes = self._p("T_minutes")
         trip_dur_min = self._p("trip_duration_minutes", self._p("trip_duration"))
@@ -218,7 +226,13 @@ class ProblemMaster(MasterProblem):
             elif len(initial_actions) > Q:
                 initial_actions = initial_actions[:Q]
         allowed_initial_actions = {"IDL", "CHR", "OUT", "RET"}
-        invalid_initial_actions = sorted({action for action in initial_actions if action not in allowed_initial_actions})
+        invalid_initial_actions = sorted(
+            {
+                action
+                for action in initial_actions
+                if action not in allowed_initial_actions
+            }
+        )
         if invalid_initial_actions:
             raise ValueError(
                 "initial_actions contains invalid value(s): "
@@ -257,7 +271,16 @@ class ProblemMaster(MasterProblem):
         if use_theta_per_scen and S <= 0:
             use_theta_per_scen = False
         # If using per-scenario thetas, keep single theta per scenario for simplicity; otherwise allow dir split
-        disagg_dir = False if use_theta_per_scen else bool(self._p("disaggregate_theta_by_direction", self._p("theta_split_by_direction", True)))
+        disagg_dir = (
+            False
+            if use_theta_per_scen
+            else bool(
+                self._p(
+                    "disaggregate_theta_by_direction",
+                    self._p("theta_split_by_direction", True),
+                )
+            )
+        )
         if use_theta_per_scen:
             m.Scenarios = range(S)
             m.theta_s = pyo.Var(m.Scenarios, within=pyo.NonNegativeReals)
@@ -276,8 +299,12 @@ class ProblemMaster(MasterProblem):
             m.eOut = pyo.Var(m.T, within=pyo.NonNegativeReals)
             m.eRet = pyo.Var(m.T, within=pyo.NonNegativeReals)
             # eOut[t] >= Yout[t] - 1; eRet[t] >= Yret[t] - 1
-            m.C_ex_out = pyo.Constraint(m.T, rule=lambda m, t: m.eOut[t] >= m.Yout[t] - 1)
-            m.C_ex_ret = pyo.Constraint(m.T, rule=lambda m, t: m.eRet[t] >= m.Yret[t] - 1)
+            m.C_ex_out = pyo.Constraint(
+                m.T, rule=lambda m, t: m.eOut[t] >= m.Yout[t] - 1
+            )
+            m.C_ex_ret = pyo.Constraint(
+                m.T, rule=lambda m, t: m.eRet[t] >= m.Yret[t] - 1
+            )
 
         # Build objective: combine theta terms depending on config
         if use_theta_per_scen:
@@ -288,9 +315,13 @@ class ProblemMaster(MasterProblem):
         else:
             obj_expr = (m.theta_out + m.theta_ret) if disagg_dir else m.theta
         if eps_start > 0.0:
-            obj_expr = obj_expr + eps_start * sum(m.yOUT[q, t] + m.yRET[q, t] for q in m.Q for t in m.T)
+            obj_expr = obj_expr + eps_start * sum(
+                m.yOUT[q, t] + m.yRET[q, t] for q in m.Q for t in m.T
+            )
         if conc_pen > 0.0:
-            obj_expr = obj_expr + conc_pen * (sum(m.eOut[t] for t in m.T) + sum(m.eRet[t] for t in m.T))
+            obj_expr = obj_expr + conc_pen * (
+                sum(m.eOut[t] for t in m.T) + sum(m.eRet[t] for t in m.T)
+            )
         m.obj = pyo.Objective(expr=obj_expr, sense=pyo.minimize)
 
         def exclusivity_rule(m, q, t):
@@ -299,10 +330,17 @@ class ProblemMaster(MasterProblem):
         m.C1a = pyo.Constraint(m.Q, m.T, rule=exclusivity_rule)
 
         # Define aggregation equalities for Yout/Yret
-        m.Cagg_out = pyo.Constraint(m.T, rule=lambda m, t: m.Yout[t] == sum(m.yOUT[q, t] for q in m.Q))
-        m.Cagg_ret = pyo.Constraint(m.T, rule=lambda m, t: m.Yret[t] == sum(m.yRET[q, t] for q in m.Q))
+        m.Cagg_out = pyo.Constraint(
+            m.T, rule=lambda m, t: m.Yout[t] == sum(m.yOUT[q, t] for q in m.Q)
+        )
+        m.Cagg_ret = pyo.Constraint(
+            m.T, rule=lambda m, t: m.Yret[t] == sum(m.yRET[q, t] for q in m.Q)
+        )
         # Time-bucket link: Z[t] = sum_q (yOUT+yRET)
-        m.Cagg_z = pyo.Constraint(m.T, rule=lambda m, t: m.Z[t] == sum(m.yOUT[q, t] + m.yRET[q, t] for q in m.Q))
+        m.Cagg_z = pyo.Constraint(
+            m.T,
+            rule=lambda m, t: m.Z[t] == sum(m.yOUT[q, t] + m.yRET[q, t] for q in m.Q),
+        )
 
         # inTrip equality: 1 during travel slots strictly after a start until arrival
         # For a start at time u, travel occupies slots t in {u+1, ..., u+trip_slots-1}
@@ -310,15 +348,27 @@ class ProblemMaster(MasterProblem):
             lo = max(0, t - trip_slots + 1)
             hi = t - 1
             if lo <= hi:
-                return m.inTrip[q, t] == sum(m.yOUT[q, u] + m.yRET[q, u] for u in range(lo, hi + 1))
+                return m.inTrip[q, t] == sum(
+                    m.yOUT[q, u] + m.yRET[q, u] for u in range(lo, hi + 1)
+                )
             return m.inTrip[q, t] == 0
+
         m.C1b_intrip = pyo.Constraint(m.Q, m.T, rule=_c1b_intrip_rule)
 
         # Block actions when in trip (keeps starts and charging off while busy)
-        m.C1c = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yOUT[q, t] + m.yRET[q, t] + m.c[q, t] <= 1 - m.inTrip[q, t])
+        m.C1c = pyo.Constraint(
+            m.Q,
+            m.T,
+            rule=lambda m, q, t: m.yOUT[q, t] + m.yRET[q, t] + m.c[q, t]
+            <= 1 - m.inTrip[q, t],
+        )
 
         # Occupancy conservation: atL + atM + inTrip == 1 each slot
-        m.Cocc = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.atL[q, t] + m.atM[q, t] + m.inTrip[q, t] == 1)
+        m.Cocc = pyo.Constraint(
+            m.Q,
+            m.T,
+            rule=lambda m, q, t: m.atL[q, t] + m.atM[q, t] + m.inTrip[q, t] == 1,
+        )
 
         # Disallow starting trips that cannot finish within the horizon
         # Allowed starts must satisfy t + trip_slots <= T - 1 -> t <= T - trip_slots - 1
@@ -342,6 +392,7 @@ class ProblemMaster(MasterProblem):
             # Arrivals from RET into Longvilliers at t from starts at (t - trip_slots)
             arr_ret = m.yRET[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
             return m.atL[q, t] == m.atL[q, t - 1] - m.yOUT[q, t - 1] + arr_ret
+
         m.C2a_locL = pyo.Constraint(m.Q, m.T, rule=_c2a_locL_rule)
 
         def _c2a_locM_rule(m, q, t):
@@ -350,11 +401,16 @@ class ProblemMaster(MasterProblem):
             # Arrivals from OUT into Massy at t from starts at (t - trip_slots)
             arr_out = m.yOUT[q, t - trip_slots] if (t - trip_slots) >= 0 else 0
             return m.atM[q, t] == m.atM[q, t - 1] - m.yRET[q, t - 1] + arr_out
+
         m.C2a_locM = pyo.Constraint(m.Q, m.T, rule=_c2a_locM_rule)
 
         # Gating by occupancy
-        m.C2b = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yOUT[q, t] <= m.atL[q, t])
-        m.C2c = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.yRET[q, t] <= m.atM[q, t])
+        m.C2b = pyo.Constraint(
+            m.Q, m.T, rule=lambda m, q, t: m.yOUT[q, t] <= m.atL[q, t]
+        )
+        m.C2c = pyo.Constraint(
+            m.Q, m.T, rule=lambda m, q, t: m.yRET[q, t] <= m.atM[q, t]
+        )
         m.C2d = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.c[q, t] <= m.atL[q, t])
 
         # Note: We no longer enforce "first non-idle must be OUT".
@@ -378,11 +434,17 @@ class ProblemMaster(MasterProblem):
         # config diff. NOTE it does restrict the model: it is a canonical-ordering
         # choice among equal-cost schedules, so leave it on unless you have a reason.
         if bool(self._p("charge_before_idle", True)):
+
             def _c_no_recharge_after_idle_rule(m, q, t):
                 if t < 1:
                     return pyo.Constraint.Skip
-                return m.c[q, t] <= m.yOUT[q, t - 1] + m.c[q, t - 1] + 1 - m.atL[q, t - 1]
-            m.C_no_recharge_after_idle = pyo.Constraint(m.Q, m.T, rule=_c_no_recharge_after_idle_rule)
+                return (
+                    m.c[q, t] <= m.yOUT[q, t - 1] + m.c[q, t - 1] + 1 - m.atL[q, t - 1]
+                )
+
+            m.C_no_recharge_after_idle = pyo.Constraint(
+                m.Q, m.T, rule=_c_no_recharge_after_idle_rule
+            )
 
         for q in m.Q:
             first_action = initial_actions[q]
@@ -435,6 +497,7 @@ class ProblemMaster(MasterProblem):
                     "cut off the true optimum. Set master.use_fifo_symmetry and "
                     "master.symmetry_breaking to false, or make the fleet homogeneous."
                 )
+
             # Order by TOTAL departures, not by every time prefix.
             #
             # The previous cumulative-prefix form, cum[k][t] <= cum[k-1][t] for every
@@ -455,10 +518,10 @@ class ProblemMaster(MasterProblem):
             def _c_sym_break_tot_rule(m, k):
                 if k < 1:
                     return pyo.Constraint.Skip
-                return (
-                    sum(m.yOUT[k, t] + m.yRET[k, t] for t in m.T)
-                    <= sum(m.yOUT[k - 1, t] + m.yRET[k - 1, t] for t in m.T)
+                return sum(m.yOUT[k, t] + m.yRET[k, t] for t in m.T) <= sum(
+                    m.yOUT[k - 1, t] + m.yRET[k - 1, t] for t in m.T
                 )
+
             m.C_sym_break_tot = pyo.Constraint(m.Q, rule=_c_sym_break_tot_rule)
 
         for q in m.Q:
@@ -467,7 +530,11 @@ class ProblemMaster(MasterProblem):
         def _c4_bal_rule(m, q, t):
             if t >= T - 1:
                 return pyo.Constraint.Skip
-            return m.b[q, t + 1] == m.b[q, t] - L * (m.yOUT[q, t] + m.yRET[q, t]) + m.gchg[q, t]
+            return (
+                m.b[q, t + 1]
+                == m.b[q, t] - L * (m.yOUT[q, t] + m.yRET[q, t]) + m.gchg[q, t]
+            )
+
         m.C4_bal = pyo.Constraint(m.Q, m.T, rule=_c4_bal_rule)
 
         # Charging linkage (continuous): gchg[q,t] == delta_chg * c[q,t].
@@ -478,6 +545,7 @@ class ProblemMaster(MasterProblem):
             if t >= T - 1:
                 return pyo.Constraint.Skip
             return m.gchg[q, t] == delta_chg * m.c[q, t]
+
         m.C4_chg_link = pyo.Constraint(m.Q, m.T, rule=_c4_chg_link_rule)
 
         # Respect remaining capacity: gchg[q,t] <= Emax - b[q,t].
@@ -486,10 +554,13 @@ class ProblemMaster(MasterProblem):
             if t >= T - 1:
                 return pyo.Constraint.Skip
             return m.gchg[q, t] <= Emax - m.b[q, t]
+
         m.C4_chg_cap = pyo.Constraint(m.Q, m.T, rule=_c4_chg_cap_rule)
 
         # An OUT trip must carry enough charge for the outbound leg and the return.
-        m.C5 = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.b[q, t] >= 2 * L * m.yOUT[q, t])
+        m.C5 = pyo.Constraint(
+            m.Q, m.T, rule=lambda m, q, t: m.b[q, t] >= 2 * L * m.yOUT[q, t]
+        )
 
         # NOT ADDED (M1): the explicit return-leg constraint b[q,t] >= L*yRET[q,t].
         #
@@ -534,7 +605,11 @@ class ProblemMaster(MasterProblem):
         #
         # Valid, but validity is not usefulness -- M1 was valid too and cost 2.7x
         # master time for a worse bound. Off by default; earn it by measurement.
-        rlb = self._p("recourse_bound_data") if bool(self._p("recourse_lower_bound", False)) else None
+        rlb = (
+            self._p("recourse_bound_data")
+            if bool(self._p("recourse_lower_bound", False))
+            else None
+        )
         if rlb:
             R_out_v = [float(x) for x in rlb.get("R_out", [])]
             R_ret_v = [float(x) for x in rlb.get("R_ret", [])]
@@ -597,6 +672,7 @@ class ProblemMaster(MasterProblem):
 
                     m.C_recourse_lb_scen = pyo.Constraint(m.T, rule=_c_rlb_scen_rule)
                 elif hasattr(m, "theta"):
+
                     def _c_recourse_lb_rule(mm, j):
                         tmax = min(T - 1, int(j) + W_sl)
                         return mm.theta >= p_pen * (
@@ -705,7 +781,8 @@ class ProblemMaster(MasterProblem):
                     solver.options.pop(k, None)
                     solver.options.pop(_cplex_direct_option_name(k), None)
                 cplex_opts = {
-                    k: v for k, v in cplex_opts.items()
+                    k: v
+                    for k, v in cplex_opts.items()
                     if k not in _MIP_ONLY_CPLEX_OPTIONS
                 }
             backend = str(self._p("solver_backend", "")).lower()
@@ -758,7 +835,9 @@ class ProblemMaster(MasterProblem):
                         except Exception:
                             pass
                 if n_out + n_ret > 0:
-                    self._vprint(f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}")
+                    self._vprint(
+                        f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}"
+                    )
                     use_ws = True
                 else:
                     self._vprint("[MIPSTART] no x vars found; skipping warm start")
@@ -768,7 +847,11 @@ class ProblemMaster(MasterProblem):
                 # Clear after applying to avoid reusing stale starts in later solves
                 self._warm_start = None
         # Use previous master solution as MIP start if enabled and no explicit warm start
-        if (not use_ws) and bool(self._p("use_mip_start", False)) and self._last_solution:
+        if (
+            (not use_ws)
+            and bool(self._p("use_mip_start", False))
+            and self._last_solution
+        ):
             eps_bin = float(self._p("eps_bin", 1e-6))
             try:
                 n_out = 0
@@ -798,7 +881,9 @@ class ProblemMaster(MasterProblem):
                             m.yRET[q, t].value = pv
                             n_ret += 1
                 if n_out + n_ret > 0:
-                    self._vprint(f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}")
+                    self._vprint(
+                        f"[MIPSTART] x-only start applied: n_out={n_out} n_ret={n_ret}"
+                    )
                     use_ws = True
                 else:
                     self._vprint("[MIPSTART] no x vars found; skipping warm start")
@@ -835,7 +920,9 @@ class ProblemMaster(MasterProblem):
                     it = -1
                 cuts = int(self._cut_idx)
                 if it >= 0:
-                    log_path = out_dir / f"master_iter_{it:03d}_cuts_{cuts:03d}_{ts}.log"
+                    log_path = (
+                        out_dir / f"master_iter_{it:03d}_cuts_{cuts:03d}_{ts}.log"
+                    )
                 else:
                     log_path = out_dir / f"master_iter_cuts_{cuts:03d}_{ts}.log"
                 backend = str(self._p("solver_backend", "")).lower()
@@ -865,7 +952,11 @@ class ProblemMaster(MasterProblem):
             symbolic_solver_labels=True,
         )
         term = getattr(res.solver, "termination_condition", None)
-        if term in (pyo.TerminationCondition.optimal, pyo.TerminationCondition.feasible, pyo.TerminationCondition.maxTimeLimit):
+        if term in (
+            pyo.TerminationCondition.optimal,
+            pyo.TerminationCondition.feasible,
+            pyo.TerminationCondition.maxTimeLimit,
+        ):
             try:
                 m.solutions.load_from(res)
             except Exception:
@@ -880,7 +971,17 @@ class ProblemMaster(MasterProblem):
                 )
         # Try to capture the actual solver log path (including temp log from direct interfaces)
         try:
-            for attr in ("logfile", "log_file", "_log_file", "_logfile", "log_path", "_log_path", "log", "logfile_name", "log_filename"):
+            for attr in (
+                "logfile",
+                "log_file",
+                "_log_file",
+                "_logfile",
+                "log_path",
+                "_log_path",
+                "log",
+                "logfile_name",
+                "log_filename",
+            ):
                 val = getattr(res.solver, attr, None)
                 if isinstance(val, str) and val:
                     self._last_log_path = val
@@ -893,7 +994,11 @@ class ProblemMaster(MasterProblem):
             backend = str(self._p("solver_backend", "")).lower()
         except Exception:
             backend = ""
-        if term not in (pyo.TerminationCondition.optimal, pyo.TerminationCondition.feasible, pyo.TerminationCondition.maxTimeLimit) and backend in ("cplex", ""):
+        if term not in (
+            pyo.TerminationCondition.optimal,
+            pyo.TerminationCondition.feasible,
+            pyo.TerminationCondition.maxTimeLimit,
+        ) and backend in ("cplex", ""):
             try:
                 fallback = pyo.SolverFactory("cplex_direct")
                 # Apply options compatible with cplex_direct
@@ -914,7 +1019,9 @@ class ProblemMaster(MasterProblem):
                     symbolic_solver_labels=True,
                 )
                 term = getattr(res.solver, "termination_condition", None)
-                self._vprint("[MP] Fallback to cplex_direct due to UNKNOWN termination.")
+                self._vprint(
+                    "[MP] Fallback to cplex_direct due to UNKNOWN termination."
+                )
             except Exception:
                 pass
         try:
@@ -946,15 +1053,25 @@ class ProblemMaster(MasterProblem):
 
         if stats.get("incumbent") is None and parsed_best_int is not None:
             stats["incumbent"] = parsed_best_int
-            sources["incumbent"] = f"cplex_log:{parsed_source}" if parsed_source else "cplex_log"
+            sources["incumbent"] = (
+                f"cplex_log:{parsed_source}" if parsed_source else "cplex_log"
+            )
         if stats.get("best_bound") is None and parsed_best_bound is not None:
             stats["best_bound"] = parsed_best_bound
-            sources["best_bound"] = f"cplex_log:{parsed_source}" if parsed_source else "cplex_log"
+            sources["best_bound"] = (
+                f"cplex_log:{parsed_source}" if parsed_source else "cplex_log"
+            )
         if stats.get("gap") is None and parsed_gap is not None:
             stats["gap"] = parsed_gap
-            sources["gap"] = f"cplex_log:{parsed_source}" if parsed_source else "cplex_log"
+            sources["gap"] = (
+                f"cplex_log:{parsed_source}" if parsed_source else "cplex_log"
+            )
 
-        if stats.get("gap") is None and stats.get("incumbent") is not None and stats.get("best_bound") is not None:
+        if (
+            stats.get("gap") is None
+            and stats.get("incumbent") is not None
+            and stats.get("best_bound") is not None
+        ):
             try:
                 inc = float(stats["incumbent"])
                 bb = float(stats["best_bound"])
@@ -1000,13 +1117,25 @@ class ProblemMaster(MasterProblem):
             self._vprint(
                 "MP parsed bounds: best_integer=%s best_bound=%s"
                 % (
-                    (f"{float(parsed_best_int):.6g}" if parsed_best_int is not None else "-"),
-                    (f"{float(parsed_best_bound):.6g}" if parsed_best_bound is not None else "-"),
+                    (
+                        f"{float(parsed_best_int):.6g}"
+                        if parsed_best_int is not None
+                        else "-"
+                    ),
+                    (
+                        f"{float(parsed_best_bound):.6g}"
+                        if parsed_best_bound is not None
+                        else "-"
+                    ),
                 )
             )
         try:
             sol_len = len(getattr(res, "solution", []))
-            sol_keys = list(getattr(res, "solution", {}).keys()) if hasattr(res, "solution") else []
+            sol_keys = (
+                list(getattr(res, "solution", {}).keys())
+                if hasattr(res, "solution")
+                else []
+            )
             self._vprint(f"MP solutions: count={sol_len} keys={sol_keys}")
         except Exception:
             pass
@@ -1014,7 +1143,10 @@ class ProblemMaster(MasterProblem):
             self._vprint(f"[MP] Solver log: {log_path}")
         if term in (pyo.TerminationCondition.optimal,):
             status = SolveStatus.OPTIMAL
-        elif term in (pyo.TerminationCondition.feasible, pyo.TerminationCondition.maxTimeLimit):
+        elif term in (
+            pyo.TerminationCondition.feasible,
+            pyo.TerminationCondition.maxTimeLimit,
+        ):
             status = SolveStatus.FEASIBLE
         elif term in (
             pyo.TerminationCondition.infeasible,
@@ -1081,7 +1213,10 @@ class ProblemMaster(MasterProblem):
                 nonzero = False
                 for q in m.Q:
                     for t in m.T:
-                        if float(m.yOUT[q, t].value or 0.0) > 1e-6 or float(m.yRET[q, t].value or 0.0) > 1e-6:
+                        if (
+                            float(m.yOUT[q, t].value or 0.0) > 1e-6
+                            or float(m.yRET[q, t].value or 0.0) > 1e-6
+                        ):
                             nonzero = True
                             break
                     if nonzero:
@@ -1095,9 +1230,15 @@ class ProblemMaster(MasterProblem):
         try:
             totals = []
             for q in m.Q:
-                tot_q = sum(float(m.yOUT[q, t].value or 0.0) + float(m.yRET[q, t].value or 0.0) for t in m.T)
+                tot_q = sum(
+                    float(m.yOUT[q, t].value or 0.0) + float(m.yRET[q, t].value or 0.0)
+                    for t in m.T
+                )
                 totals.append(tot_q)
-            self._vprint("Shuttle totals (OUT+RET): " + ", ".join(f"q{idx}={tot:.0f}" for idx, tot in enumerate(totals)))
+            self._vprint(
+                "Shuttle totals (OUT+RET): "
+                + ", ".join(f"q{idx}={tot:.0f}" for idx, tot in enumerate(totals))
+            )
         except Exception:
             pass
         # Store solution values for next MIP start (binary vars)
@@ -1109,7 +1250,9 @@ class ProblemMaster(MasterProblem):
                     sol[f"yRET[{int(q)},{int(t)}]"] = float(m.yRET[q, t].value or 0.0)
                     sol[f"atL[{int(q)},{int(t)}]"] = float(m.atL[q, t].value or 0.0)
                     sol[f"atM[{int(q)},{int(t)}]"] = float(m.atM[q, t].value or 0.0)
-                    sol[f"inTrip[{int(q)},{int(t)}]"] = float(m.inTrip[q, t].value or 0.0)
+                    sol[f"inTrip[{int(q)},{int(t)}]"] = float(
+                        m.inTrip[q, t].value or 0.0
+                    )
             self._last_solution = sol
         except Exception:
             self._last_solution = None
@@ -1119,7 +1262,12 @@ class ProblemMaster(MasterProblem):
             best_bound = stats.get("best_bound")
             incumbent = stats.get("incumbent")
             gap = stats.get("gap")
-            if nodes is not None or best_bound is not None or incumbent is not None or gap is not None:
+            if (
+                nodes is not None
+                or best_bound is not None
+                or incumbent is not None
+                or gap is not None
+            ):
                 self._vprint(
                     "MP stats (solver): nodes=%s best_bound=%s incumbent=%s gap=%s"
                     % (str(nodes), str(best_bound), str(incumbent), str(gap))
@@ -1127,7 +1275,12 @@ class ProblemMaster(MasterProblem):
         except Exception:
             pass
         candidate = self._collect_candidate()
-        return SolveResult(status=status, objective=objective, candidate=candidate, lower_bound=self._lb)
+        return SolveResult(
+            status=status,
+            objective=objective,
+            candidate=candidate,
+            lower_bound=self._lb,
+        )
 
     def last_solve_stats(self) -> dict[str, Any]:
         return dict(getattr(self, "_last_solve_stats", {}) or {})
@@ -1237,9 +1390,13 @@ class ProblemMaster(MasterProblem):
         candidate: Candidate | None,
         realized_departure_min_map: dict[tuple[int, int], float] | None = None,
     ) -> None:
-        self._report_candidate = dict(candidate) if isinstance(candidate, dict) else None
+        self._report_candidate = (
+            dict(candidate) if isinstance(candidate, dict) else None
+        )
         self._report_realized_departure_min_map = (
-            dict(realized_departure_min_map) if isinstance(realized_departure_min_map, dict) else None
+            dict(realized_departure_min_map)
+            if isinstance(realized_departure_min_map, dict)
+            else None
         )
 
     # Pretty-print the current master solution (if solved)
@@ -1248,7 +1405,9 @@ class ProblemMaster(MasterProblem):
         m = self.m
         Q = list(m.Q)
         T = list(m.T)
-        report_candidate = self._report_candidate if isinstance(self._report_candidate, dict) else None
+        report_candidate = (
+            self._report_candidate if isinstance(self._report_candidate, dict) else None
+        )
         realized_map = (
             self._report_realized_departure_min_map
             if isinstance(self._report_realized_departure_min_map, dict)
@@ -1276,8 +1435,16 @@ class ProblemMaster(MasterProblem):
 
         def _is_service_start(q: int, t: int) -> bool:
             if int(t) < 1:
-                yout0 = _candidate_value(f"yOUT[{int(q)},{int(t)}]") if report_candidate is not None else float(m.yOUT[q, t].value or 0.0)
-                yret0 = _candidate_value(f"yRET[{int(q)},{int(t)}]") if report_candidate is not None else float(m.yRET[q, t].value or 0.0)
+                yout0 = (
+                    _candidate_value(f"yOUT[{int(q)},{int(t)}]")
+                    if report_candidate is not None
+                    else float(m.yOUT[q, t].value or 0.0)
+                )
+                yret0 = (
+                    _candidate_value(f"yRET[{int(q)},{int(t)}]")
+                    if report_candidate is not None
+                    else float(m.yRET[q, t].value or 0.0)
+                )
                 if yout0 >= 0.5 or yret0 >= 0.5:
                     raise AssertionError(
                         f"Invalid service start slot q={int(q)} t={int(t)}; slot 0 is not a departure slot"
@@ -1329,7 +1496,11 @@ class ProblemMaster(MasterProblem):
         try:
             if report_candidate is not None and "__theta" in report_candidate:
                 lines.append(f"theta = {_candidate_value('__theta'):.6g}")
-            elif report_candidate is not None and "__theta_out" in report_candidate and "__theta_ret" in report_candidate:
+            elif (
+                report_candidate is not None
+                and "__theta_out" in report_candidate
+                and "__theta_ret" in report_candidate
+            ):
                 t_out = _candidate_value("__theta_out")
                 t_ret = _candidate_value("__theta_ret")
                 lines.append(f"theta = {t_out + t_ret:.6g}")
@@ -1367,6 +1538,7 @@ class ProblemMaster(MasterProblem):
                 lines.append("theta = (unavailable)")
         except Exception:
             lines.append("theta = (unavailable)")
+
         # Binary schedules
         def row(var, q):
             vals = []
@@ -1439,11 +1611,18 @@ class ProblemMaster(MasterProblem):
         m = self.m
         anti_trivial_min_total = None
         try:
-            anti_trivial_min_total = int(cut.metadata.get("anti_trivial_min_total_starts")) if hasattr(cut, "metadata") and ("anti_trivial_min_total_starts" in cut.metadata) else None
+            anti_trivial_min_total = (
+                int(cut.metadata.get("anti_trivial_min_total_starts"))
+                if hasattr(cut, "metadata")
+                and ("anti_trivial_min_total_starts" in cut.metadata)
+                else None
+            )
         except Exception:
             anti_trivial_min_total = None
         if anti_trivial_min_total is not None:
-            lhs = sum(m.yOUT[q, t] for q in m.Q for t in m.T) + sum(m.yRET[q, t] for q in m.Q for t in m.T)
+            lhs = sum(m.yOUT[q, t] for q in m.Q for t in m.T) + sum(
+                m.yRET[q, t] for q in m.Q for t in m.T
+            )
             lhs_val = float(pyo.value(lhs, exception=False) or 0.0)
             rhs_val = float(anti_trivial_min_total)
             eps_cut = float(self._p("eps_cut", 1e-8))
@@ -1457,16 +1636,36 @@ class ProblemMaster(MasterProblem):
             setattr(m.BendersCuts, cname, con)
             self._cut_signatures.add(sig)
             self._cut_idx += 1
-            self._vprint(f"[BENDERS] Added anti-trivial fallback cut #{self._cut_idx - 1}: total_starts>={anti_trivial_min_total}")
+            self._vprint(
+                f"[BENDERS] Added anti-trivial fallback cut #{self._cut_idx - 1}: total_starts>={anti_trivial_min_total}"
+            )
             return True
-        const = float(cut.metadata.get("const", 0.0)) if hasattr(cut, "metadata") else 0.0
-        const_out_meta = float(cut.metadata.get("const_out", 0.0)) if hasattr(cut, "metadata") and ("const_out" in cut.metadata) else None
-        const_ret_meta = float(cut.metadata.get("const_ret", 0.0)) if hasattr(cut, "metadata") and ("const_ret" in cut.metadata) else None
-        coeff_yOUT = cut.metadata.get("coeff_yOUT") if hasattr(cut, "metadata") else None
-        coeff_yRET = cut.metadata.get("coeff_yRET") if hasattr(cut, "metadata") else None
+        const = (
+            float(cut.metadata.get("const", 0.0)) if hasattr(cut, "metadata") else 0.0
+        )
+        const_out_meta = (
+            float(cut.metadata.get("const_out", 0.0))
+            if hasattr(cut, "metadata") and ("const_out" in cut.metadata)
+            else None
+        )
+        const_ret_meta = (
+            float(cut.metadata.get("const_ret", 0.0))
+            if hasattr(cut, "metadata") and ("const_ret" in cut.metadata)
+            else None
+        )
+        coeff_yOUT = (
+            cut.metadata.get("coeff_yOUT") if hasattr(cut, "metadata") else None
+        )
+        coeff_yRET = (
+            cut.metadata.get("coeff_yRET") if hasattr(cut, "metadata") else None
+        )
         # Optional: scenario index for per-scenario thetas
         try:
-            scen_idx = int(cut.metadata.get("scenario_index")) if hasattr(cut, "metadata") and ("scenario_index" in cut.metadata) else None
+            scen_idx = (
+                int(cut.metadata.get("scenario_index"))
+                if hasattr(cut, "metadata") and ("scenario_index" in cut.metadata)
+                else None
+            )
         except Exception:
             scen_idx = None
 
@@ -1491,18 +1690,28 @@ class ProblemMaster(MasterProblem):
 
         def _theta_snapshot() -> tuple[float | None, float | None, float | None]:
             try:
-                theta_out_val = float(pyo.value(m.theta_out, exception=False)) if hasattr(m, "theta_out") else None
+                theta_out_val = (
+                    float(pyo.value(m.theta_out, exception=False))
+                    if hasattr(m, "theta_out")
+                    else None
+                )
             except Exception:
                 theta_out_val = None
             try:
-                theta_ret_val = float(pyo.value(m.theta_ret, exception=False)) if hasattr(m, "theta_ret") else None
+                theta_ret_val = (
+                    float(pyo.value(m.theta_ret, exception=False))
+                    if hasattr(m, "theta_ret")
+                    else None
+                )
             except Exception:
                 theta_ret_val = None
             try:
                 if hasattr(m, "theta"):
                     theta_total_val = float(pyo.value(m.theta, exception=False))
                 else:
-                    theta_total_val = (float(theta_out_val or 0.0) + float(theta_ret_val or 0.0))
+                    theta_total_val = float(theta_out_val or 0.0) + float(
+                        theta_ret_val or 0.0
+                    )
             except Exception:
                 theta_total_val = None
             return theta_out_val, theta_ret_val, theta_total_val
@@ -1513,20 +1722,34 @@ class ProblemMaster(MasterProblem):
                 for (q, t), v in coeffs.items():
                     try:
                         if prefix == "yOUT":
-                            total += float(v) * float(m.yOUT[int(q), int(t)].value or 0.0)
+                            total += float(v) * float(
+                                m.yOUT[int(q), int(t)].value or 0.0
+                            )
                         else:
-                            total += float(v) * float(m.yRET[int(q), int(t)].value or 0.0)
+                            total += float(v) * float(
+                                m.yRET[int(q), int(t)].value or 0.0
+                            )
                     except Exception:
                         continue
             return total
 
         theta_out_cur, theta_ret_cur, theta_total_cur = _theta_snapshot()
-        raw_rhs_out_total = _raw_cut_value(const_out_meta, coeff_yOUT, "yOUT") if const_out_meta is not None else None
-        raw_rhs_ret_total = _raw_cut_value(const_ret_meta, coeff_yRET, "yRET") if const_ret_meta is not None else None
+        raw_rhs_out_total = (
+            _raw_cut_value(const_out_meta, coeff_yOUT, "yOUT")
+            if const_out_meta is not None
+            else None
+        )
+        raw_rhs_ret_total = (
+            _raw_cut_value(const_ret_meta, coeff_yRET, "yRET")
+            if const_ret_meta is not None
+            else None
+        )
         raw_rhs_total = _raw_cut_value(const, coeff_yOUT, "yOUT")
         raw_rhs_total += sum(
             float(v) * float(m.yRET[int(q), int(t)].value or 0.0)
-            for (q, t), v in (coeff_yRET.items() if isinstance(coeff_yRET, dict) else [])
+            for (q, t), v in (
+                coeff_yRET.items() if isinstance(coeff_yRET, dict) else []
+            )
         )
         attempt_diag: dict[str, Any] = {
             "iteration": iteration,
@@ -1536,9 +1759,21 @@ class ProblemMaster(MasterProblem):
             "theta_out": theta_out_cur,
             "theta_ret": theta_ret_cur,
             "theta_total": theta_total_cur,
-            "recourse_out": (float(cut.metadata.get("recourse_out")) if hasattr(cut, "metadata") and ("recourse_out" in cut.metadata) else None),
-            "recourse_ret": (float(cut.metadata.get("recourse_ret")) if hasattr(cut, "metadata") and ("recourse_ret" in cut.metadata) else None),
-            "recourse_total": (float(cut.metadata.get("recourse_total")) if hasattr(cut, "metadata") and ("recourse_total" in cut.metadata) else None),
+            "recourse_out": (
+                float(cut.metadata.get("recourse_out"))
+                if hasattr(cut, "metadata") and ("recourse_out" in cut.metadata)
+                else None
+            ),
+            "recourse_ret": (
+                float(cut.metadata.get("recourse_ret"))
+                if hasattr(cut, "metadata") and ("recourse_ret" in cut.metadata)
+                else None
+            ),
+            "recourse_total": (
+                float(cut.metadata.get("recourse_total"))
+                if hasattr(cut, "metadata") and ("recourse_total" in cut.metadata)
+                else None
+            ),
             "raw_rhs_out": raw_rhs_out_total,
             "raw_rhs_ret": raw_rhs_ret_total,
             "raw_rhs_total": raw_rhs_total,
@@ -1675,10 +1910,18 @@ class ProblemMaster(MasterProblem):
                     yret_val[int(t)] = float(m.Yret[int(t)].value or 0.0)
                 except Exception:
                     yret_val[int(t)] = 0.0
-            contrib = sum(float(v) * float(yout_val.get(int(t), 0.0)) for t, v in agg_out.items())
-            contrib += sum(float(v) * float(yret_val.get(int(t), 0.0)) for t, v in agg_ret.items())
-            contrib_out = sum(float(v) * float(yout_val.get(int(t), 0.0)) for t, v in agg_out.items())
-            contrib_ret = sum(float(v) * float(yret_val.get(int(t), 0.0)) for t, v in agg_ret.items())
+            contrib = sum(
+                float(v) * float(yout_val.get(int(t), 0.0)) for t, v in agg_out.items()
+            )
+            contrib += sum(
+                float(v) * float(yret_val.get(int(t), 0.0)) for t, v in agg_ret.items()
+            )
+            contrib_out = sum(
+                float(v) * float(yout_val.get(int(t), 0.0)) for t, v in agg_out.items()
+            )
+            contrib_ret = sum(
+                float(v) * float(yret_val.get(int(t), 0.0)) for t, v in agg_ret.items()
+            )
         else:
             # Per-(q,t) coefficients
             contrib = 0.0
@@ -1699,8 +1942,12 @@ class ProblemMaster(MasterProblem):
                 except Exception:
                     pass
         const_adj = float(ub_est) - float(contrib)
-        const_adj_out = (float(ub_est_out) - float(contrib_out)) if ub_est_out is not None else None
-        const_adj_ret = (float(ub_est_ret) - float(contrib_ret)) if ub_est_ret is not None else None
+        const_adj_out = (
+            (float(ub_est_out) - float(contrib_out)) if ub_est_out is not None else None
+        )
+        const_adj_ret = (
+            (float(ub_est_ret) - float(contrib_ret)) if ub_est_ret is not None else None
+        )
 
         # Check that the re-anchoring only does what it is entitled to do.
         #
@@ -1723,7 +1970,10 @@ class ProblemMaster(MasterProblem):
                 if abs(float(v)) > coeff_tol:
                     continue
                 try:
-                    yv = float((m.yOUT if _var == "yOUT" else m.yRET)[int(q), int(t)].value or 0.0)
+                    yv = float(
+                        (m.yOUT if _var == "yOUT" else m.yRET)[int(q), int(t)].value
+                        or 0.0
+                    )
                 except Exception:
                     yv = 0.0
                 dropped += float(v) * yv
@@ -1754,7 +2004,11 @@ class ProblemMaster(MasterProblem):
                 q, t = key  # type: ignore[misc]
                 rhs = rhs + float(v) * m.yRET[int(q), int(t)]
 
-        if (not isinstance(coeff_yOUT, dict)) and (not isinstance(coeff_yRET, dict)) and cut.coeffs:
+        if (
+            (not isinstance(coeff_yOUT, dict))
+            and (not isinstance(coeff_yRET, dict))
+            and cut.coeffs
+        ):
             for name, coef in cut.coeffs.items():
                 v2 = float(coef)
                 if abs(v2) <= coeff_tol:
@@ -1777,8 +2031,12 @@ class ProblemMaster(MasterProblem):
         if disagg_dir and (const_adj_out is not None) and (const_adj_ret is not None):
             # Build separate RHS for OUT/RET
             if aggregate:
-                rhs_out = float(const_adj_out) + sum(float(v) * m.Yout[int(t)] for t, v in agg_out.items())
-                rhs_ret = float(const_adj_ret) + sum(float(v) * m.Yret[int(t)] for t, v in agg_ret.items())
+                rhs_out = float(const_adj_out) + sum(
+                    float(v) * m.Yout[int(t)] for t, v in agg_out.items()
+                )
+                rhs_ret = float(const_adj_ret) + sum(
+                    float(v) * m.Yret[int(t)] for t, v in agg_ret.items()
+                )
             else:
                 rhs_out = float(const_adj_out) + sum(float(v) * m.yOUT[int(q), int(t)] for (q, t), v in agg_out.items())  # type: ignore[misc]
                 rhs_ret = float(const_adj_ret) + sum(float(v) * m.yRET[int(q), int(t)] for (q, t), v in agg_ret.items())  # type: ignore[misc]
@@ -1791,44 +2049,72 @@ class ProblemMaster(MasterProblem):
             rhs_out_val = pyo.value(rhs_out, exception=False)
             lhs_ret_val = pyo.value(lhs_ret, exception=False)
             rhs_ret_val = pyo.value(rhs_ret, exception=False)
-            if lhs_out_val is None or rhs_out_val is None or lhs_ret_val is None or rhs_ret_val is None:
+            if (
+                lhs_out_val is None
+                or rhs_out_val is None
+                or lhs_ret_val is None
+                or rhs_ret_val is None
+            ):
                 return False
             lhs_out_val = float(lhs_out_val)
             rhs_out_val = float(rhs_out_val)
             lhs_ret_val = float(lhs_ret_val)
             rhs_ret_val = float(rhs_ret_val)
-            attempt_diag.update({
-                "transformed_rhs_out_before_scaling": float(rhs_out_val),
-                "transformed_rhs_ret_before_scaling": float(rhs_ret_val),
-                "transformed_rhs_total_before_scaling": float(rhs_out_val + rhs_ret_val),
-                "transformed_rhs_out_after_scaling": float(rhs_out_val),
-                "transformed_rhs_ret_after_scaling": float(rhs_ret_val),
-                "transformed_rhs_total_after_scaling": float(rhs_out_val + rhs_ret_val),
-                "lhs_out": float(lhs_out_val),
-                "lhs_ret": float(lhs_ret_val),
-                "lhs_total": float(lhs_out_val + lhs_ret_val),
-                "const_out_adjusted": float(const_adj_out),
-                "const_ret_adjusted": float(const_adj_ret),
-            })
+            attempt_diag.update(
+                {
+                    "transformed_rhs_out_before_scaling": float(rhs_out_val),
+                    "transformed_rhs_ret_before_scaling": float(rhs_ret_val),
+                    "transformed_rhs_total_before_scaling": float(
+                        rhs_out_val + rhs_ret_val
+                    ),
+                    "transformed_rhs_out_after_scaling": float(rhs_out_val),
+                    "transformed_rhs_ret_after_scaling": float(rhs_ret_val),
+                    "transformed_rhs_total_after_scaling": float(
+                        rhs_out_val + rhs_ret_val
+                    ),
+                    "lhs_out": float(lhs_out_val),
+                    "lhs_ret": float(lhs_ret_val),
+                    "lhs_total": float(lhs_out_val + lhs_ret_val),
+                    "const_out_adjusted": float(const_adj_out),
+                    "const_ret_adjusted": float(const_adj_ret),
+                }
+            )
             # Tightness + violation checks
             eps_cut = float(self._p("eps_cut", 1e-8))
             attempt_diag["violation_tolerance_master"] = float(eps_cut)
-            if ub_est_out is not None and abs(rhs_out_val - float(ub_est_out)) > eps_cut * max(1.0, abs(float(ub_est_out))):
-                self._vprint("[CUT DEBUG] Tightness failed (OUT). ub=%.6g rhs=%.6g" % (float(ub_est_out), rhs_out_val))
+            if ub_est_out is not None and abs(
+                rhs_out_val - float(ub_est_out)
+            ) > eps_cut * max(1.0, abs(float(ub_est_out))):
+                self._vprint(
+                    "[CUT DEBUG] Tightness failed (OUT). ub=%.6g rhs=%.6g"
+                    % (float(ub_est_out), rhs_out_val)
+                )
                 attempt_diag["skip_reason"] = "tightness_failed_out"
                 return False
-            if ub_est_ret is not None and abs(rhs_ret_val - float(ub_est_ret)) > eps_cut * max(1.0, abs(float(ub_est_ret))):
-                self._vprint("[CUT DEBUG] Tightness failed (RET). ub=%.6g rhs=%.6g" % (float(ub_est_ret), rhs_ret_val))
+            if ub_est_ret is not None and abs(
+                rhs_ret_val - float(ub_est_ret)
+            ) > eps_cut * max(1.0, abs(float(ub_est_ret))):
+                self._vprint(
+                    "[CUT DEBUG] Tightness failed (RET). ub=%.6g rhs=%.6g"
+                    % (float(ub_est_ret), rhs_ret_val)
+                )
                 attempt_diag["skip_reason"] = "tightness_failed_ret"
                 return False
             viol_out = rhs_out_val - lhs_out_val
             viol_ret = rhs_ret_val - lhs_ret_val
             attempt_diag["violation_out"] = float(viol_out)
             attempt_diag["violation_ret"] = float(viol_ret)
-            if (viol_out <= eps_cut * max(1.0, abs(rhs_out_val))) and (viol_ret <= eps_cut * max(1.0, abs(rhs_ret_val))):
-                self._vprint("[CUT DEBUG] Not violated (dir). viol_out=%.6g viol_ret=%.6g" % (viol_out, viol_ret))
+            if (viol_out <= eps_cut * max(1.0, abs(rhs_out_val))) and (
+                viol_ret <= eps_cut * max(1.0, abs(rhs_ret_val))
+            ):
+                self._vprint(
+                    "[CUT DEBUG] Not violated (dir). viol_out=%.6g viol_ret=%.6g"
+                    % (viol_out, viol_ret)
+                )
                 attempt_diag["skip_reason"] = "not_violated_directional"
-                if attempt_diag.get("aggregate_cut_logging_gap") is not None and float(attempt_diag["aggregate_cut_logging_gap"]) < -float(eps_cut):
+                if attempt_diag.get("aggregate_cut_logging_gap") is not None and float(
+                    attempt_diag["aggregate_cut_logging_gap"]
+                ) < -float(eps_cut):
                     attempt_diag["mismatch_explanation"] = (
                         "Raw cut line at y is below recorded SP recourse, but skip logic compares transformed directional RHS "
                         "against current theta_out/theta_ret. A negative raw recourse gap does not imply the cut is violated in theta-space."
@@ -1876,7 +2162,9 @@ class ProblemMaster(MasterProblem):
                 attempt_diag["filter_out"] = filter_out_diag
                 attempt_diag["filter_ret"] = filter_ret_diag
                 if filter_out_diag.get("violation_threshold") is not None:
-                    attempt_diag["violation_tolerance_filter_rel"] = float(filter_out_diag["violation_threshold"])
+                    attempt_diag["violation_tolerance_filter_rel"] = float(
+                        filter_out_diag["violation_threshold"]
+                    )
                 if not (added_out or added_ret):
                     attempt_diag["skip_reason"] = "filtered_out"
                     return False
@@ -1893,17 +2181,22 @@ class ProblemMaster(MasterProblem):
                 return False
             lhs_val = float(lhs_val)
             rhs_val = float(rhs_val)
-            attempt_diag.update({
-                "transformed_rhs_before_scaling": float(rhs_val),
-                "transformed_rhs_after_scaling": float(rhs_val),
-                "lhs_total": float(lhs_val),
-                "const_adjusted": float(const_adj),
-            })
+            attempt_diag.update(
+                {
+                    "transformed_rhs_before_scaling": float(rhs_val),
+                    "transformed_rhs_after_scaling": float(rhs_val),
+                    "lhs_total": float(lhs_val),
+                    "const_adjusted": float(const_adj),
+                }
+            )
             # Tightness + violation checks
             eps_cut = float(self._p("eps_cut", 1e-8))
             attempt_diag["violation_tolerance_master"] = float(eps_cut)
             if abs(rhs_val - float(ub_est)) > eps_cut * max(1.0, abs(float(ub_est))):
-                self._vprint("[CUT DEBUG] Tightness failed. ub=%.6g rhs=%.6g" % (float(ub_est), rhs_val))
+                self._vprint(
+                    "[CUT DEBUG] Tightness failed. ub=%.6g rhs=%.6g"
+                    % (float(ub_est), rhs_val)
+                )
                 attempt_diag["skip_reason"] = "tightness_failed"
                 return False
             viol = rhs_val - lhs_val
@@ -1911,7 +2204,9 @@ class ProblemMaster(MasterProblem):
             if viol <= eps_cut * max(1.0, abs(rhs_val)):
                 self._vprint("[CUT DEBUG] Not violated. viol=%.6g" % (viol,))
                 attempt_diag["skip_reason"] = "not_violated"
-                if attempt_diag.get("aggregate_cut_logging_gap") is not None and float(attempt_diag["aggregate_cut_logging_gap"]) < -float(eps_cut):
+                if attempt_diag.get("aggregate_cut_logging_gap") is not None and float(
+                    attempt_diag["aggregate_cut_logging_gap"]
+                ) < -float(eps_cut):
                     attempt_diag["mismatch_explanation"] = (
                         "Raw cut line at y is below recorded SP recourse, but skip logic compares transformed RHS against theta. "
                         "The candidate can still be nonviolated if theta already dominates the proposed cut."
@@ -1919,7 +2214,9 @@ class ProblemMaster(MasterProblem):
                 return False
             if aggregate:
                 slopes_all = {("Yout", int(t)): float(v) for t, v in agg_out.items()}
-                slopes_all.update({("Yret", int(t)): float(v) for t, v in agg_ret.items()})
+                slopes_all.update(
+                    {("Yret", int(t)): float(v) for t, v in agg_ret.items()}
+                )
             else:
                 slopes_all = {("yOUT", int(q), int(t)): float(v) for (q, t), v in agg_out.items()}  # type: ignore[misc]
                 slopes_all.update({("yRET", int(q), int(t)): float(v) for (q, t), v in agg_ret.items()})  # type: ignore[misc]
@@ -1933,7 +2230,11 @@ class ProblemMaster(MasterProblem):
                     slopes=slopes_all,
                     lhs_value=lhs_val,
                     rhs_value=rhs_val,
-                    cut_type=str(cut.cut_type).lower() if hasattr(cut, "cut_type") else "optimality",
+                    cut_type=(
+                        str(cut.cut_type).lower()
+                        if hasattr(cut, "cut_type")
+                        else "optimality"
+                    ),
                     signature_scope=("scen", scen_idx),
                     cuts_in_model=self._cut_idx,
                     signature_set=self._cut_signatures,
@@ -1942,26 +2243,35 @@ class ProblemMaster(MasterProblem):
                 )
                 attempt_diag["filter_total"] = filter_diag
                 if filter_diag.get("violation_threshold") is not None:
-                    attempt_diag["violation_tolerance_filter_rel"] = float(filter_diag["violation_threshold"])
+                    attempt_diag["violation_tolerance_filter_rel"] = float(
+                        filter_diag["violation_threshold"]
+                    )
                 if not ok:
-                    attempt_diag["skip_reason"] = str(filter_diag.get("skip_reason", "filtered_out"))
+                    attempt_diag["skip_reason"] = str(
+                        filter_diag.get("skip_reason", "filtered_out")
+                    )
                     return False
 
         # Duplicate check handled by add_benders_cut
 
         # Create explicit constraint(s)
-        if hasattr(m, "theta_out") and hasattr(m, "theta_ret") and (const_adj_out is not None) and (const_adj_ret is not None):
+        if (
+            hasattr(m, "theta_out")
+            and hasattr(m, "theta_ret")
+            and (const_adj_out is not None)
+            and (const_adj_ret is not None)
+        ):
             con_list = []
             name_list = []
             # OUT direction
-            if force or 'added_out' in locals() and added_out:
+            if force or "added_out" in locals() and added_out:
                 cname_out = f"benders_cut_out_{self._cut_idx}"
                 con_out = pyo.Constraint(expr=(m.theta_out >= rhs_out))
                 setattr(m.BendersCuts, cname_out, con_out)
                 con_list.append(con_out)
                 name_list.append(cname_out)
             # RET direction
-            if force or 'added_ret' in locals() and added_ret:
+            if force or "added_ret" in locals() and added_ret:
                 cname_ret = f"benders_cut_ret_{self._cut_idx}"
                 con_ret = pyo.Constraint(expr=(m.theta_ret >= rhs_ret))
                 setattr(m.BendersCuts, cname_ret, con_ret)
@@ -2018,7 +2328,9 @@ class ProblemMaster(MasterProblem):
                 # Also write a symbolic LP via Pyomo for readability
                 try:
                     sym_lp_path = out_dir / f"master_after_cut_{self._cut_idx}_sym.lp"
-                    m.write(str(sym_lp_path), io_options={"symbolic_solver_labels": True})
+                    m.write(
+                        str(sym_lp_path), io_options={"symbolic_solver_labels": True}
+                    )
                     self._vprint(f"[BENDERS] Wrote symbolic LP to {sym_lp_path}")
                 except Exception:
                     pass
@@ -2026,12 +2338,19 @@ class ProblemMaster(MasterProblem):
             pass
 
         # Simple logging: constant and nonzeros
-        nnz = (len(agg_out) if aggregate else len(agg_out)) + (len(agg_ret) if aggregate else len(agg_ret))
+        nnz = (len(agg_out) if aggregate else len(agg_out)) + (
+            len(agg_ret) if aggregate else len(agg_ret)
+        )
         # Log slope range
         all_betas = list(agg_out.values()) + list(agg_ret.values())
         if all_betas:
             rng = (min(all_betas), max(all_betas))
-            if hasattr(m, "theta_out") and hasattr(m, "theta_ret") and (const_adj_out is not None) and (const_adj_ret is not None):
+            if (
+                hasattr(m, "theta_out")
+                and hasattr(m, "theta_ret")
+                and (const_adj_out is not None)
+                and (const_adj_ret is not None)
+            ):
                 self._vprint(
                     f"[BENDERS] Added cut #{self._cut_idx}: const_out={const_adj_out:.6g}, const_ret={const_adj_ret:.6g}, nnz={nnz}, slope_range=[{rng[0]:.3g},{rng[1]:.3g}], raw_pos_dm={raw_pos_dm}, scale={scale:.3g}"
                 )
@@ -2040,15 +2359,27 @@ class ProblemMaster(MasterProblem):
                     f"[BENDERS] Added cut #{self._cut_idx}: const={const_adj:.6g}, nnz={nnz}, slope_range=[{rng[0]:.3g},{rng[1]:.3g}], raw_pos_dm={raw_pos_dm}, scale={scale:.3g}"
                 )
         else:
-            if hasattr(m, "theta_out") and hasattr(m, "theta_ret") and (const_adj_out is not None) and (const_adj_ret is not None):
+            if (
+                hasattr(m, "theta_out")
+                and hasattr(m, "theta_ret")
+                and (const_adj_out is not None)
+                and (const_adj_ret is not None)
+            ):
                 self._vprint(
                     f"[BENDERS] Added cut #{self._cut_idx}: const_out={const_adj_out:.6g}, const_ret={const_adj_ret:.6g}, nnz={nnz}, raw_pos_dm={raw_pos_dm}, scale={scale:.3g}"
                 )
             else:
-                self._vprint(f"[BENDERS] Added cut #{self._cut_idx}: const={const_adj:.6g}, nnz={nnz}, raw_pos_dm={raw_pos_dm}, scale={scale:.3g}")
+                self._vprint(
+                    f"[BENDERS] Added cut #{self._cut_idx}: const={const_adj:.6g}, nnz={nnz}, raw_pos_dm={raw_pos_dm}, scale={scale:.3g}"
+                )
         # Sanity log with LHS and RHS values (scaled)
         try:
-            if hasattr(m, "theta_out") and hasattr(m, "theta_ret") and (const_adj_out is not None) and (const_adj_ret is not None):
+            if (
+                hasattr(m, "theta_out")
+                and hasattr(m, "theta_ret")
+                and (const_adj_out is not None)
+                and (const_adj_ret is not None)
+            ):
                 self._vprint(
                     f"[BENDERS] Eval cut (dir): OUT lhs={lhs_out_val:.6g} rhs={rhs_out_val:.6g}; "
                     f"RET lhs={lhs_ret_val:.6g} rhs={rhs_ret_val:.6g}"
@@ -2060,7 +2391,11 @@ class ProblemMaster(MasterProblem):
         self._cut_idx += 1
         attempt_diag["decision"] = "added"
         # Track last cut info for cross-iteration checks
-        self._last_cut_const = (const_adj_out + const_adj_ret) if (const_adj_out is not None and const_adj_ret is not None) else const_adj
+        self._last_cut_const = (
+            (const_adj_out + const_adj_ret)
+            if (const_adj_out is not None and const_adj_ret is not None)
+            else const_adj
+        )
         self._last_cut_nnz = nnz
         try:
             ct = cut.cut_type
@@ -2087,7 +2422,9 @@ class ProblemMaster(MasterProblem):
             # Infer T from candidate keys
             tmax = -1
             for name in candidate.keys():
-                if isinstance(name, str) and (name.startswith("yOUT[") or name.startswith("yRET[")):
+                if isinstance(name, str) and (
+                    name.startswith("yOUT[") or name.startswith("yRET[")
+                ):
                     inside = name[name.find("[") + 1 : name.find("]")]
                     try:
                         _, t_str = inside.split(",")
@@ -2147,11 +2484,18 @@ class ProblemMaster(MasterProblem):
         return int(self._cut_idx)
 
     def last_cut_info(self) -> tuple[float | None, int | None]:
-        return getattr(self, "_last_cut_const", None), getattr(self, "_last_cut_nnz", None)
+        return getattr(self, "_last_cut_const", None), getattr(
+            self, "_last_cut_nnz", None
+        )
 
     def last_cut_meta(self) -> tuple[str | None, int | None]:
-        return getattr(self, "_last_cut_type", None), getattr(self, "_last_cut_nnz", None)
+        return getattr(self, "_last_cut_type", None), getattr(
+            self, "_last_cut_nnz", None
+        )
 
     def last_cut_attempt(self) -> dict[str, Any] | None:
-        return dict(self._last_cut_attempt) if isinstance(self._last_cut_attempt, dict) else None
-
+        return (
+            dict(self._last_cut_attempt)
+            if isinstance(self._last_cut_attempt, dict)
+            else None
+        )

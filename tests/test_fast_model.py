@@ -1,4 +1,5 @@
 """Master model structure. Builds Pyomo models but never calls a solver."""
+
 from __future__ import annotations
 
 import unittest
@@ -85,8 +86,18 @@ class TestNoPerCellConstraintNames(unittest.TestCase):
     def test_build_phase_uses_indexed_constraints(self):
         pm = build_master(master_params())
         offenders = [
-            n for n in constraint_names(pm.m)
-            if any(n.startswith(p) for p in ("C4_bal_", "C4_chg1_", "C2a_locL_", "C2a_locM_", "C1b_intrip_eq_"))
+            n
+            for n in constraint_names(pm.m)
+            if any(
+                n.startswith(p)
+                for p in (
+                    "C4_bal_",
+                    "C4_chg1_",
+                    "C2a_locL_",
+                    "C2a_locM_",
+                    "C1b_intrip_eq_",
+                )
+            )
         ]
         self.assertEqual(offenders, [], f"per-cell components remain: {offenders[:5]}")
 
@@ -126,7 +137,6 @@ class TestCutAggregationGuard(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             pm.add_cut_force(bad)
         self.assertIn("varies across q", str(ctx.exception))
-
 
 
 class TestFleetListPaddingConvention(unittest.TestCase):
@@ -179,7 +189,9 @@ class TestFleetListPaddingConvention(unittest.TestCase):
 
     def test_both_lists_pad_the_same_way(self):
         """The defect was the two rules diverging, so pin them together."""
-        pm = build_master(self._params(binit=[10.0, 20.0], initial_actions=["IDL", "CHR"]))
+        pm = build_master(
+            self._params(binit=[10.0, 20.0], initial_actions=["IDL", "CHR"])
+        )
         self.assertEqual(self._initial_battery(pm)[1:], [20.0] * 4)
         self.assertEqual(self._starts_charging(pm)[1:], [1] * 4)
 
@@ -270,13 +282,19 @@ class TestRecourseLowerBound(unittest.TestCase):
 
     def test_window_scales_with_resolution(self):
         """W_slots = ceil(W_max_min / delta): 2 at 30-min slots, 4 at 15-min."""
-        self.assertEqual(self._params(True, res=30)["recourse_bound_data"]["W_slots"], 2)
-        self.assertEqual(self._params(True, res=15)["recourse_bound_data"]["W_slots"], 4)
+        self.assertEqual(
+            self._params(True, res=30)["recourse_bound_data"]["W_slots"], 2
+        )
+        self.assertEqual(
+            self._params(True, res=15)["recourse_bound_data"]["W_slots"], 4
+        )
 
     def test_empty_master_is_no_longer_costless(self):
         """The defect it targets: with no cuts, the master used to answer 0."""
         pm = build_master(self._params(True))
-        con = pm.m.C_recourse_lb_out[int(pm.m.T.last() if hasattr(pm.m.T, "last") else 0)]
+        con = pm.m.C_recourse_lb_out[
+            int(pm.m.T.last() if hasattr(pm.m.T, "last") else 0)
+        ]
         self.assertIsNotNone(con)
 
     def test_late_capacity_cannot_pay_for_early_demand(self):
@@ -288,11 +306,17 @@ class TestRecourseLowerBound(unittest.TestCase):
         T = int(params["T"])
         W = int(params["recourse_bound_data"]["W_slots"])
         j = 1
-        body = str(pm.m.C_recourse_lb_out[j].body) + str(pm.m.C_recourse_lb_out[j].upper) \
+        body = (
+            str(pm.m.C_recourse_lb_out[j].body)
+            + str(pm.m.C_recourse_lb_out[j].upper)
             + str(pm.m.C_recourse_lb_out[j].lower)
+        )
         for late in range(j + W + 1, T):
-            self.assertNotIn(f"yOUT[0,{late}]", body,
-                             f"slot {late} must not appear in the row for j={j}")
+            self.assertNotIn(
+                f"yOUT[0,{late}]",
+                body,
+                f"slot {late} must not appear in the row for j={j}",
+            )
 
 
 class TestRecourseLowerBoundMultiScenario(unittest.TestCase):
@@ -343,12 +367,17 @@ class TestRecourseLowerBoundMultiScenario(unittest.TestCase):
         app.py cannot make this test agree with it by construction."""
         import yaml
         from pathlib import Path as _Path
-        from mobauto2_benders.problem.subproblem_impl import aggregate_requests, load_demand_doc
+        from mobauto2_benders.problem.subproblem_impl import (
+            aggregate_requests,
+            load_demand_doc,
+        )
 
         params = self._params(True)
         rlb = params["recourse_bound_data"]
         T, res = int(params["T"]), int(params["slot_resolution"])
-        files = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))["data"]["scenario_files"]
+        files = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))[
+            "data"
+        ]["scenario_files"]
         exp_out = [0.0] * T
         exp_ret = [0.0] * T
         for f in files:
@@ -364,7 +393,9 @@ class TestRecourseLowerBoundMultiScenario(unittest.TestCase):
         """Unnormalised weights would scale the anchor differently from the cuts,
         which normalise. Same demand vectors either way."""
         uniform = self._params(True)["recourse_bound_data"]
-        doubled = self._params(True, weights=[2.0, 2.0, 2.0, 2.0])["recourse_bound_data"]
+        doubled = self._params(True, weights=[2.0, 2.0, 2.0, 2.0])[
+            "recourse_bound_data"
+        ]
         self.assertEqual(uniform["R_out"], doubled["R_out"])
         self.assertEqual(uniform["R_ret"], doubled["R_ret"])
 
@@ -374,13 +405,20 @@ class TestRecourseLowerBoundMultiScenario(unittest.TestCase):
         mean <= max -- weaker, not wrong. This asserts that ordering holds."""
         import yaml
         from pathlib import Path as _Path
-        from mobauto2_benders.problem.subproblem_impl import aggregate_requests, load_demand_doc
+        from mobauto2_benders.problem.subproblem_impl import (
+            aggregate_requests,
+            load_demand_doc,
+        )
 
         params = self._params(True)
         rlb = params["recourse_bound_data"]
         T, res = int(params["T"]), int(params["slot_resolution"])
-        files = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))["data"]["scenario_files"]
-        per_scen = [aggregate_requests(load_demand_doc(_Path(str(f))), T, res) for f in files]
+        files = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))[
+            "data"
+        ]["scenario_files"]
+        per_scen = [
+            aggregate_requests(load_demand_doc(_Path(str(f))), T, res) for f in files
+        ]
         for t in range(T):
             self.assertLessEqual(rlb["R_out"][t], max(s[0][t] for s in per_scen) + 1e-9)
             self.assertLessEqual(rlb["R_ret"][t], max(s[1][t] for s in per_scen) + 1e-9)
@@ -393,8 +431,14 @@ class TestRecourseLowerBoundMultiScenario(unittest.TestCase):
         from mobauto2_benders.app import _prepare_params
 
         raw = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))
-        raw["data"] = {**raw["data"], "scenario_files": None, "scenarios": None,
-                       "demand_file": None, "R_out": None, "R_ret": None}
+        raw["data"] = {
+            **raw["data"],
+            "scenario_files": None,
+            "scenarios": None,
+            "demand_file": None,
+            "R_out": None,
+            "R_ret": None,
+        }
         raw["master"]["recourse_lower_bound"] = True
         fd, tmp = tempfile.mkstemp(suffix=".yaml")
         try:

@@ -33,7 +33,9 @@ def main() -> None:
     obj = float(diag.get("objective_value", res.upper_bound or 0.0))
     assert wait >= -1e-9, f"waiting cost negative: {wait}"
     assert penalty >= -1e-9, f"penalty cost negative: {penalty}"
-    assert abs((wait + penalty + fill_eps) - obj) <= 1e-5, "objective decomposition mismatch"
+    assert (
+        abs((wait + penalty + fill_eps) - obj) <= 1e-5
+    ), "objective decomposition mismatch"
     print("Diagnostics OK.")
 
 

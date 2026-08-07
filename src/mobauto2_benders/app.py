@@ -17,6 +17,7 @@ def import_problem_impl():
     try:
         from .problem.master_impl import ProblemMaster  # type: ignore
         from .problem.subproblem_impl import ProblemSubproblem  # type: ignore
+
         return ProblemMaster, ProblemSubproblem
     except Exception as exc:  # noqa: BLE001 - provide friendly message
         raise SystemExit(
@@ -62,7 +63,9 @@ def _scenario_containers(cfg) -> list | None:
     return None
 
 
-def _demand_vectors(container, T: int, slot_resolution: int) -> tuple[list[float], list[float]]:
+def _demand_vectors(
+    container, T: int, slot_resolution: int
+) -> tuple[list[float], list[float]]:
     from .problem.subproblem_impl import aggregate_requests, load_demand_doc
 
     if isinstance(container, (str, Path)):
@@ -140,7 +143,9 @@ def _recourse_bound_data(cfg, slot_resolution: int) -> dict | None:
     if Wmax_slots is None:
         if cfg.subproblem.Wmax_minutes is None:
             return None
-        Wmax_slots = math.ceil(float(cfg.subproblem.Wmax_minutes) / max(1, int(slot_resolution)))
+        Wmax_slots = math.ceil(
+            float(cfg.subproblem.Wmax_minutes) / max(1, int(slot_resolution))
+        )
     return {
         "R_out": [float(x) for x in R_out],
         "R_ret": [float(x) for x in R_ret],
@@ -253,14 +258,26 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     _set_if_not_none(sp, "Wmax_slots", cfg.subproblem.Wmax_slots)
     sp["p"] = cfg.subproblem.p
     sp["degenerate_cut_probe_top_k"] = int(cfg.subproblem.degenerate_cut_probe_top_k)
-    _set_if_not_none(sp, "degenerate_cut_probe_top_k_out", cfg.subproblem.degenerate_cut_probe_top_k_out)
-    _set_if_not_none(sp, "degenerate_cut_probe_top_k_ret", cfg.subproblem.degenerate_cut_probe_top_k_ret)
+    _set_if_not_none(
+        sp,
+        "degenerate_cut_probe_top_k_out",
+        cfg.subproblem.degenerate_cut_probe_top_k_out,
+    )
+    _set_if_not_none(
+        sp,
+        "degenerate_cut_probe_top_k_ret",
+        cfg.subproblem.degenerate_cut_probe_top_k_ret,
+    )
     sp["degenerate_cut_zero_tol"] = float(cfg.subproblem.degenerate_cut_zero_tol)
     # tolerances
     sp["eps_cut"] = float(cfg.tolerances.eps_cut)
 
     _set_if_not_none(sp, "demand_file", cfg.data.demand_file)
-    _set_if_not_none(sp, "scenario_files", cfg.data.scenario_files if cfg.data.scenario_files else None)
+    _set_if_not_none(
+        sp,
+        "scenario_files",
+        cfg.data.scenario_files if cfg.data.scenario_files else None,
+    )
     _set_if_not_none(sp, "scenario_weights", cfg.data.scenario_weights)
     _set_if_not_none(sp, "R_out", cfg.data.R_out)
     _set_if_not_none(sp, "R_ret", cfg.data.R_ret)
@@ -280,8 +297,16 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     sp["log_level"] = str(cfg.run.log_level)
 
     if overrides:
-        mp.update((overrides.get("master_params") or {}) if isinstance(overrides, dict) else {})
-        sp.update((overrides.get("subproblem_params") or {}) if isinstance(overrides, dict) else {})
+        mp.update(
+            (overrides.get("master_params") or {})
+            if isinstance(overrides, dict)
+            else {}
+        )
+        sp.update(
+            (overrides.get("subproblem_params") or {})
+            if isinstance(overrides, dict)
+            else {}
+        )
 
     # Propagate slot_resolution from master to subproblem if not explicitly set
     if "slot_resolution" not in sp and "slot_resolution" in mp:
@@ -405,7 +430,13 @@ def _maybe_print_summary(result: BendersRunResult, sp: dict) -> None:
             if abs(sum_components - float(result.subproblem_obj)) > 1e-5:
                 print(
                     "[DIAG] Subproblem objective mismatch: obj=%.6g wait=%.6g fill_eps=%.6g penalty=%.6g sum=%.6g"
-                    % (float(result.subproblem_obj), wait_slots, fill_eps, pen_cost, sum_components)
+                    % (
+                        float(result.subproblem_obj),
+                        wait_slots,
+                        fill_eps,
+                        pen_cost,
+                        sum_components,
+                    )
                 )
             if wait_slots < -1e-9:
                 print(f"[DIAG] Negative waiting cost detected: {wait_slots:.6g}")
@@ -413,10 +444,19 @@ def _maybe_print_summary(result: BendersRunResult, sp: dict) -> None:
                 print(f"[DIAG] Negative penalty cost detected: {pen_cost:.6g}")
             wait_per_pax_min = None
             if result.pax_served and result.pax_served > 0:
-                wait_per_pax_min = (wait_slots * float(slot_res)) / float(result.pax_served)
+                wait_per_pax_min = (wait_slots * float(slot_res)) / float(
+                    result.pax_served
+                )
             print(
                 "Subproblem (last): obj=%.6g wait_slots=%.6g fill_eps=%.6g penalty_cost=%.6g penalty_pax=%.6g total_demand=%.6g"
-                % (float(result.subproblem_obj), wait_slots, fill_eps, pen_cost, pen_pax, total_dem)
+                % (
+                    float(result.subproblem_obj),
+                    wait_slots,
+                    fill_eps,
+                    pen_cost,
+                    pen_pax,
+                    total_dem,
+                )
             )
             if wait_per_pax_min is not None:
                 print(f"Avg wait (min): {wait_per_pax_min:.6g}")
@@ -526,8 +566,14 @@ def _emit_manifest(cfg, config_path, result, master, emit_cli_output: bool) -> N
             "cut_valid_lower_bound": getattr(result, "cut_valid_lower_bound", None),
         }
         repo_root = Path(__file__).resolve().parents[2]
-        out_dir = Path(cfg.run.report_dir) if cfg.run.report_dir else (repo_root / "manifests")
-        manifest = build_manifest(cfg, Path(config_path) if config_path else None, result, repo_root, diag)
+        out_dir = (
+            Path(cfg.run.report_dir)
+            if cfg.run.report_dir
+            else (repo_root / "manifests")
+        )
+        manifest = build_manifest(
+            cfg, Path(config_path) if config_path else None, result, repo_root, diag
+        )
         path = write_manifest(manifest, out_dir, cfg.run.name)
         if emit_cli_output:
             print(f"\nManifest: {path}")
@@ -535,7 +581,9 @@ def _emit_manifest(cfg, config_path, result, master, emit_cli_output: bool) -> N
         print(f"\n[WARN] could not write run manifest: {exc!r}")
 
 
-def run(config_path: str | Path | None = None, overrides: dict | None = None) -> BendersRunResult:
+def run(
+    config_path: str | Path | None = None, overrides: dict | None = None
+) -> BendersRunResult:
     """Run the Benders solver with a single canonical execution path.
 
     Parameters are taken from configs/default.yaml by default.
@@ -574,7 +622,9 @@ def run(config_path: str | Path | None = None, overrides: dict | None = None) ->
                     mp["recourse_bound_data"] = _rlb
                 else:
                     mp.pop("recourse_bound_data", None)
-            if cfg.model.energy.delta_chg is not None and not isinstance(cfg.model.energy.delta_chg, str):
+            if cfg.model.energy.delta_chg is not None and not isinstance(
+                cfg.model.energy.delta_chg, str
+            ):
                 try:
                     if "delta_chg" in mp:
                         mp["delta_chg"] = float(mp["delta_chg"]) * (
@@ -584,10 +634,14 @@ def run(config_path: str | Path | None = None, overrides: dict | None = None) ->
                     pass
             if emit_cli_output:
                 if not report_mode:
-                    print(f"\n=== Multi-res stage {i}/{len(seq)}: slot_resolution={res} ===")
+                    print(
+                        f"\n=== Multi-res stage {i}/{len(seq)}: slot_resolution={res} ==="
+                    )
             warm_start = None
             if prev_cand is not None and prev_res is not None:
-                warm_start = _map_candidate_to_warm_start(prev_cand, prev_res, int(res), mp)
+                warm_start = _map_candidate_to_warm_start(
+                    prev_cand, prev_res, int(res), mp
+                )
                 if emit_cli_output and warm_start:
                     if not report_mode:
                         print(f"Applied warm start with {len(warm_start)} start(s).")

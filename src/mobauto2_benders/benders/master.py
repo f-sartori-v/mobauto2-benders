@@ -36,4 +36,3 @@ class MasterProblem(ABC):
 
 
 __all__ = ["MasterProblem"]
-

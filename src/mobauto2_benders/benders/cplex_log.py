@@ -71,14 +71,21 @@ def parse_cplex_log_text(text: str) -> dict[str, Optional[float] | str]:
     }
 
 
-def parse_cplex_log_bounds(log_path: str | Path | None) -> dict[str, Optional[float] | str]:
+def parse_cplex_log_bounds(
+    log_path: str | Path | None,
+) -> dict[str, Optional[float] | str]:
     """Parse a CPLEX log file to extract best integer, best bound, and gap."""
     if not log_path:
         return {"best_integer": None, "best_bound": None, "gap": None, "source": None}
     try:
         p = Path(log_path)
         if not p.exists():
-            return {"best_integer": None, "best_bound": None, "gap": None, "source": None}
+            return {
+                "best_integer": None,
+                "best_bound": None,
+                "gap": None,
+                "source": None,
+            }
         text = p.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return {"best_integer": None, "best_bound": None, "gap": None, "source": None}

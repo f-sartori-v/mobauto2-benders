@@ -7,6 +7,7 @@ instead of by someone noticing an implausible number.
 Run just these:
     python -m unittest tests.test_solver_soundness -v
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -109,7 +110,8 @@ class SoundnessTests(unittest.TestCase):
         if lb is None:
             self.skipTest("no lower bound claimed; nothing to validate")
         self.assertLessEqual(
-            lb, KNOWN_FEASIBLE_UB + 1e-6,
+            lb,
+            KNOWN_FEASIBLE_UB + 1e-6,
             f"LB={lb} exceeds a known feasible objective {KNOWN_FEASIBLE_UB}; "
             "the master is not a valid relaxation",
         )
@@ -156,7 +158,9 @@ class SoundnessTests(unittest.TestCase):
         m = re.search(r"Pax served: (\d+)/(\d+)", tail)
         self.assertIsNotNone(m, "served total not printed")
         self.assertAlmostEqual(
-            table_total, float(m.group(1)), delta=0.5,
+            table_total,
+            float(m.group(1)),
+            delta=0.5,
             msg="per-shuttle table does not account for every served passenger",
         )
 
@@ -167,7 +171,6 @@ class SoundnessTests(unittest.TestCase):
         if self.result.pax_served is None or self.result.pax_total is None:
             self.skipTest("passenger totals unavailable")
         self.assertLessEqual(self.result.pax_served, self.result.pax_total)
-
 
 
 class ManifestTests(unittest.TestCase):
@@ -198,7 +201,10 @@ class ManifestTests(unittest.TestCase):
 
         cfg = load_config(FIXTURE)
         m = build_manifest(
-            cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1],
+            cfg,
+            _P(FIXTURE),
+            self.result,
+            _P(__file__).resolve().parents[1],
             {
                 "cut_generation_mode": self.result.cut_generation_mode,
                 "cut_valid_lower_bound": self.result.cut_valid_lower_bound,
@@ -215,7 +221,9 @@ class ManifestTests(unittest.TestCase):
         from mobauto2_benders.manifest import build_manifest
 
         cfg = load_config(FIXTURE)
-        m = build_manifest(cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1], {})
+        m = build_manifest(
+            cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1], {}
+        )
         self.assertIsNotNone(m["swept_parameters"]["p"])
         self.assertIsNotNone(m["swept_parameters"]["Wmax_minutes"])
         self.assertIsNotNone(m["objective_terms"]["concurrency_penalty"])
@@ -235,7 +243,9 @@ class ManifestTests(unittest.TestCase):
         from mobauto2_benders.manifest import build_manifest
 
         cfg = load_config(FIXTURE)
-        m = build_manifest(cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1], {})
+        m = build_manifest(
+            cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1], {}
+        )
         rep = m["reproducibility"]
         self.assertIsNotNone(rep["clock_truncated_master_solves"])
         self.assertEqual(rep["clock_truncated_master_solves"], 0)
@@ -255,9 +265,12 @@ class ManifestTests(unittest.TestCase):
         truncated.clock_truncated_master_solves = 3
 
         cfg = load_config(FIXTURE)
-        m = build_manifest(cfg, _P(FIXTURE), truncated, _P(__file__).resolve().parents[1], {})
+        m = build_manifest(
+            cfg, _P(FIXTURE), truncated, _P(__file__).resolve().parents[1], {}
+        )
         self.assertEqual(m["reproducibility"]["clock_truncated_master_solves"], 3)
         self.assertFalse(m["reproducibility"]["bit_reproducible"])
+
 
 class RecourseMatchesTheMonolith(unittest.TestCase):
     """The subproblem must price a schedule exactly as an independent MILP does.
@@ -290,7 +303,9 @@ class RecourseMatchesTheMonolith(unittest.TestCase):
         sp["T"] = T
 
         acts = {q: a.split() for q, a in self.SCHEDULE.items()}
-        self.assertEqual(len(acts[0]), T, "fixture horizon no longer matches the schedule")
+        self.assertEqual(
+            len(acts[0]), T, "fixture horizon no longer matches the schedule"
+        )
 
         candidate, trips = {}, 0
         for q, a in acts.items():
@@ -304,11 +319,15 @@ class RecourseMatchesTheMonolith(unittest.TestCase):
         except Exception as exc:  # pragma: no cover - environment dependent
             raise unittest.SkipTest(f"solver unavailable: {exc}")
 
-        total = float(res.upper_bound) + float(mp.get("start_cost_epsilon", 0.0)) * trips
+        total = (
+            float(res.upper_bound) + float(mp.get("start_cost_epsilon", 0.0)) * trips
+        )
         self.assertAlmostEqual(
-            total, self.MILP_OPTIMUM, places=2,
+            total,
+            self.MILP_OPTIMUM,
+            places=2,
             msg="the subproblem no longer prices the monolith's optimum; the two "
-                "models have diverged and every bound this code reports is suspect",
+            "models have diverged and every bound this code reports is suspect",
         )
 
 
@@ -333,34 +352,38 @@ class TestDemandOutsideHorizonIsReported(unittest.TestCase):
         from mobauto2_benders.problem.subproblem_impl import ProblemSubproblem
 
         T = T_minutes // slot_resolution
-        sp = ProblemSubproblem({
-            "T": T,
-            "T_minutes": T_minutes,
-            "slot_resolution": slot_resolution,
-            "trip_duration_minutes": slot_resolution,
-            "Q": 1,
-            "S": 15.0,
-            "Emax": 150.0,
-            "L": 30.0,
-            "delta_chg": 35.0,
-            "Wmax_minutes": slot_resolution,
-            "p": 50.0,
-            "lp_solver": "cplex_direct",
-            "scenarios": [{"requests": requests}],
-            "use_magnanti_wong": False,
-            "eps_cut": 1e-8,
-        })
+        sp = ProblemSubproblem(
+            {
+                "T": T,
+                "T_minutes": T_minutes,
+                "slot_resolution": slot_resolution,
+                "trip_duration_minutes": slot_resolution,
+                "Q": 1,
+                "S": 15.0,
+                "Emax": 150.0,
+                "L": 30.0,
+                "delta_chg": 35.0,
+                "Wmax_minutes": slot_resolution,
+                "p": 50.0,
+                "lp_solver": "cplex_direct",
+                "scenarios": [{"requests": requests}],
+                "use_magnanti_wong": False,
+                "eps_cut": 1e-8,
+            }
+        )
         candidate = {f"yOUT[0,{t}]": 0.0 for t in range(T)}
         candidate.update({f"yRET[0,{t}]": 0.0 for t in range(T)})
-        with self.assertLogs("mobauto2_benders.problem.subproblem_impl", level="WARNING") as cm:
+        with self.assertLogs(
+            "mobauto2_benders.problem.subproblem_impl", level="WARNING"
+        ) as cm:
             sp.evaluate(candidate)
         return "\n".join(cm.output)
 
     def test_requests_past_the_horizon_are_counted_and_warned(self):
         requests = [
-            {"dir": "OUT", "time": 10},    # inside
-            {"dir": "OUT", "time": 700},   # past a 60-minute horizon
-            {"dir": "RET", "time": 900},   # past
+            {"dir": "OUT", "time": 10},  # inside
+            {"dir": "OUT", "time": 700},  # past a 60-minute horizon
+            {"dir": "RET", "time": 900},  # past
         ]
         log = self._evaluate_with_requests(requests)
         self.assertIn("[DEMAND]", log)

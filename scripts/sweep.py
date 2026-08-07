@@ -161,6 +161,7 @@ def render_table(rows: list[dict]) -> str:
     )
     body = ""
     for r in rows:
+
         def g(k, fmt="{}"):
             v = r.get(k)
             return fmt.format(v) if v is not None else "-"

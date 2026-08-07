@@ -1,4 +1,5 @@
 """Config schema. No solver required."""
+
 from __future__ import annotations
 
 import unittest
@@ -170,6 +171,7 @@ class TestCplexOptionNames(unittest.TestCase):
 
     def test_cpxparam_names_translate_to_direct_paths(self):
         from mobauto2_benders.problem.master_impl import _cplex_direct_option_name
+
         self.assertEqual(_cplex_direct_option_name("CPXPARAM_Threads"), "threads")
         self.assertEqual(
             _cplex_direct_option_name("CPXPARAM_Preprocessing_Symmetry"),
@@ -178,20 +180,25 @@ class TestCplexOptionNames(unittest.TestCase):
 
     def test_non_cpxparam_keys_pass_through(self):
         from mobauto2_benders.problem.master_impl import _cplex_direct_option_name
+
         self.assertEqual(_cplex_direct_option_name("timelimit"), "timelimit")
 
     def test_unresolvable_parameter_name_is_rejected(self):
         from mobauto2_benders.problem.master_impl import _validate_cplex_options
+
         try:
             import cplex  # noqa: F401
         except Exception:
             self.skipTest("CPLEX not available")
         with self.assertRaises(ValueError) as ctx:
-            _validate_cplex_options({"CPXPARAM_MIP_Strategy_Symmetry": 5}, "cplex_direct")
+            _validate_cplex_options(
+                {"CPXPARAM_MIP_Strategy_Symmetry": 5}, "cplex_direct"
+            )
         self.assertIn("CPXPARAM_MIP_Strategy_Symmetry", str(ctx.exception))
 
     def test_shipped_configs_use_resolvable_names(self):
         from mobauto2_benders.problem.master_impl import _validate_cplex_options
+
         try:
             import cplex  # noqa: F401
         except Exception:
@@ -199,7 +206,9 @@ class TestCplexOptionNames(unittest.TestCase):
         for path in sorted(CONFIGS.glob("*.yaml")):
             with self.subTest(config=path.name):
                 cfg = load_cfg(path.name)
-                _validate_cplex_options(cfg.master.cplex_options, cfg.master.solver_backend)
+                _validate_cplex_options(
+                    cfg.master.cplex_options, cfg.master.solver_backend
+                )
 
 
 class TestMultiScenarioBoundSemantics(unittest.TestCase):

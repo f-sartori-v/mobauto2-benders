@@ -22,4 +22,3 @@ class Subproblem(ABC):
 
 
 __all__ = ["Subproblem"]
-

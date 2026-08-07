@@ -68,7 +68,9 @@ def cmd_run(args) -> int:
     if getattr(args, "mw", False):
         overrides.setdefault("subproblem_params", {})["use_magnanti_wong"] = True
     if getattr(args, "mw_alpha", None) is not None:
-        overrides.setdefault("subproblem_params", {})["mw_core_alpha"] = float(args.mw_alpha)
+        overrides.setdefault("subproblem_params", {})["mw_core_alpha"] = float(
+            args.mw_alpha
+        )
     if getattr(args, "multi_res", None):
         seq = _parse_multi_res(args.multi_res)
         if not seq:
@@ -104,7 +106,9 @@ def cmd_info(args) -> int:
 
 def _print_config_summary(cfg) -> None:
     print(f"Schema: {cfg.schema.name} v{cfg.schema.version}")
-    demand = cfg.data.demand_file or ("inline R_out/R_ret" if cfg.data.R_out or cfg.data.R_ret else "none")
+    demand = cfg.data.demand_file or (
+        "inline R_out/R_ret" if cfg.data.R_out or cfg.data.R_ret else "none"
+    )
     print(f"Data: demand={demand}")
     if cfg.data.scenario_files:
         print(f"Data: scenario_files={len(cfg.data.scenario_files)}")
@@ -112,7 +116,11 @@ def _print_config_summary(cfg) -> None:
         print(f"Data: scenario_weights={cfg.data.scenario_weights}")
     print(
         "Solver: max_iterations=%s tolerance=%s time_limit_s=%s"
-        % (cfg.solver.max_iterations, cfg.solver.tolerance, cfg.solver.total_time_limit_s)
+        % (
+            cfg.solver.max_iterations,
+            cfg.solver.tolerance,
+            cfg.solver.total_time_limit_s,
+        )
     )
 
 
