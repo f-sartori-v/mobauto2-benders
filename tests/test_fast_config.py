@@ -200,3 +200,49 @@ class TestCplexOptionNames(unittest.TestCase):
             with self.subTest(config=path.name):
                 cfg = load_cfg(path.name)
                 _validate_cplex_options(cfg.master.cplex_options, cfg.master.solver_backend)
+
+
+class TestMultiScenarioBoundSemantics(unittest.TestCase):
+    """LB and UB must describe the same problem.
+
+    One cut per scenario against a single theta forces theta >= max_s Q_s(y),
+    while the reported UB is the weighted mean of the same Q_s. max >= mean, so
+    the master's optimum could exceed the optimum the UB measures -- the D15/D16
+    failure mode, a bound that is not a bound. The combination is refused at load.
+    """
+
+    def _cfg(self, multi_cuts, theta_per_scenario, scenarios=True):
+        import yaml, tempfile, os
+        from mobauto2_benders.config import load_config
+
+        raw = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))
+        raw["subproblem"]["multi_cuts_by_scenario"] = multi_cuts
+        raw["master"]["theta_per_scenario"] = theta_per_scenario
+        if not scenarios:
+            raw["data"] = {**raw["data"], "scenario_files": None, "scenarios": None}
+        fd, tmp = tempfile.mkstemp(suffix=".yaml")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(raw, fh)
+            return load_config(tmp)
+        finally:
+            os.unlink(tmp)
+
+    def test_multi_cuts_on_a_shared_theta_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._cfg(multi_cuts=True, theta_per_scenario=False)
+        self.assertIn("theta_per_scenario", str(ctx.exception))
+
+    def test_per_scenario_theta_is_accepted(self):
+        cfg = self._cfg(multi_cuts=True, theta_per_scenario=True)
+        self.assertTrue(cfg.master.theta_per_scenario)
+
+    def test_averaged_cuts_are_accepted(self):
+        cfg = self._cfg(multi_cuts=False, theta_per_scenario=False)
+        self.assertFalse(cfg.subproblem.multi_cuts_by_scenario)
+
+    def test_single_scenario_runs_are_unaffected(self):
+        """Without scenarios there is no expectation to disagree about, and
+        multi_cuts_by_scenario defaults true."""
+        cfg = self._cfg(multi_cuts=True, theta_per_scenario=False, scenarios=False)
+        self.assertTrue(cfg.subproblem.multi_cuts_by_scenario)

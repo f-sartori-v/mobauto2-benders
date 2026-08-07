@@ -106,6 +106,23 @@ class MasterSection:
     write_lp_after_cut: bool = False
     # Canonical ordering: charge before idling at the depot (M2). On by default.
     charge_before_idle: bool = True
+    # Valid inequality anchoring theta to installed capacity per prefix of the
+    # horizon. ON by default since D29: measured at equal iterations it improves
+    # the lower bound 26-90% AND cuts master time 38-68% on the reproducible
+    # cells. Unlike M1, it is not a trade-off.
+    recourse_lower_bound: bool = True
+    # LP phase: solve the master without integrality while the cut set is still
+    # poor. Cuts from a fractional y are valid (the recourse value function is
+    # convex in y), but its subproblem cost is NOT an upper bound, so the loop
+    # claims none while the phase is on. Off by default; earn it by measurement.
+    lp_phase: bool = False
+    # Hard ceiling on LP-phase iterations.
+    lp_phase_max_iters: int = 10
+    # Consecutive iterations of sub-threshold LP objective improvement that end
+    # the phase. 0 disables the stall test and leaves only the iteration ceiling.
+    lp_phase_stall_iters: int = 3
+    # Relative improvement in the LP master objective that counts as progress.
+    lp_phase_min_rel_improve: float = 0.005
 
 
 @dataclass(slots=True)
@@ -119,7 +136,6 @@ class SubproblemSection:
     Wmax_minutes: int | None = None
     Wmax_slots: int | None = None
     p: float = 0.0
-    fill_first_epsilon: float = 0.0
     degenerate_cut_probe_top_k: int = 6
     degenerate_cut_probe_top_k_out: int | None = None
     degenerate_cut_probe_top_k_ret: int | None = None
@@ -426,6 +442,13 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
             "cut_coeff_threshold": master_params.get("cut_coeff_threshold", 0.0),
             "theta_per_scenario": master_params.get("theta_per_scenario", False),
             "write_lp_after_cut": master_params.get("write_lp_after_cut", False),
+            # Both change the bound a run reports, so a table quoting one has to be
+            # able to say which side of the A/B it came from (D18's obligation).
+            "recourse_lower_bound": master_params.get("recourse_lower_bound", True),
+            "lp_phase": master_params.get("lp_phase", False),
+            "lp_phase_max_iters": master_params.get("lp_phase_max_iters"),
+            "lp_phase_stall_iters": master_params.get("lp_phase_stall_iters"),
+            "lp_phase_min_rel_improve": master_params.get("lp_phase_min_rel_improve"),
         },
         "subproblem": {
             "multi_cuts_by_scenario": sub_params.get("multi_cuts_by_scenario", True),
@@ -437,7 +460,6 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
             "Wmax_minutes": sub_params.get("Wmax_minutes"),
             "Wmax_slots": sub_params.get("Wmax_slots"),
             "p": sub_params.get("p"),
-            "fill_first_epsilon": sub_params.get("fill_first_epsilon", 0.0),
             "degenerate_cut_probe_top_k": sub_params.get("degenerate_cut_probe_top_k", 6),
             "degenerate_cut_probe_top_k_out": sub_params.get("degenerate_cut_probe_top_k_out"),
             "degenerate_cut_probe_top_k_ret": sub_params.get("degenerate_cut_probe_top_k_ret"),
@@ -667,6 +689,11 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "theta_per_scenario",
             "write_lp_after_cut",
             "charge_before_idle",
+            "recourse_lower_bound",
+            "lp_phase",
+            "lp_phase_max_iters",
+            "lp_phase_stall_iters",
+            "lp_phase_min_rel_improve",
         },
         "master",
     )
@@ -702,6 +729,24 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         theta_per_scenario=_ensure_bool(master_raw.get("theta_per_scenario", False), "master.theta_per_scenario"),
         write_lp_after_cut=_ensure_bool(master_raw.get("write_lp_after_cut", False), "master.write_lp_after_cut"),
         charge_before_idle=_ensure_bool(master_raw.get("charge_before_idle", True), "master.charge_before_idle"),
+        recourse_lower_bound=_ensure_bool(
+            master_raw.get("recourse_lower_bound", True), "master.recourse_lower_bound"
+        ),
+        lp_phase=_ensure_bool(master_raw.get("lp_phase", False), "master.lp_phase"),
+        lp_phase_max_iters=_ensure_int(
+            _disallow_expr(master_raw.get("lp_phase_max_iters", 10), "master.lp_phase_max_iters"),
+            "master.lp_phase_max_iters",
+        ),
+        lp_phase_stall_iters=_ensure_int(
+            _disallow_expr(master_raw.get("lp_phase_stall_iters", 3), "master.lp_phase_stall_iters"),
+            "master.lp_phase_stall_iters",
+        ),
+        lp_phase_min_rel_improve=_ensure_float(
+            _disallow_expr(
+                master_raw.get("lp_phase_min_rel_improve", 0.005), "master.lp_phase_min_rel_improve"
+            ),
+            "master.lp_phase_min_rel_improve",
+        ),
     )
 
     sub_raw = _as_mapping(data.get("subproblem"), "subproblem")
@@ -717,7 +762,6 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "Wmax_minutes",
             "Wmax_slots",
             "p",
-            "fill_first_epsilon",
             "degenerate_cut_probe_top_k",
             "degenerate_cut_probe_top_k_out",
             "degenerate_cut_probe_top_k_ret",
@@ -758,10 +802,6 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             else None
         ),
         p=_ensure_float(_disallow_expr(sub_raw.get("p"), "subproblem.p"), "subproblem.p"),
-        fill_first_epsilon=_ensure_float(
-            _disallow_expr(sub_raw.get("fill_first_epsilon", 0.0), "subproblem.fill_first_epsilon"),
-            "subproblem.fill_first_epsilon",
-        ),
         degenerate_cut_probe_top_k=_ensure_int(
             _disallow_expr(sub_raw.get("degenerate_cut_probe_top_k", 6), "subproblem.degenerate_cut_probe_top_k"),
             "subproblem.degenerate_cut_probe_top_k",
@@ -845,6 +885,28 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         eps_cut=_ensure_float(_disallow_expr(tol_raw.get("eps_cut", 1e-8), "tolerances.eps_cut"), "tolerances.eps_cut"),
         eps_hash=_ensure_float(_disallow_expr(tol_raw.get("eps_hash", 1e-6), "tolerances.eps_hash"), "tolerances.eps_hash"),
     )
+
+    # A multi-scenario run has to put its lower bound and its upper bound on the
+    # same problem. One cut per scenario against a SINGLE theta forces
+    # theta >= Q_s(y) for every s, i.e. theta >= max_s Q_s(y), while the reported
+    # upper bound is the weighted mean of the same quantities. Since max >= mean,
+    # the master's optimum can then exceed the true optimum of the problem the UB
+    # measures: a bound that is not a bound, the D15/D16 failure mode again.
+    #
+    # Either give each scenario its own theta (master.theta_per_scenario: true,
+    # objective sum_s w_s theta_s) or average the cuts
+    # (subproblem.multi_cuts_by_scenario: false). Both are consistent with a
+    # mean-aggregated UB.
+    _has_scenarios = bool(data_section.scenario_files or data_section.scenarios)
+    if _has_scenarios and sub_section.multi_cuts_by_scenario and not master_section.theta_per_scenario:
+        raise ValueError(
+            "subproblem.multi_cuts_by_scenario is true with master.theta_per_scenario "
+            "false on a multi-scenario run. One cut per scenario on a shared theta "
+            "bounds max_s Q_s(y) while the reported UB is the weighted mean, so the "
+            "lower bound would not bound the problem being measured. Set "
+            "master.theta_per_scenario: true, or "
+            "subproblem.multi_cuts_by_scenario: false."
+        )
 
     model_section = ModelSection(
         time=time_section,

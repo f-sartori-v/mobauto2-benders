@@ -20,10 +20,16 @@ import _helpers  # noqa: F401  (puts src/ on sys.path)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "soundness.yaml"
 
-# A feasible objective demonstrated by an earlier run of this model. The true
-# optimum is at most this. Any lower bound above it proves the master is not a
-# relaxation -- which is exactly how the invalid symmetry constraint was caught.
-KNOWN_FEASIBLE_UB = 4190.74
+# The optimum of this instance, from an independent monolithic MILP of the same
+# model, cross-checked by evaluating its schedule with THIS codebase's subproblem
+# (4183.00 recourse + 0.24 start cost). Any lower bound above it proves the master
+# is not a relaxation, or that the cuts are not valid lower bounds.
+#
+# This was 4190.74 for most of the project's life -- a number taken from a Benders
+# run of this same code, which made the check circular: it could not detect a
+# defect that inflated the bound by less than 7.5. It did not detect the layered
+# subproblem (D30), whose cuts pushed the reported LB to 4492 on a longer run.
+KNOWN_FEASIBLE_UB = 4183.24
 
 
 _CACHE: tuple | None = None
@@ -252,6 +258,59 @@ class ManifestTests(unittest.TestCase):
         m = build_manifest(cfg, _P(FIXTURE), truncated, _P(__file__).resolve().parents[1], {})
         self.assertEqual(m["reproducibility"]["clock_truncated_master_solves"], 3)
         self.assertFalse(m["reproducibility"]["bit_reproducible"])
+
+class RecourseMatchesTheMonolith(unittest.TestCase):
+    """The subproblem must price a schedule exactly as an independent MILP does.
+
+    This is the only check in the suite that compares against something outside
+    this codebase. Every other guard validates Benders against Benders, which is
+    how a layered subproblem whose constraint set moved with y survived: its
+    recourse was right, so nothing downstream looked wrong, while its duals were
+    not subgradients and the cuts it produced excluded the optimum (D30).
+
+    The schedule below is the MILP's optimum for setups/base.yaml at Q=2, T=22.
+    Priced by this subproblem it must come to 4183.00, and with the master's own
+    start-cost term to 4183.24 -- which is also KNOWN_FEASIBLE_UB above.
+    """
+
+    MILP_OPTIMUM = 4183.24
+    SCHEDULE = {
+        0: "IDL OUT RET OUT RET CHR OUT RET CHR CHR CHR OUT RET CHR CHR OUT IDL RET OUT RET IDL IDL",
+        1: "IDL IDL OUT RET OUT RET CHR OUT IDL RET CHR CHR CHR OUT RET CHR CHR OUT RET OUT RET IDL",
+    }
+
+    def test_subproblem_prices_the_milp_optimum_exactly(self):
+        from mobauto2_benders.config import load_config
+        from mobauto2_benders.app import _prepare_params
+        from mobauto2_benders.problem.subproblem_impl import ProblemSubproblem
+
+        cfg = load_config(str(FIXTURE))
+        mp, sp = _prepare_params(cfg, {})
+        T = int(mp.get("T") or (int(mp["T_minutes"]) // int(mp["slot_resolution"])))
+        sp["T"] = T
+
+        acts = {q: a.split() for q, a in self.SCHEDULE.items()}
+        self.assertEqual(len(acts[0]), T, "fixture horizon no longer matches the schedule")
+
+        candidate, trips = {}, 0
+        for q, a in acts.items():
+            for t, x in enumerate(a[:T]):
+                candidate[f"yOUT[{q},{t}]"] = 1.0 if x == "OUT" else 0.0
+                candidate[f"yRET[{q},{t}]"] = 1.0 if x == "RET" else 0.0
+                trips += 1 if x in ("OUT", "RET") else 0
+
+        try:
+            res = ProblemSubproblem(sp).evaluate(candidate)
+        except Exception as exc:  # pragma: no cover - environment dependent
+            raise unittest.SkipTest(f"solver unavailable: {exc}")
+
+        total = float(res.upper_bound) + float(mp.get("start_cost_epsilon", 0.0)) * trips
+        self.assertAlmostEqual(
+            total, self.MILP_OPTIMUM, places=2,
+            msg="the subproblem no longer prices the monolith's optimum; the two "
+                "models have diverged and every bound this code reports is suspect",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,101 @@
+schema:
+  name: mobauto2_benders_config
+  version: 2
+
+# Companion to baseline_d9.yaml, covering the OTHER half of evaluate().
+#
+# subproblem_impl.py:701 splits evaluate() into two branches:
+#     if scenarios:  -> multi-scenario branch  (~726-1350)
+#     else:          -> single-scenario branch (~1360-1712)
+#
+# The elastic-path dispatch is duplicated in both, so the D9 deletion must edit
+# both identically. baseline_d9.yaml (no scenario_files) exercises only the
+# single-scenario branch; this config exercises the multi-scenario one.
+#
+# The two scenarios are the only demand files present in this repo. This is a
+# regression fixture, not a modelling result -- the point is to execute the
+# multi-scenario code path deterministically, not to represent a real study.
+#
+# Same determinism requirements as baseline_d9.yaml: single-threaded, gap-tied
+# master termination, fixed iteration count, fixed seed.
+
+run:
+  name: baseline_d9_multi
+  log_level: INFO
+  log_file: null
+  report_dir: null
+  seed: 42
+
+data:
+  demand_file: setups/base.yaml
+  scenario_files: [setups/base.yaml, setups/demo_cont_demand.yaml]
+  scenario_weights: null
+  R_out: null
+  R_ret: null
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0, 150.0, 150.0]
+    initial_actions: [IDL, IDL, IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+master:
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  # Pinned OFF, not inherited: these fixtures exist to diff against archived
+  # logs, so their model must not move when a default changes (D29).
+  recourse_lower_bound: false
+  per_iteration_time_limit_s: 120
+  per_iteration_mipgap: 0.05
+  cplex_options:
+    CPXPARAM_Preprocessing_Symmetry: 5
+    CPXPARAM_Threads: 1
+  solver_backend: cplex_direct
+  aggregate_cuts_by_tau: true
+  # Exercise the multi-cut / per-scenario theta path as well.
+  theta_per_scenario: false
+  cut_coeff_threshold: 0.001
+  write_lp_after_cut: false
+
+subproblem:
+  multi_cuts_by_scenario: false
+  use_magnanti_wong: true
+  mw_core_alpha: 0.3
+  use_dual_slopes: true
+  S: 15
+  Wmax_minutes: 60
+  p: 50.0
+  degenerate_cut_probe_top_k: 6
+  degenerate_cut_zero_tol: 1.0e-9
+
+solver:
+  max_iterations: 10
+  tolerance: 0.001
+  # Safety net only: it MUST NOT bind. The run stops at max_iterations, and a
+  # master solve that stops on the clock makes the log non-reproducible, which
+  # destroys the before/after diff this fixture exists for (D26).
+  total_time_limit_s: 3600
+  stall_max_no_improve_iters: 0
+  stall_min_abs_improve: 1.0
+  stall_min_rel_improve: 0.002
+  master_solver: cplex
+  subproblem_solver: cplex_direct
+  solver_tee: false
+
+tolerances:
+  eps_bin: 1.0e-5
+  eps_feas: 1.0e-7
+  eps_cut: 1.0e-8
+  eps_hash: 1.0e-6
