@@ -49,6 +49,27 @@ def _set_if_not_none(target: dict, key: str, value) -> None:
         target[key] = value
 
 
+def _scenario_containers(cfg) -> list | None:
+    """The scenario list in the same form the subproblem consumes it.
+
+    `scenarios` (inline dicts) wins over `scenario_files` (paths), matching
+    ProblemSubproblem.evaluate. Returns None when the run is single-scenario.
+    """
+    if isinstance(cfg.data.scenarios, list) and cfg.data.scenarios:
+        return list(cfg.data.scenarios)
+    if isinstance(cfg.data.scenario_files, list) and cfg.data.scenario_files:
+        return list(cfg.data.scenario_files)
+    return None
+
+
+def _demand_vectors(container, T: int, slot_resolution: int) -> tuple[list[float], list[float]]:
+    from .problem.subproblem_impl import aggregate_requests, load_demand_doc
+
+    if isinstance(container, (str, Path)):
+        container = load_demand_doc(Path(str(container)))
+    return aggregate_requests(container, T, int(slot_resolution))
+
+
 def _recourse_bound_data(cfg, slot_resolution: int) -> dict | None:
     """Data the master needs for the recourse lower bound on theta.
 
@@ -59,11 +80,22 @@ def _recourse_bound_data(cfg, slot_resolution: int) -> dict | None:
     occur, and the inequality would cut off the optimum instead of bounding it.
     That is why aggregation is shared rather than reimplemented.
 
-    Returns None when the bound cannot be stated: multi-scenario runs need the
-    expectation over scenarios, which this form does not express.
+    Multi-scenario runs use the weighted mean demand across scenarios. The
+    inequality holds per scenario, so summing the scenario rows with weights
+    w_s >= 0 summing to 1 gives
+
+        sum_s w_s * theta_s  >=  p * ( sum_s w_s * R_s_cum[j]  -  S * Y_cum[j+W] )
+
+    and `sum_s w_s * theta_s` is exactly the recourse term the master minimises
+    (build_master weights theta_s the same way, and the averaged-cut path weights
+    the single theta's cut the same way). Y_cum is common to every scenario --
+    the first stage is here-and-now -- so it leaves the sum untouched.
+
+    Note the direction of the resulting slack: the mean is at most the max, so
+    this stays valid even under the multi-cut/single-theta combination where the
+    master's theta is forced above every scenario individually. Weaker there, not
+    wrong.
     """
-    if cfg.data.scenario_files or cfg.data.scenarios:
-        return None
     T_minutes = cfg.model.time.T_minutes
     T = cfg.model.time.T
     if T is None:
@@ -72,17 +104,38 @@ def _recourse_bound_data(cfg, slot_resolution: int) -> dict | None:
         T = max(1, int(T_minutes) // max(1, int(slot_resolution)))
     T = int(T)
 
-    from .problem.subproblem_impl import aggregate_requests, load_demand_doc
+    scen = _scenario_containers(cfg)
+    if scen:
+        n = len(scen)
+        wts = cfg.data.scenario_weights
+        if not isinstance(wts, list) or len(wts) != n:
+            wts = [1.0 / float(n)] * n
+        wts = [float(w) for w in wts]
+        total_w = sum(wts)
+        if total_w <= 0.0:
+            return None
+        # Normalise. The derivation above needs the weights to sum to 1; the
+        # subproblem's averaged cut normalises the same way, so an unnormalised
+        # list would put the anchor and the cuts on different scales.
+        wts = [w / total_w for w in wts]
 
-    container: object | None = None
-    if cfg.data.R_out is not None or cfg.data.R_ret is not None:
-        container = {"R_out": cfg.data.R_out or [], "R_ret": cfg.data.R_ret or []}
-    elif cfg.data.demand_file:
-        container = load_demand_doc(Path(str(cfg.data.demand_file)))
-    if container is None:
-        return None
+        R_out = [0.0] * T
+        R_ret = [0.0] * T
+        for w, container in zip(wts, scen):
+            r_o, r_r = _demand_vectors(container, T, int(slot_resolution))
+            for t in range(T):
+                R_out[t] += w * float(r_o[t])
+                R_ret[t] += w * float(r_r[t])
+    else:
+        container: object | None = None
+        if cfg.data.R_out is not None or cfg.data.R_ret is not None:
+            container = {"R_out": cfg.data.R_out or [], "R_ret": cfg.data.R_ret or []}
+        elif cfg.data.demand_file:
+            container = Path(str(cfg.data.demand_file))
+        if container is None:
+            return None
+        R_out, R_ret = _demand_vectors(container, T, int(slot_resolution))
 
-    R_out, R_ret = aggregate_requests(container, T, int(slot_resolution))
     Wmax_slots = cfg.subproblem.Wmax_slots
     if Wmax_slots is None:
         if cfg.subproblem.Wmax_minutes is None:
@@ -94,6 +147,7 @@ def _recourse_bound_data(cfg, slot_resolution: int) -> dict | None:
         "p": float(cfg.subproblem.p),
         "S": float(cfg.subproblem.S),
         "W_slots": int(Wmax_slots),
+        "num_scenarios": int(len(scen)) if scen else 1,
     }
 
 
@@ -154,11 +208,29 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     mp["theta_per_scenario"] = bool(cfg.master.theta_per_scenario)
     mp["write_lp_after_cut"] = bool(cfg.master.write_lp_after_cut)
     mp["charge_before_idle"] = bool(cfg.master.charge_before_idle)
+    # Carried on the master params so the manifest can record which side of the
+    # A/B produced a number. The master itself reads only `lp_relaxation`, which
+    # the Benders loop sets per iteration.
+    mp["lp_phase"] = bool(cfg.master.lp_phase)
+    mp["lp_phase_max_iters"] = int(cfg.master.lp_phase_max_iters)
+    mp["lp_phase_stall_iters"] = int(cfg.master.lp_phase_stall_iters)
+    mp["lp_phase_min_rel_improve"] = float(cfg.master.lp_phase_min_rel_improve)
     mp["recourse_lower_bound"] = bool(cfg.master.recourse_lower_bound)
     if cfg.master.recourse_lower_bound:
         _rlb = _recourse_bound_data(cfg, int(time.slot_resolution))
-        if _rlb is not None:
-            mp["recourse_bound_data"] = _rlb
+        if _rlb is None:
+            # Asking for the anchor and silently not getting it is the D19/D22
+            # defect: the run looks configured and behaves as if it were not.
+            # Multi-scenario used to land here on purpose; it no longer does.
+            raise ValueError(
+                "master.recourse_lower_bound is true but the bound data cannot be "
+                "built. It needs a demand source (data.demand_file, data.R_out/"
+                "R_ret, data.scenarios or data.scenario_files), a horizon "
+                "(model.time.T or T_minutes) and a waiting window "
+                "(subproblem.Wmax_slots or Wmax_minutes). Set it to false to run "
+                "without the anchor."
+            )
+        mp["recourse_bound_data"] = _rlb
 
     mp["solver"] = cfg.solver.master_solver
     mp["solver_tee"] = bool(cfg.solver.solver_tee)
