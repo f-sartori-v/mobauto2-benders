@@ -34,6 +34,38 @@ KNOWN_FEASIBLE_UB = 4183.24
 
 
 _CACHE: tuple | None = None
+_FAILURE: BaseException | None = None
+
+# The solvers the fixture names. Kept next to FIXTURE so the two cannot drift.
+_REQUIRED_SOLVERS = ("cplex", "cplex_direct")
+
+
+def _require_solvers(*names: str) -> None:
+    """Skip only when a solver is genuinely absent.
+
+    This exists because the three entry points below used to wrap their work in
+    `except Exception: raise SkipTest("solver unavailable")`. That turned EVERY
+    failure into a skip with a label blaming the environment -- a config error, a
+    RuntimeError from the D39 validity guards, an AssertionError, a bug in this
+    file. The class whose tests each correspond to a defect that was once live
+    would switch itself off and report the machine's fault.
+
+    Asking the question directly separates the two states: "the solver is not
+    installed" is an environment fact worth skipping on, and everything else is a
+    failure worth seeing. `SolverFactory` returns an UnknownSolver for a name it
+    does not recognise rather than raising, so no exception handling is needed
+    here either.
+    """
+    import pyomo.environ as pyo
+
+    missing = [n for n in names if not pyo.SolverFactory(n).available(exception_flag=False)]
+    if missing:
+        raise unittest.SkipTest(
+            "not run: solver(s) unavailable: "
+            + ", ".join(missing)
+            + ". These are end-to-end soundness invariants; a green suite without "
+            "them has not checked any of them."
+        )
 
 
 def _run_once():
@@ -41,8 +73,14 @@ def _run_once():
 
     Memoised: every assertion in this module examines the same solve, so running
     it per TestCase class would multiply the only slow part of the suite.
+
+    A failure is memoised too, and re-raised unchanged. Three classes call this;
+    without it, a solve that raises would be retried three times at a couple of
+    minutes each. Re-raising is not swallowing -- the caller still sees it.
     """
-    global _CACHE
+    global _CACHE, _FAILURE
+    if _FAILURE is not None:
+        raise _FAILURE
     if _CACHE is not None:
         return _CACHE
 
@@ -57,6 +95,9 @@ def _run_once():
         with contextlib.redirect_stdout(buf):
             result = app_run(FIXTURE, {"emit_cli_output": True})
         _CACHE = (result, buf.getvalue())
+    except BaseException as exc:
+        _FAILURE = exc
+        raise
     finally:
         logging.getLogger("mobauto2_benders").setLevel(prev)
     return _CACHE
@@ -70,10 +111,8 @@ class SoundnessTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        try:
-            cls.result, cls.output = _run_once()
-        except Exception as exc:  # pragma: no cover - environment dependent
-            raise unittest.SkipTest(f"solver unavailable: {exc}")
+        _require_solvers(*_REQUIRED_SOLVERS)
+        cls.result, cls.output = _run_once()
 
     # -- Magnanti-Wong actually runs ------------------------------------
 
@@ -185,10 +224,8 @@ class ManifestTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        try:
-            cls.result, cls.output = _run_once()
-        except Exception as exc:  # pragma: no cover
-            raise unittest.SkipTest(f"solver unavailable: {exc}")
+        _require_solvers(*_REQUIRED_SOLVERS)
+        cls.result, cls.output = _run_once()
 
     def test_result_carries_cut_provenance(self):
         self.assertIsNotNone(self.result.cut_generation_mode)
@@ -314,10 +351,12 @@ class RecourseMatchesTheMonolith(unittest.TestCase):
                 candidate[f"yRET[{q},{t}]"] = 1.0 if x == "RET" else 0.0
                 trips += 1 if x in ("OUT", "RET") else 0
 
-        try:
-            res = ProblemSubproblem(sp).evaluate(candidate)
-        except Exception as exc:  # pragma: no cover - environment dependent
-            raise unittest.SkipTest(f"solver unavailable: {exc}")
+        # This is the external oracle (D30): the MILP's own schedule, priced by
+        # THIS codebase's subproblem, must reproduce the MILP objective. Wrapping
+        # it in a broad catch meant a subproblem that had stopped working was
+        # reported as a missing solver.
+        _require_solvers(*_REQUIRED_SOLVERS)
+        res = ProblemSubproblem(sp).evaluate(candidate)
 
         total = (
             float(res.upper_bound) + float(mp.get("start_cost_epsilon", 0.0)) * trips
