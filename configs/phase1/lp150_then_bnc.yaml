@@ -191,11 +191,17 @@ solver:
   max_iterations: 150
   # Relative Benders gap (UB-LB)/|UB| at which the run is declared converged.
   tolerance: 0.01
-  # Budget for the whole Benders loop, in seconds. This is the knob that decides
-  # what a run costs. Checked between iterations and also clamps the master's
-  # per-iteration limit, so it is a real ceiling.
-  # Test phase: 120. Simulation phase: 1800 or more.
-  total_time_limit_s: 1800
+  # Budget for the whole Benders loop, in seconds -- and, in this config, the
+  # ceiling on the TREE as well: the driver passes this value straight to the
+  # branch-and-cut solve as its time limit.
+  #
+  # 600 is chosen against what the comparison spent. The seeding LP phase costs
+  # ~150 s, leaving ~450 s of tree, against the ~800 s that lp150_then_mip8.yaml
+  # spent on eight rebuilt trees. The tree is therefore given LESS time than the
+  # thing it is being compared to, which is the right direction to err: a win
+  # under that handicap is a win, and a loss leaves "it needed more time" open
+  # and cheap to test.
+  total_time_limit_s: 600
   # Optional stall-based early stopping
   stall_max_no_improve_iters: 0
   stall_min_abs_improve: 1.0

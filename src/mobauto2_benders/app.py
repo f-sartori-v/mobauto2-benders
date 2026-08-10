@@ -2,6 +2,10 @@
 
 import math
 from pathlib import Path
+# Imported under an alias on purpose: `_prepare_params` binds a local named
+# `time` to cfg.model.time, so a plain `import time` would read as available in
+# this module and be shadowed exactly where someone would reach for it.
+from time import monotonic as _monotonic
 
 from .config import DEFAULT_CONFIG_PATH, load_config, resolve_energy_params
 from .logging_config import setup_logging
@@ -551,15 +555,25 @@ def _run_single(
             pass
     if emit_cli_output:
         _print_cfg(cfg, mp, sp)
+    _t_seed_start = _monotonic()
     result = solver.run()
     if cfg.master.branch_and_cut.enabled:
-        result = _run_branch_and_cut(cfg, master, sub, result, emit_cli_output)
+        result = _run_branch_and_cut(
+            cfg,
+            master,
+            sub,
+            result,
+            emit_cli_output,
+            seeding_elapsed_s=_monotonic() - _t_seed_start,
+        )
     if emit_cli_output and emit_summary:
         _maybe_print_summary(result, sp)
     return result, master
 
 
-def _run_branch_and_cut(cfg, master, sub, seed_result, emit_cli_output: bool):
+def _run_branch_and_cut(
+    cfg, master, sub, seed_result, emit_cli_output: bool, *, seeding_elapsed_s: float
+):
     """Solve the seeded master once inside a single tree, and report it as such.
 
     `solver.run()` above stopped at the end of the LP phase -- the config refuses
@@ -584,14 +598,28 @@ def _run_branch_and_cut(cfg, master, sub, seed_result, emit_cli_output: bool):
             "branch_and_cut with lazy_cuts=false has no generator wired yet"
         )
 
+    # solver.total_time_limit_s is documented as the budget for the WHOLE run.
+    # Passing it to the tree unchanged made the first measured run take
+    # 150 s of seeding + 600 s of tree against a 600 s budget -- a 25% overshoot
+    # of the one number a reader uses to decide what a run costs. The tree gets
+    # what is left, and is told so.
+    remaining = float(cfg.solver.total_time_limit_s) - float(seeding_elapsed_s)
+    if remaining <= 0.0:
+        raise RuntimeError(
+            f"the seeding LP phase used {seeding_elapsed_s:.0f} s of a "
+            f"{cfg.solver.total_time_limit_s} s budget, leaving nothing for the "
+            "tree. Raise solver.total_time_limit_s rather than reporting a tree "
+            "that never ran."
+        )
     if emit_cli_output:
         print(
-            f"\n=== Branch-and-cut: one tree over {master.cuts_count()} seeded cuts ==="
+            f"\n=== Branch-and-cut: one tree over {master.cuts_count()} seeded cuts, "
+            f"{remaining:.0f} s left of a {cfg.solver.total_time_limit_s} s budget ==="
         )
 
     bnc_result, stats = master.solve_branch_and_cut(
         sub.evaluate,
-        time_limit_s=cfg.solver.total_time_limit_s,
+        time_limit_s=remaining,
         mipgap=cfg.master.per_iteration_mipgap,
     )
 
