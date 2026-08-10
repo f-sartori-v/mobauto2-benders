@@ -385,16 +385,51 @@ class ProblemSubproblem(Subproblem):
                     f"ub_base={float(ub_base):.10g}"
                 )
                 return None
+            # HANDLER_CENSUS.md Category A: this load was wrapped in
+            # `except Exception: pass` immediately before the readback below. Making
+            # it loud is right on its own terms, but it is NOT what broke the
+            # `Ybar_ret == 0` core point -- measured, the load succeeds and CPLEX
+            # reports `optimal`. Keep the two apart.
             try:
                 md.solutions.load_from(res)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._vprint(
+                    f"[MW FAIL] could not load the dual solution: "
+                    f"{type(exc).__name__}: {exc}. termination={term} "
+                    f"status={getattr(res.solver, 'status', None)}"
+                )
+                return None
 
-            dm_out = {}
-            dm_ret = {}
+            # A pi with no value is a variable the backend never sent to the solver:
+            # it carries a zero objective coefficient and appears in no row, which
+            # happens at any tau where the candidate schedules no trip in that
+            # direction. Its slope is exactly 0 -- that is arithmetic, not a guess.
+            #
+            # Reading it with a blanket `or 0.0` would be a guess, and the dangerous
+            # kind: a failed load also leaves every pi empty, and the census names
+            # the result -- "an all-zero slope vector, i.e. a cut that constrains
+            # nothing, with no error". So distinguish the two. Some empty is
+            # structural; all empty is a failure, and a failure returns None so the
+            # caller falls back and marks the cut NOT a valid lower bound (D39).
+            def _pi(v) -> tuple[float, bool]:
+                raw = getattr(v, "value", None)
+                return (0.0, False) if raw is None else (float(raw), True)
+
+            dm_out, dm_ret = {}, {}
+            n_seen = 0
             for tau in range(T_):
-                dm_out[tau] = float(S_cap) * float(pyo.value(md.pi_OUT[tau]))
-                dm_ret[tau] = float(S_cap) * float(pyo.value(md.pi_RET[tau]))
+                vo, ok_o = _pi(md.pi_OUT[tau])
+                vr, ok_r = _pi(md.pi_RET[tau])
+                n_seen += int(ok_o) + int(ok_r)
+                dm_out[tau] = float(S_cap) * vo
+                dm_ret[tau] = float(S_cap) * vr
+            if n_seen == 0 and T_ > 0:
+                self._vprint(
+                    "[MW FAIL] the dual solution carries no values at all "
+                    f"({2 * T_} multipliers, none set); refusing to build an "
+                    "all-zero slope vector from it."
+                )
+                return None
             return dm_out, dm_ret
 
         # Finite-difference coefficient builder: for each tau, solve with +S capacity

@@ -467,5 +467,168 @@ class TestClockTruncationIsReported(unittest.TestCase):
         )
 
 
+class MagnantiWongSelectsANonDominatedCut(unittest.TestCase):
+    """MW must pick a dual that DOMINATES, not merely a dual that exists.
+
+    Until now nothing checked this. `test_magnanti_wong_succeeds` asserts MW ran
+    instead of falling back, and `test_cut_mode_is_reported_and_is_mw` asserts the
+    run labelled its cuts `mw`. Both are provenance. Neither says the cut is any
+    good, and D30 is the proof the two are independent: MW, the plain dual and
+    finite differences all produced invalid cuts identically, so a green MW label
+    has already coexisted with cuts that excluded the optimum.
+
+    What MW claims: the subproblem LP is degenerate, so many duals are optimal.
+    Every one of them yields a cut tight at the incumbent; they differ away from
+    it. MW maximises the cut's value at a core point Ybar over the optimal face,
+    which is what makes the cut Pareto-optimal.
+
+    That gives an invariant which holds BY CONSTRUCTION, so a failure is proof of a
+    defect rather than an unlucky instance:
+
+        cut_MW(Ybar) >= cut_dual(Ybar)   for every Ybar
+
+    because the plain dual is just another point on the face MW maximises over.
+    This is the check that would have caught the bug the generator's own comment
+    records -- an earlier version maximised `sum(dm*Ybar)` and dropped the `-y_inc`
+    term, which is not constant over the optimal face, so it selected the wrong
+    dual.
+
+    Both configurations set `use_dual_slopes: True`. That flag is not only a
+    generator switch: it also floors K at 1, which changes the LP that gets built.
+    Toggling only `use_magnanti_wong` keeps the subproblem identical, so both cuts
+    are read off the same optimal face -- asserted, not assumed, by comparing the
+    recourse value across the pair.
+    """
+
+    CORE_POINTS = {
+        "uniform": (0.5, 0.3),
+        "all_ones": (1.0, 1.0),
+        "all_zeros": (0.0, 0.0),
+        "out_only": (1.0, 0.0),
+        "ret_only": (0.0, 1.0),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        _require_solvers("cplex_direct")
+
+        from mobauto2_benders.config import load_config
+        from mobauto2_benders.app import _prepare_params
+        from mobauto2_benders.problem.subproblem_impl import ProblemSubproblem
+
+        cfg = load_config(str(FIXTURE))
+        mp, sp = _prepare_params(cfg, {})
+        T = int(mp.get("T") or (int(mp["T_minutes"]) // int(mp["slot_resolution"])))
+        sp["T"] = T
+        Q = int(mp.get("Q", 2))
+        cls.T = T
+
+        # A deliberately non-optimal schedule. The point is a degenerate LP with
+        # several optimal duals, not a good candidate.
+        cand = {}
+        for q in range(Q):
+            for t in range(T):
+                cand[f"yOUT[{q},{t}]"] = 1.0 if (t % 4 == q % 4) else 0.0
+                cand[f"yRET[{q},{t}]"] = 1.0 if (t % 4 == (q + 2) % 4) else 0.0
+        cls.candidate = cand
+        cls.agg_out = [sum(cand[f"yOUT[{q},{t}]"] for q in range(Q)) for t in range(T)]
+        cls.agg_ret = [sum(cand[f"yRET[{q},{t}]"] for q in range(Q)) for t in range(T)]
+
+        def evaluate(use_mw, core):
+            params = dict(sp)
+            params["use_magnanti_wong"] = use_mw
+            params["use_dual_slopes"] = True
+            params["mw_core_point"] = {"Yout": list(core[0]), "Yret": list(core[1])}
+            res = ProblemSubproblem(params).evaluate(dict(cand))
+            cut = (res.cuts or [res.cut])[0]
+            return cut.metadata, res
+
+        flat = ([0.5] * T, [0.3] * T)
+        cls.dual_md, cls.dual_res = evaluate(False, flat)
+        cls.mw = {}
+        for name, (o, r) in cls.CORE_POINTS.items():
+            core = ([o] * T, [r] * T)
+            cls.mw[name] = (evaluate(True, core), core)
+
+    def _value_at(self, md, out_vec, ret_vec):
+        """Cut value at an aggregate profile; coeff[(q,tau)] is equal across q."""
+        co, cr = md["coeff_yOUT"], md["coeff_yRET"]
+        return (
+            float(md["const"])
+            + sum(co.get((0, t), 0.0) * out_vec[t] for t in range(self.T))
+            + sum(cr.get((0, t), 0.0) * ret_vec[t] for t in range(self.T))
+        )
+
+    def test_both_generators_see_the_same_subproblem(self):
+        """If the recourse differs, the two cuts came off different LPs and no
+        comparison between them means anything. `use_dual_slopes` is held fixed
+        precisely because it silently changes the model."""
+        (mw_md, mw_res), _ = self.mw["uniform"]
+        self.assertAlmostEqual(
+            float(mw_res.upper_bound), float(self.dual_res.upper_bound), places=6
+        )
+
+    def test_both_cuts_are_tight_at_the_candidate(self):
+        """A Benders optimality cut must reproduce the recourse at the point it was
+        generated at. If MW's is not tight, the OptFace constraint pinning the dual
+        objective to the primal optimum is mis-set, and MW is selecting from the
+        wrong set."""
+        ub = float(self.dual_res.upper_bound)
+        for label, md in (("dual", self.dual_md), ("mw", self.mw["uniform"][0][0])):
+            with self.subTest(generator=label):
+                self.assertAlmostEqual(
+                    self._value_at(md, self.agg_out, self.agg_ret),
+                    ub,
+                    places=4,
+                    msg=f"{label} cut is not tight at the candidate it was built at",
+                )
+
+    def test_mw_dominates_the_plain_dual_at_every_core_point(self):
+        """The invariant. MW maximises the cut's value at Ybar over the optimal
+        face and the plain dual is a point on that face, so MW can never be worse.
+        A negative margin means the MW objective or a sign convention is wrong; it
+        is not an instance-specific outcome."""
+        for name, ((mw_md, _), core) in self.mw.items():
+            with self.subTest(core_point=name):
+                mw_val = self._value_at(mw_md, core[0], core[1])
+                dual_val = self._value_at(self.dual_md, core[0], core[1])
+                tol = 1e-6 * max(1.0, abs(dual_val))
+                self.assertGreaterEqual(
+                    mw_val,
+                    dual_val - tol,
+                    msg=(
+                        f"MW cut is dominated at core point {name}: "
+                        f"mw={mw_val!r} < dual={dual_val!r}. MW selects the "
+                        "maximiser over the optimal face, so this cannot happen "
+                        "unless the selection is wrong."
+                    ),
+                )
+
+    def test_mw_is_strictly_better_on_at_least_one_core_point(self):
+        """Guards the test above against passing vacuously.
+
+        If MW silently degraded to returning whatever dual the solver handed back,
+        every margin would be exactly zero and the dominance assertion would still
+        pass while checking nothing. Measured on this fixture, by core point:
+        all_zeros 0, ret_only 0, all_ones ~2e-4, uniform ~21, out_only ~30. Two
+        exact zeros are expected -- at those core points the MW objective does not
+        separate the face -- so the guard is that a strict win exists somewhere,
+        not at every point.
+        """
+        margins = [
+            self._value_at(mw_md, core[0], core[1])
+            - self._value_at(self.dual_md, core[0], core[1])
+            for (mw_md, _), core in self.mw.values()
+        ]
+        self.assertGreater(
+            max(margins),
+            1e-3,
+            msg=(
+                "MW never beat the plain dual at any core point. Either MW is not "
+                f"selecting at all, or the LP is not degenerate here. margins={margins}"
+            ),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
