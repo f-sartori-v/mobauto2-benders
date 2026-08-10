@@ -892,16 +892,18 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         ),
     )
     backend_raw = str(master_raw.get("solver_backend", "cplex_direct")).lower()
+    # The tree builds its own cplex_persistent solver from the same model, so
+    # master.solver_backend is NOT the branch-and-cut switch and must stay on
+    # cplex_direct: it is the backend the seeding LP phase runs on, and changing
+    # it would make the cuts the tree starts from different from run 2's.
+    if backend_raw == "cplex_persistent":
+        raise ValueError(
+            "master.solver_backend=cplex_persistent is not accepted. Branch-and-cut "
+            "creates its own persistent solver for the tree (master.branch_and_cut); "
+            "the master's own backend stays cplex_direct so the seeding LP phase "
+            "reproduces run 2 exactly."
+        )
     if bnc_section.enabled:
-        # Not a preference. cplex_direct exposes no register_callback, so a run that
-        # asked for branch-and-cut and got cplex_direct would solve the plain master
-        # and report a number that looks like branch-and-cut and is not.
-        if backend_raw != "cplex_persistent":
-            raise ValueError(
-                "master.branch_and_cut.enabled requires "
-                "master.solver_backend=cplex_persistent; "
-                f"got {backend_raw!r}, which exposes no callback interface."
-            )
         if not (bnc_section.lazy_cuts or bnc_section.user_cuts):
             raise ValueError(
                 "master.branch_and_cut.enabled with neither lazy_cuts nor user_cuts "
@@ -915,13 +917,6 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
                 "reproduce the loop's semantics inside one tree and make a "
                 "regression against lp150_then_mip8.yaml legible."
             )
-    elif backend_raw == "cplex_persistent":
-        raise ValueError(
-            "master.solver_backend=cplex_persistent is only accepted with "
-            "master.branch_and_cut.enabled=true; the loop path is measured on "
-            "cplex_direct and the two backends are not interchangeable for a "
-            "reported number."
-        )
     master_section = MasterSection(
         use_fifo_symmetry=_ensure_bool(
             master_raw.get("use_fifo_symmetry", False), "master.use_fifo_symmetry"
@@ -1205,6 +1200,20 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "Set master.solver_backend=cplex_persistent together with "
             "master.branch_and_cut.enabled=true, and leave solver.master_solver=cplex."
         )
+    if bnc_section.enabled and bnc_section.seed_from_lp_phase:
+        # The seeding run must end when the LP phase ends. If max_iterations is
+        # larger, the loop starts MIP iterations before the tree ever runs, and
+        # the result would be branch-and-cut on top of an unrecorded number of
+        # loop iterations -- exactly the "say which cut budget produced a number"
+        # failure the README's reading rules exist for.
+        if solver_section.max_iterations != master_section.lp_phase_max_iters:
+            raise ValueError(
+                "with master.branch_and_cut.seed_from_lp_phase, "
+                f"solver.max_iterations ({solver_section.max_iterations}) must equal "
+                f"master.lp_phase_max_iters ({master_section.lp_phase_max_iters}); "
+                "otherwise the loop runs MIP iterations before the tree and the "
+                "tree's cut budget is not the one the config names."
+            )
 
     tol_raw = _as_mapping(data.get("tolerances", {}), "tolerances")
     _check_unknown_keys(

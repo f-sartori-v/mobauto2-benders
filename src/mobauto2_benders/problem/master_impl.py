@@ -2557,14 +2557,12 @@ class ProblemMaster(MasterProblem):
         from ..benders.lazy_cuts import LazyCutStats, register_lazy_callback
 
         m = self.m
-        backend = str(self._p("solver_backend", "")).lower()
-        if backend != "cplex_persistent":
-            raise RuntimeError(
-                "solve_branch_and_cut requires solver_backend=cplex_persistent; "
-                f"got {backend!r}. cplex_direct exposes no callback interface, so "
-                "this would silently be an ordinary master solve."
-            )
-
+        # This method builds its own persistent solver and does not touch
+        # `self._solver`. That is what lets `master.solver_backend` stay
+        # `cplex_direct` for the seeding LP phase, so the cuts the tree starts
+        # from are the same cuts run 2 produced, digit for digit. An earlier
+        # draft required the config to declare cplex_persistent; that gate was
+        # protecting against a failure this construction removes, so it went.
         solver = pyo.SolverFactory("cplex_persistent")
         solver.set_instance(m)
         if time_limit_s is not None:

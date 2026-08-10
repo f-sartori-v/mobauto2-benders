@@ -45,9 +45,9 @@ def _build():
     T = int(mp.get("T") or (int(mp["T_minutes"]) // int(mp["slot_resolution"])))
     mp["T"] = T
     sp["T"] = T
-    # The only change against the loop's configuration. Everything else is the
-    # fixture's, so a difference in the result is attributable to the tree.
-    mp["solver_backend"] = "cplex_persistent"
+    # Nothing about the backend is changed. The tree builds its own persistent
+    # solver, so the master stays on cplex_direct exactly as the loop runs it --
+    # which is what makes a difference in the result attributable to the tree.
     master = ProblemMaster(mp)
     master.initialize()
     return master, ProblemSubproblem(sp)
@@ -109,22 +109,40 @@ class BranchAndCutRunsOnOneTree(unittest.TestCase):
                 self.assertIn(round(float(val), 6), (0.0, 1.0), name)
 
 
-class TheBackendGateIsNotAdvisory(unittest.TestCase):
-    def test_cplex_direct_is_refused_rather_than_silently_ignored(self):
-        _require_cplex()
-        from mobauto2_benders.app import _prepare_params
-        from mobauto2_benders.config import load_config
-        from mobauto2_benders.problem.master_impl import ProblemMaster
+    def test_the_masters_own_solver_is_untouched(self):
+        """The tree must not repoint the solver the loop uses.
 
-        cfg = load_config(str(FIXTURE))
-        mp, _sp = _prepare_params(cfg, {})
-        mp["T"] = int(mp.get("T") or (int(mp["T_minutes"]) // int(mp["slot_resolution"])))
-        mp["solver_backend"] = "cplex_direct"
-        master = ProblemMaster(mp)
-        master.initialize()
-        with self.assertRaises(RuntimeError) as ctx:
-            master.solve_branch_and_cut(lambda _cand: None)
-        self.assertIn("cplex_persistent", str(ctx.exception))
+        `solve_branch_and_cut` builds its own persistent solver. If it swapped
+        `master._solver` instead, the seeding LP phase and the tree would share
+        one backend and run 2 would stop being reproducible from this code -- a
+        regression that no bound would reveal.
+        """
+        master, _sub = _build()
+        before = type(master._solver).__name__
+        self.assertNotIn("Persistent", before)
+
+
+class TheSeedingBackendIsNotTheTreeBackend(unittest.TestCase):
+    def test_config_refuses_cplex_persistent_as_the_masters_backend(self):
+        import tempfile
+
+        import yaml
+
+        from mobauto2_benders.config import load_config
+
+        raw = yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
+        raw.setdefault("master", {})["solver_backend"] = "cplex_persistent"
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".yaml", delete=False, encoding="utf-8"
+        ) as fh:
+            yaml.safe_dump(raw, fh)
+            path = fh.name
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                load_config(path)
+            self.assertIn("seeding LP phase", str(ctx.exception))
+        finally:
+            Path(path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

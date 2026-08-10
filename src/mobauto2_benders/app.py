@@ -214,17 +214,6 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     mp["bnc_user_cuts"] = bool(bnc.user_cuts)
     mp["bnc_callback_lp_solver"] = str(bnc.callback_lp_solver)
     mp["bnc_seed_from_lp_phase"] = bool(bnc.seed_from_lp_phase)
-    if bnc.enabled:
-        # The config gate (D44) accepts this combination; the callback that makes
-        # it mean anything is not wired yet. Without this the run would solve the
-        # plain master on cplex_persistent and report a number that reads as
-        # branch-and-cut -- an inert knob of exactly the shape the receitas
-        # invariants forbid, and worse than inert because it would be quoted.
-        raise NotImplementedError(
-            "master.branch_and_cut.enabled is accepted by the schema but the "
-            "callback is not registered yet (D44 step 1 in progress). Refusing to "
-            "run rather than report a plain master solve as branch-and-cut."
-        )
     mp["aggregate_cuts_by_tau"] = bool(cfg.master.aggregate_cuts_by_tau)
     mp["cut_coeff_threshold"] = float(cfg.master.cut_coeff_threshold)
     mp["theta_per_scenario"] = bool(cfg.master.theta_per_scenario)
@@ -554,7 +543,7 @@ def _run_single(
     warm_start: dict | None = None,
     emit_summary: bool = True,
 ):
-    solver, master, _sub = _build_solver(cfg, mp, sp)
+    solver, master, sub = _build_solver(cfg, mp, sp)
     if warm_start:
         try:
             master.set_warm_start(warm_start)
@@ -563,9 +552,78 @@ def _run_single(
     if emit_cli_output:
         _print_cfg(cfg, mp, sp)
     result = solver.run()
+    if cfg.master.branch_and_cut.enabled:
+        result = _run_branch_and_cut(cfg, master, sub, result, emit_cli_output)
     if emit_cli_output and emit_summary:
         _maybe_print_summary(result, sp)
     return result, master
+
+
+def _run_branch_and_cut(cfg, master, sub, seed_result, emit_cli_output: bool):
+    """Solve the seeded master once inside a single tree, and report it as such.
+
+    `solver.run()` above stopped at the end of the LP phase -- the config refuses
+    any other iteration budget when seeding is on -- so the master now holds
+    exactly the cut set that run 2 produced, and the tree starts from run 2's
+    root. That is the comparison D45 asks for: same cuts, one tree instead of a
+    loop that rebuilds one per iteration.
+
+    The seeding phase is pure LP and claims no upper bound (a fractional schedule
+    cannot be exhibited), so the seed result's bound is a lower bound only. What
+    the tree returns replaces it wholesale rather than being merged with it: two
+    bounds from two different solves, silently maxed, is how a number stops being
+    attributable to a run.
+    """
+    from dataclasses import replace
+
+    bnc = cfg.master.branch_and_cut
+    if not bnc.lazy_cuts:
+        # Reachable only via user_cuts, which the schema refuses today. Left as a
+        # raise rather than an `if` that quietly solves an ordinary master.
+        raise NotImplementedError(
+            "branch_and_cut with lazy_cuts=false has no generator wired yet"
+        )
+
+    if emit_cli_output:
+        print(
+            f"\n=== Branch-and-cut: one tree over {master.cuts_count()} seeded cuts ==="
+        )
+
+    bnc_result, stats = master.solve_branch_and_cut(
+        sub.evaluate,
+        time_limit_s=cfg.solver.total_time_limit_s,
+        mipgap=cfg.master.per_iteration_mipgap,
+    )
+
+    if emit_cli_output:
+        print(
+            f"[BNC] callback invocations={stats.invocations} "
+            f"cuts_injected={stats.cuts_injected} "
+            f"incumbents_accepted={stats.incumbents_accepted} "
+            f"validity={stats.validity_counts}"
+        )
+        print(
+            f"[BNC] status={bnc_result.status.value} "
+            f"LB={bnc_result.lower_bound} UB={bnc_result.objective}"
+        )
+        # There is no iteration count in a tree. Saying so is cheaper than having
+        # a reader assume the number below came from one.
+        print(
+            "[BNC] NOT REPRODUCIBLE: the tree stops on the clock, and a lazy "
+            "callback makes CPLEX's node order thread-dependent (D26)."
+        )
+
+    return replace(
+        seed_result,
+        status=bnc_result.status,
+        best_lower_bound=bnc_result.lower_bound,
+        best_upper_bound=bnc_result.objective,
+        # The loop's iteration counter does not describe a tree. Reporting the
+        # seeding phase's count here would read as "N Benders iterations", which
+        # is not what produced these bounds.
+        iterations=0,
+        clock_truncated_master_solves=1,
+    )
 
 
 def _emit_manifest(cfg, config_path, result, master, emit_cli_output: bool) -> None:
