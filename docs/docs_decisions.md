@@ -1148,3 +1148,43 @@ crash and saying so was wrong. The cause was only found by narrowing which core 
 triggered it.
 
 76 tests pass.
+
+### D43 — Cut validity is checked where it is observable, and the tightness test was nearly vacuous
+D42 left one of the three MW checks open: strong duality on the selected dual. Writing it
+found that a check already in place was weaker than it read.
+
+**`const` is derived, so tightness is close to a tautology.** The cut constant is computed
+as `const = ub - sum(dm * y_inc)` (`subproblem_impl.py`), not as `sum(alpha * R)` the way
+the module docstring describes. Asserting the cut is tight at its own candidate therefore
+re-derives an identity the code just imposed. It catches an index or aggregation slip
+between the constant and the coefficient map, which is worth having, and nothing about
+duality -- despite reading exactly like a duality check.
+
+**What does depend on the dual being right.** `OptFace` pins the selected dual to
+`dual_obj >= ub - tol`. The other side, `dual_obj <= ub`, is weak duality, and it holds
+only if the dual feasible region is the true dual of the primal. A region that is too large
+breaks it, which is precisely how the stale `min(S, C[tau])` in the dual objective
+presented itself: `primal=5105.0 dual=5825.0`. Nothing in the code or the suite checked
+that side.
+
+**The observable consequence is the test.** A Benders optimality cut must UNDERESTIMATE the
+recourse everywhere, so: build the cut at `y0`, price the true recourse at neighbouring
+schedules, and require `cut(y) <= recourse(y)`.
+
+Neighbours matter. Far-away schedules leave the cut thousands of units of slack and would
+absorb a badly wrong slope; one flipped slot leaves almost none. Measured over the
+single-slot perturbations, the minimum slack is **0.000000 at `yOUT[0,0]`** -- exactly
+tight, so a wrong slope has nowhere to hide. Both `mw` and `dual` pass.
+
+`test_the_underestimation_check_is_sharp` asserts that minimum slack stays under 1.0, for
+the same reason `test_mw_is_strictly_better_on_at_least_one_core_point` exists: a validity
+assertion with slack everywhere passes for any dual wrong by less than the slack, and would
+be evidence of nothing.
+
+**Still open, and now the only unchecked side.** There is no runtime guard that
+`dual_obj <= ub_base` on every MW solve -- the test covers one candidate and twelve
+neighbours, not every cut of every run. That guard is cheap and fails closed (return `None`,
+fall back, mark the cut not a valid lower bound per D39). It matters more now that D40 makes
+long runs worth doing.
+
+78 tests pass.

@@ -550,6 +550,23 @@ class MagnantiWongSelectsANonDominatedCut(unittest.TestCase):
             core = ([o] * T, [r] * T)
             cls.mw[name] = (evaluate(True, core), core)
 
+        # Neighbouring schedules: flip one slot. The true recourse at each is what
+        # the cut has to stay under. Priced once here; the assertions are cheap.
+        cls.neighbours = []
+        for q in range(Q):
+            for t in range(0, T, 5):
+                for direction in ("yOUT", "yRET"):
+                    y = dict(cand)
+                    key = f"{direction}[{q},{t}]"
+                    y[key] = 1.0 - y[key]
+                    if y[f"yOUT[{q},{t}]"] + y[f"yRET[{q},{t}]"] > 1.0:
+                        continue  # would break exclusivity; not a schedule
+                    priced = ProblemSubproblem(
+                        {**sp, "use_magnanti_wong": True, "use_dual_slopes": True}
+                    ).evaluate(dict(y))
+                    cls.neighbours.append((key, y, float(priced.upper_bound)))
+        assert cls.neighbours, "no admissible single-slot perturbation was built"
+
     def _value_at(self, md, out_vec, ret_vec):
         """Cut value at an aggregate profile; coeff[(q,tau)] is equal across q."""
         co, cr = md["coeff_yOUT"], md["coeff_yRET"]
@@ -558,6 +575,25 @@ class MagnantiWongSelectsANonDominatedCut(unittest.TestCase):
             + sum(co.get((0, t), 0.0) * out_vec[t] for t in range(self.T))
             + sum(cr.get((0, t), 0.0) * ret_vec[t] for t in range(self.T))
         )
+
+    def _cut_value(self, md, cand):
+        """Cut value at a full per-(q,t) schedule."""
+        total = float(md["const"])
+        for (q, t), c in md["coeff_yOUT"].items():
+            total += c * cand.get(f"yOUT[{q},{t}]", 0.0)
+        for (q, t), c in md["coeff_yRET"].items():
+            total += c * cand.get(f"yRET[{q},{t}]", 0.0)
+        return total
+
+    def _worst_slack(self, generator):
+        """Smallest `recourse(y) - cut(y)` over the neighbours, and where."""
+        md = self.dual_md if generator == "dual" else self.mw["uniform"][0][0]
+        worst, where = float("inf"), None
+        for key, y, recourse in self.neighbours:
+            slack = recourse - self._cut_value(md, y)
+            if slack < worst:
+                worst, where = slack, key
+        return worst, where
 
     def test_both_generators_see_the_same_subproblem(self):
         """If the recourse differs, the two cuts came off different LPs and no
@@ -601,6 +637,63 @@ class MagnantiWongSelectsANonDominatedCut(unittest.TestCase):
                         f"mw={mw_val!r} < dual={dual_val!r}. MW selects the "
                         "maximiser over the optimal face, so this cannot happen "
                         "unless the selection is wrong."
+                    ),
+                )
+
+    def test_the_cut_underestimates_the_recourse_at_neighbouring_schedules(self):
+        """Strong duality, checked where it is observable.
+
+        `const` is computed as `ub - sum(dm * y_inc)`, so asserting the cut is tight
+        at its own candidate re-derives an identity the code just imposed. It catches
+        an index or aggregation slip and nothing else. It is NOT a duality check,
+        despite reading like one.
+
+        The property that does depend on the dual being right is the defining one:
+        a Benders optimality cut must UNDERESTIMATE the recourse everywhere. The
+        `OptFace` row pins the selected dual to `dual_obj >= ub - tol`; the other
+        side, `dual_obj <= ub`, is weak duality, and it only holds if the dual
+        feasible region is the true dual of the primal. A region that is too large
+        breaks it -- which is exactly how the stale `min(S, C[tau])` in the dual
+        objective showed up, as `primal=5105.0 dual=5825.0`.
+
+        Neighbouring schedules are the sharp place to look. Far away the cut has
+        thousands of units of slack and would absorb a badly wrong slope; one slot
+        away it is nearly tight. Measured here the minimum slack over the
+        perturbations is 0.000000 at `yOUT[0,0]` -- exactly tight, so a wrong slope
+        has nothing to hide in. `test_the_underestimation_check_is_sharp` asserts
+        that property directly, because a version of this test with slack everywhere
+        would pass while checking very little.
+        """
+        for label in ("mw", "dual"):
+            worst, where = self._worst_slack(label)
+            with self.subTest(generator=label):
+                self.assertGreaterEqual(
+                    worst,
+                    -1e-6 * max(1.0, abs(worst)),
+                    msg=(
+                        f"the {label} cut OVERESTIMATES the recourse at {where} by "
+                        f"{-worst!r}. It is not a valid lower bound, so no bound "
+                        "built from it is one either."
+                    ),
+                )
+
+    def test_the_underestimation_check_is_sharp(self):
+        """The test above is only meaningful if some perturbation is nearly tight.
+
+        With slack everywhere it would pass for a dual that is wrong by less than
+        the slack. Assert that at least one neighbour leaves the cut within a unit
+        of the true recourse.
+        """
+        for label in ("mw", "dual"):
+            worst, _ = self._worst_slack(label)
+            with self.subTest(generator=label):
+                self.assertLess(
+                    worst,
+                    1.0,
+                    msg=(
+                        f"no perturbation brought the {label} cut close to the "
+                        f"recourse (min slack {worst!r}); the validity assertion "
+                        "has too much room to be evidence."
                     ),
                 )
 
