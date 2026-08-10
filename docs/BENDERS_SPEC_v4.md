@@ -429,6 +429,14 @@ Gates 2–5. D1–D8 and D10–D13 stand as written.
 > No optimality gap may be quoted at Q>=3, and performance items below that assume the
 > cut set is the binding constraint do not apply there. Reading rules: `README.md`,
 > § Reading rules. The five configs that produced it ship as `configs/phase1/*.yaml`.
+>
+> **SUPERSEDED by D40 and D45.** Every number in this block was measured with the master's
+> LP phase capped at 10 iterations, i.e. a cut set of 14-19. Removing the cap puts the LP
+> root at **794.624549571966** (reproducible) and one MIP solve at **~1080**, with the
+> internal gap falling from 0.9994 to ~0.20 and an upper bound appearing for the first time
+> at Q=3. The verdict "structural" is withdrawn: the failure was the cut budget the 30 s
+> ceiling allowed. The competitiveness conclusion stands -- the monolith still solves this
+> instance in 39 s -- but the reason stated here is wrong.
 
 The correctness contract above is now enforced by tests. The remaining work is research
 output and performance, ordered in `AUDIT_v4` §3:
