@@ -2527,6 +2527,109 @@ class ProblemMaster(MasterProblem):
             cost += conc_pen * sum(max(0.0, y - 1.0) for y in Yret)
         return float(cost)
 
+    def solve_branch_and_cut(
+        self,
+        cut_source: Any,
+        *,
+        time_limit_s: float | None = None,
+        mipgap: float | None = None,
+    ) -> tuple[SolveResult, Any]:
+        """Solve the master once, with Benders cuts injected inside the tree (D44).
+
+        Deliberately a separate entry point rather than a branch inside
+        `_solve_inner`. That method is ~900 lines carrying the loop's warm starts,
+        the gap-tied schedule, the CPLEX log parsing and the LP-phase option
+        surgery; threading a second backend through it would put every measured
+        result in this repository at risk to buy nothing. The loop's path is
+        untouched by this method's existence.
+
+        `cut_source` is called with a `Candidate` and must return a
+        `SubproblemResult` -- normally `subproblem.evaluate`. The master stays
+        ignorant of the subproblem class, exactly as it is in the loop.
+
+        Returns `(SolveResult, LazyCutStats)`. The stats are not optional
+        decoration: a branch-and-cut run has no iteration count, so they are the
+        only record of how many cuts the tree actually saw, and
+        `aborted_reason` is what stops a stopped tree being read as a finished
+        one.
+        """
+        assert self.m is not None, "Call initialize() before solve_branch_and_cut()"
+        from ..benders.lazy_cuts import LazyCutStats, register_lazy_callback
+
+        m = self.m
+        backend = str(self._p("solver_backend", "")).lower()
+        if backend != "cplex_persistent":
+            raise RuntimeError(
+                "solve_branch_and_cut requires solver_backend=cplex_persistent; "
+                f"got {backend!r}. cplex_direct exposes no callback interface, so "
+                "this would silently be an ordinary master solve."
+            )
+
+        solver = pyo.SolverFactory("cplex_persistent")
+        solver.set_instance(m)
+        if time_limit_s is not None:
+            solver.options["timelimit"] = float(time_limit_s)
+        if mipgap is not None:
+            solver.options["mipgap"] = float(mipgap)
+        for k, v in (self._p("cplex_options", {}) or {}).items():
+            solver.options[_cplex_direct_option_name(k)] = v
+
+        stats = LazyCutStats()
+        raise_if_aborted = register_lazy_callback(
+            solver,
+            m,
+            cut_source,
+            stats,
+            shuttles=len(m.Q),
+            slots=len(m.T),
+            eps_violation=float(self._p("eps_cut", 1e-8)),
+            vprint=self._vprint,
+        )
+
+        tee_flag = bool(self._p("solver_tee", self._p("mp_solve_tee", False)))
+        res = solver.solve(tee=tee_flag, load_solutions=True)
+        # Before anything is read off the model. A tree that stopped because the
+        # subproblem could not guarantee a cut has a bound certified on nothing,
+        # and every field below would look ordinary.
+        raise_if_aborted()
+
+        term = str(getattr(res.solver, "termination_condition", "")).lower()
+        if term == "optimal":
+            status = SolveStatus.OPTIMAL
+        elif term in ("maxtimelimit", "maxiterations", "other", "feasible"):
+            status = SolveStatus.FEASIBLE
+        elif term == "infeasible":
+            status = SolveStatus.INFEASIBLE
+        else:
+            status = SolveStatus.UNKNOWN
+
+        objective = None
+        lower_bound = None
+        try:
+            objective = float(pyo.value(m.obj))
+        except Exception:
+            objective = None
+        try:
+            lower_bound = float(res.problem.lower_bound)
+        except Exception:
+            lower_bound = None
+
+        self._vprint(
+            f"[BNC] status={status.value} obj={objective} lb={lower_bound} "
+            f"invocations={stats.invocations} cuts={stats.cuts_injected} "
+            f"accepted={stats.incumbents_accepted} validity={stats.validity_counts}"
+        )
+        candidate = self._collect_candidate() if status is not SolveStatus.INFEASIBLE else None
+        return (
+            SolveResult(
+                status=status,
+                objective=objective,
+                candidate=candidate,
+                lower_bound=lower_bound,
+            ),
+            stats,
+        )
+
     def add_cut(self, cut: Cut) -> None:
         # Normal filtered path
         self._add_cut(cut, force=False)

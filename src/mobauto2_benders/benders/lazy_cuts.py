@@ -40,6 +40,8 @@ __all__ = [
     "cut_to_linear_form",
     "candidate_from_values",
     "vet_cut_for_injection",
+    "build_variable_name_map",
+    "register_lazy_callback",
 ]
 
 
@@ -190,3 +192,165 @@ def vet_cut_for_injection(
             validity=validity,
         )
     return cut_to_linear_form(cut)
+
+
+def build_variable_name_map(
+    persistent_solver: object,
+    model: object,
+) -> tuple[dict[tuple[str, int, int], str], list[str]]:
+    """Map `(dir, q, t)` and the thetas onto the solver's own column names.
+
+    Pyomo's persistent CPLEX interface keys `_pyomo_var_to_solver_var_map` by the
+    VarData object and stores a *name* (`'x37'`), not an integer index. CPLEX's
+    callback API accepts names wherever it accepts indices, and names survive the
+    presolve remapping that a lazy callback forces CPLEX to restrict -- so they
+    are used directly rather than converted.
+
+    Raises if any y variable is missing from the map. A silently absent column
+    would produce a cut over fewer variables than the one the subproblem priced,
+    which is not a weaker cut, it is a different and possibly invalid one.
+    """
+    vmap = getattr(persistent_solver, "_pyomo_var_to_solver_var_map", None)
+    if not vmap:
+        raise CallbackAbort(
+            "the persistent solver exposes no _pyomo_var_to_solver_var_map; "
+            "set_instance() must run before the callback is registered"
+        )
+
+    names: dict[tuple[str, int, int], str] = {}
+    missing: list[str] = []
+    for prefix in ("yOUT", "yRET"):
+        var = getattr(model, prefix, None)
+        if var is None:
+            raise CallbackAbort(f"master model has no {prefix}")
+        for idx in var:
+            q, t = int(idx[0]), int(idx[1])
+            data = var[idx]
+            if data not in vmap:
+                missing.append(f"{prefix}[{q},{t}]")
+                continue
+            names[(prefix, q, t)] = vmap[data]
+    if missing:
+        raise CallbackAbort(
+            f"{len(missing)} y variables are absent from the solver map "
+            f"(first: {missing[0]}); a cut over a subset of the priced schedule "
+            "is a different cut, not a weaker one"
+        )
+
+    theta_names: list[str] = []
+    for attr in ("theta", "theta_out", "theta_ret"):
+        th = getattr(model, attr, None)
+        if th is None:
+            continue
+        if th.is_indexed():
+            for idx in th:
+                if th[idx] in vmap:
+                    theta_names.append(vmap[th[idx]])
+        elif th in vmap:
+            theta_names.append(vmap[th])
+    if not theta_names:
+        raise CallbackAbort(
+            "no theta column found on the master; a Benders cut has nothing to "
+            "bound and would silently become a constraint on y alone"
+        )
+    return names, theta_names
+
+
+def register_lazy_callback(
+    persistent_solver: object,
+    model: object,
+    cut_source: Callable[[Candidate], SubproblemResult],
+    stats: LazyCutStats,
+    *,
+    shuttles: int,
+    slots: int,
+    eps_violation: float = 1e-6,
+    vprint: Callable[[str], None] = lambda _msg: None,
+) -> Callable[[], None]:
+    """Register the lazy-constraint callback and return a re-raise hook.
+
+    The returned callable must be invoked after `solve()`. CPLEX catches whatever
+    a Python callback raises and turns it into a generic solve failure with the
+    original traceback gone, so `CallbackAbort` is stored on the way out and
+    re-raised outside. Without that, the one thing this module exists to
+    guarantee -- that an unguaranteed cut stops the run -- would be reported as
+    "CPLEX failed" with no reason attached.
+    """
+    from cplex import SparsePair
+    from cplex.callbacks import LazyConstraintCallback
+
+    names, theta_names = build_variable_name_map(persistent_solver, model)
+    cpx = getattr(persistent_solver, "_solver_model", None)
+    if cpx is None:
+        raise CallbackAbort("the persistent solver holds no CPLEX model")
+
+    y_order = [(d, q, t) for (d, q, t) in names]
+    y_cols = [names[k] for k in y_order]
+    held: dict[str, CallbackAbort] = {}
+
+    class _BendersLazyCallback(LazyConstraintCallback):
+        def __call__(self) -> None:  # noqa: D401 - CPLEX calls this
+            if held:
+                # A previous invocation already decided the solve must stop.
+                # CPLEX may still call us on another thread before abort() takes
+                # effect; adding nothing here would accept an incumbent, so the
+                # only safe move is to abort again and add nothing else.
+                self.abort()
+                return
+            stats.invocations += 1
+            try:
+                y_vals = dict(zip(y_order, self.get_values(y_cols)))
+                theta_val = float(sum(self.get_values(theta_names)))
+
+                cand = candidate_from_values(
+                    lambda d, q, t: y_vals.get((d, q, t), 0.0), shuttles, slots
+                )
+                stats.subproblem_solves += 1
+                result = cut_source(cand)
+                stats.note_validity(classify_cut_validity(result))
+                const, coeffs = vet_cut_for_injection(
+                    result, context=f"incumbent at node {self.get_node_ID()}"
+                )
+
+                # theta >= const + sum(c*y)  <=>  theta - sum(c*y) >= const
+                lhs_at_candidate = theta_val - sum(
+                    c * y_vals.get(k, 0.0) for k, c in coeffs.items()
+                )
+                if lhs_at_candidate >= const - eps_violation:
+                    # The incumbent already satisfies the cut. Accepting it here
+                    # is correct and is the only place in this callback where
+                    # adding nothing is the right answer.
+                    stats.incumbents_accepted += 1
+                    return
+
+                ind = list(theta_names) + [names[k] for k in coeffs]
+                val = [1.0] * len(theta_names) + [-float(c) for c in coeffs.values()]
+                self.add(
+                    constraint=SparsePair(ind=ind, val=val), sense="G", rhs=float(const)
+                )
+                stats.cuts_injected += 1
+            except CallbackAbort as exc:
+                held["abort"] = exc
+                stats.aborted_reason = exc.reason
+                vprint(f"[BNC ABORT] {exc.reason}")
+                self.abort()
+            except Exception as exc:  # noqa: BLE001 - deliberately broad, see below
+                # Anything unexpected in here is still a reason to stop. The
+                # alternative is returning normally, which tells CPLEX the
+                # incumbent is fine -- the exact silent-accept this module was
+                # written to prevent.
+                wrapped = CallbackAbort(
+                    f"callback raised {type(exc).__name__}: {exc}"
+                )
+                held["abort"] = wrapped
+                stats.aborted_reason = wrapped.reason
+                vprint(f"[BNC ABORT] {wrapped.reason}")
+                self.abort()
+
+    cpx.register_callback(_BendersLazyCallback)
+
+    def raise_if_aborted() -> None:
+        if "abort" in held:
+            raise held["abort"]
+
+    return raise_if_aborted
