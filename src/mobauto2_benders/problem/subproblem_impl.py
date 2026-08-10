@@ -228,14 +228,38 @@ class ProblemSubproblem(Subproblem):
             Ybar_out = (Ybar_out + [0.0] * T)[:T]
         if len(Ybar_ret) < T:
             Ybar_ret = (Ybar_ret + [0.0] * T)[:T]
-        # If the core point is still all zeros (common in early iters), seed it to a small positive
-        # profile so MW has direction to select non-trivial duals.
+        # If the core point is still all zeros (common in early iters), seed it to a
+        # small positive profile so MW has direction to select non-trivial duals.
+        #
+        # This was wrapped in `try/except Exception: pass`, and it is the one place
+        # in the MW path where silence is expensive. `Ybar` IS the direction MW
+        # maximises in: with an all-zero core point the objective
+        # `sum((S*Ybar[tau] - C[tau]) * pi[tau])` degenerates to `-sum(C*pi)`, MW
+        # selects an essentially arbitrary point of the optimal face, and the mode
+        # is still reported as `mw`. Every dominance margin measured in D42 would
+        # collapse toward zero and nothing would say why.
+        #
+        # The exception it was swallowing can only be a non-numeric entry in the
+        # core point, which is a caller error worth seeing, not a condition to
+        # continue through.
+        core_seeded = False
         try:
-            if sum(Ybar_out) + sum(Ybar_ret) == 0.0 and T > 0:
-                Ybar_out = [1.0 for _ in range(T)]
-                Ybar_ret = [1.0 for _ in range(T)]
-        except Exception:
-            pass
+            core_mass = float(sum(Ybar_out)) + float(sum(Ybar_ret))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "mw_core_point carries a non-numeric entry: "
+                f"{type(exc).__name__}: {exc}. Ybar is the direction Magnanti-Wong "
+                "maximises in; continuing past this would select an arbitrary dual "
+                "and still label the cut 'mw'."
+            ) from exc
+        if core_mass == 0.0 and T > 0:
+            Ybar_out = [1.0 for _ in range(T)]
+            Ybar_ret = [1.0 for _ in range(T)]
+            core_seeded = True
+            self._vprint(
+                f"[MW CORE] core point arrived all zeros; seeded to all-ones over "
+                f"T={T} so the selection has a direction."
+            )
 
         def solve_mw_dual(
             T_: int,
@@ -1265,6 +1289,7 @@ class ProblemSubproblem(Subproblem):
                         "timing_sp_solve_s": sp_solve_time,
                         "timing_cutgen_s": cutgen_time,
                         "cut_generation_mode": cut_mode_used,
+                        "mw_core_point_seeded": bool(core_seeded),
                         "cut_generation_proxy": proxy_diag,
                         "cut_generation_fallback": fallback_diag,
                         "cut_valid_lower_bound": bool(cut_lb_valid),
@@ -1837,6 +1862,7 @@ class ProblemSubproblem(Subproblem):
                 "timing_sp_solve_s": sp_solve_time,
                 "timing_cutgen_s": cutgen_time,
                 "cut_generation_mode": cut_mode_used,
+                "mw_core_point_seeded": bool(core_seeded),
                 "cut_generation_proxy": proxy_diag,
                 "cut_generation_fallback": fallback_diag,
                 "cut_valid_lower_bound": bool(cut_lb_valid),
@@ -2304,11 +2330,23 @@ def solve_subproblem(
                 f"Subproblem solve ambiguous: termination_condition={term}"
             )
     t_solve1 = time.perf_counter()
-    # Load solution only after optimal termination
+    # Load solution only after optimal termination.
+    #
+    # HANDLER_CENSUS.md Category A, and the worst-placed of them. Everything below
+    # reads duals through `m.dual.get(..., 0.0)`, so a swallowed failure here does
+    # not raise later -- it produces an all-zero slope vector, which is a cut that
+    # constrains nothing, carries no error, and is still reported as valid. Every
+    # ambiguous termination already raised above, so reaching this line and failing
+    # to load has no benign reading.
     try:
         m.solutions.load_from(res)
-    except Exception:
-        pass
+    except (ValueError, AttributeError, RuntimeError) as exc:
+        raise RuntimeError(
+            f"the subproblem terminated {term} but its solution could not be "
+            f"loaded: {type(exc).__name__}: {exc}. The duals below would all read "
+            "as 0.0 and the cut would constrain nothing while claiming to be a "
+            "valid lower bound."
+        ) from exc
     t_extract0 = time.perf_counter()
 
     alpha_OUT = {t: float(m.dual.get(m.D_out[t], 0.0)) for t in Tset}

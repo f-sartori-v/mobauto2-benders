@@ -43,6 +43,20 @@ def _cplex_direct_option_name(key: str) -> str:
     return name[len("CPXPARAM_") :].lower()
 
 
+def _termination_carries_no_solution(term) -> bool:
+    """True when Pyomo legitimately has nothing to load.
+
+    Kept as a named predicate because the alternative -- catching everything --
+    is what let a failed load pass for an infeasible solve. These are the states
+    where "no solution" is the correct answer rather than a symptom.
+    """
+    name = str(term).lower()
+    return any(
+        k in name
+        for k in ("infeasible", "unbounded", "nosolution", "error", "unknown")
+    )
+
+
 def _validate_cplex_options(options: dict, backend: str) -> None:
     """Reject a CPLEX parameter name that will not resolve, at build time.
 
@@ -786,7 +800,19 @@ class ProblemMaster(MasterProblem):
         solver = self._get_solver()
         tee_flag = bool(self._p("solver_tee", self._p("mp_solve_tee", False)))
         emit_reports = bool(self._p("emit_reports", False))
-        # Per-iteration solver controls
+        # Per-iteration solver controls.
+        #
+        # This whole block used to sit under `except Exception: pass`. Everything in
+        # it decides how long the master runs and how tightly it solves, so a
+        # failure here does not degrade the run, it silently changes what the run
+        # IS -- the solve keeps the previous iteration's time limit and mipgap and
+        # nothing is logged. On a long session that is an expensive silent failure,
+        # and it is the same shape as the guard D19 closed when a mistyped CPLEX
+        # parameter was being dropped without a word.
+        #
+        # The narrow catches below are the point: a missing or unset parameter is an
+        # expected state that yields None and is skipped, and anything that is
+        # present but unusable is a defect worth stopping for.
         try:
             time_limit = self._p("solve_time_limit_s")
             if time_limit is not None:
@@ -820,8 +846,13 @@ class ProblemMaster(MasterProblem):
             else:
                 for k, v in cplex_opts.items():
                     solver.options[_cplex_direct_option_name(k)] = v
-        except Exception:
-            pass
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "the master's per-iteration solver controls could not be applied: "
+                f"{type(exc).__name__}: {exc}. Continuing would run this solve under "
+                "the previous iteration's time limit and mipgap, which changes what "
+                "the run measures without saying so."
+            ) from exc
         # Apply warm start if provided: set initial y values only (x-only start)
         #
         # Never during the LP phase. `_relax_integrality()` has already turned yOUT
@@ -985,6 +1016,7 @@ class ProblemMaster(MasterProblem):
             symbolic_solver_labels=True,
         )
         term = getattr(res.solver, "termination_condition", None)
+        solution_loaded = False
         if term in (
             pyo.TerminationCondition.optimal,
             pyo.TerminationCondition.feasible,
@@ -992,8 +1024,17 @@ class ProblemMaster(MasterProblem):
         ):
             try:
                 m.solutions.load_from(res)
-            except Exception:
-                # Retry once with solution loading enabled
+                solution_loaded = True
+            except (ValueError, AttributeError, RuntimeError) as exc:
+                # Retry once with solution loading enabled. The retry is a real
+                # recovery, not a swallow -- but it re-solves, so it costs a full
+                # master solve and silently doubles an iteration's time. Say so,
+                # or a session's timing becomes unaccountable.
+                self._vprint(
+                    f"[MP] load_from failed ({type(exc).__name__}: {exc}); "
+                    "re-solving once with load_solutions=True. This costs a second "
+                    "full master solve for this iteration."
+                )
                 res = solver.solve(
                     m,
                     tee=bool(tee_flag and emit_reports),
@@ -1002,6 +1043,7 @@ class ProblemMaster(MasterProblem):
                     keepfiles=bool(emit_reports),
                     symbolic_solver_labels=True,
                 )
+                solution_loaded = True
         # Try to capture the actual solver log path (including temp log from direct interfaces)
         try:
             for attr in (
@@ -1057,10 +1099,37 @@ class ProblemMaster(MasterProblem):
                 )
             except Exception:
                 pass
-        try:
-            m.solutions.load_from(res)
-        except Exception:
-            pass
+        # HANDLER_CENSUS.md Category A -- and narrowing the catch is what showed
+        # what it was hiding. This load ran UNCONDITIONALLY, including right after
+        # the block above had already loaded the same results object. Pyomo
+        # consumes the symbol map on load, so the second call raised `KeyError`
+        # on every ordinary iteration and `except Exception: pass` absorbed it.
+        # The handler was not protecting against a rare failure; it was making a
+        # redundant call survivable, which is why nobody ever saw the failure it
+        # was nominally there for.
+        #
+        # Now it runs only when nothing has been loaded yet. Swallowing a real
+        # failure here would leave every master variable holding the PREVIOUS
+        # iteration's values, and the candidate collected below is read from them
+        # -- the run would price a schedule it never solved for and call the
+        # resulting cut valid.
+        if not solution_loaded:
+            term_now = getattr(res.solver, "termination_condition", None)
+            try:
+                m.solutions.load_from(res)
+            except (ValueError, AttributeError, RuntimeError, KeyError) as exc:
+                if not _termination_carries_no_solution(term_now):
+                    raise RuntimeError(
+                        f"the master reported {term_now} but its solution could "
+                        f"not be loaded: {type(exc).__name__}: {exc}. Every "
+                        "variable still holds the previous iteration's values, so "
+                        "continuing would price a schedule this solve never "
+                        "produced."
+                    ) from exc
+                self._vprint(
+                    f"[MP] no solution to load (termination={term_now}); this is "
+                    "expected for that status."
+                )
         st = getattr(res.solver, "status", None)
 
         stats = self._extract_solver_stats(res)
