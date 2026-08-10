@@ -2320,6 +2320,19 @@ def solve_subproblem(
     # Component costs
     wait_cost_slots = 0.0
     fill_eps_cost = 0.0
+    # (contrib, t, tau, direction, x) with direction 0 = OUT, 1 = RET.
+    #
+    # The fourth field used to be the capacity-layer index `k`. D30 removed the
+    # layers; the OUT branch was updated to a literal 0 and the RET branch was left
+    # referencing `k`, which no longer exists in this scope. That is a
+    # NameError waiting for its trigger, and the trigger is rare: the append only
+    # runs when an individual arc contributes negatively, i.e. when the LP returns a
+    # slightly negative flow. It fired at iteration 123 of the LP-only run and took
+    # the whole run down -- the diagnostic built to report a numerical anomaly was
+    # destroyed by the anomaly it was built to report.
+    #
+    # Direction is the useful thing to record here now that there are no layers:
+    # when this does fire, the first question is which side it came from.
     neg_contribs: list[tuple[float, int, int, int, float]] = []
     for t, tau in m.ArcsOut:
         val = float(pyo.value(m.x_OUT[t, tau]) or 0.0)
@@ -2338,7 +2351,7 @@ def solve_subproblem(
         wait_cost_slots += w * val
         contrib = w * val
         if contrib < -1e-9:
-            neg_contribs.append((contrib, int(t), int(tau), int(k), val))
+            neg_contribs.append((contrib, int(t), int(tau), 1, val))
 
     penalty_pax = float(
         sum(float(pyo.value(m.u_OUT[t])) for t in Tset)
@@ -2384,8 +2397,11 @@ def solve_subproblem(
     if wait_cost_slots < -1e-9:
         neg_contribs.sort(key=lambda x: x[0])
         print("[SP DIAG] Negative waiting cost detected. Top negative contributions:")
-        for c, t, tau, k, val in neg_contribs[:10]:
-            print(f"  contrib={c:.6g} t={t} tau={tau} k={k} x={val:.6g}")
+        for c, t, tau, d, val in neg_contribs[:10]:
+            print(
+                f"  contrib={c:.6g} dir={'OUT' if d == 0 else 'RET'} "
+                f"t={t} tau={tau} x={val:.6g}"
+            )
         assert wait_cost_slots >= -1e-9
     if penalty_cost < -1e-9:
         print(f"[SP DIAG] Negative penalty cost detected: {penalty_cost:.6g}")

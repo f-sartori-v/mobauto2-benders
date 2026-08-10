@@ -370,10 +370,6 @@ class RecourseMatchesTheMonolith(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestDemandOutsideHorizonIsReported(unittest.TestCase):
     """Requests past the horizon were dropped with no warning and no count.
 
@@ -386,6 +382,13 @@ class TestDemandOutsideHorizonIsReported(unittest.TestCase):
     Relevant to D6: the horizon is to extend from 10h to 24h, at which point the
     trap moves rather than disappearing.
     """
+
+    @classmethod
+    def setUpClass(cls):
+        # Builds and solves an LP through `lp_solver: cplex_direct` below. Without
+        # this the class raised instead of skipping on a machine without CPLEX --
+        # the inverse of the defect `_require_solvers` was written to end.
+        _require_solvers("cplex_direct")
 
     def _evaluate_with_requests(self, requests, T_minutes=60, slot_resolution=30):
         from mobauto2_benders.problem.subproblem_impl import ProblemSubproblem
@@ -445,6 +448,11 @@ class TestClockTruncationIsReported(unittest.TestCase):
     must say so instead of looking reproducible.
     """
 
+    @classmethod
+    def setUpClass(cls):
+        # Calls _run_once(), i.e. a full solve. Same reason as the class above.
+        _require_solvers(*_REQUIRED_SOLVERS)
+
     def test_converged_reference_run_is_not_clock_truncated(self):
         result, _ = _run_once()
         truncated = getattr(result, "clock_truncated_master_solves", None)
@@ -457,3 +465,7 @@ class TestClockTruncationIsReported(unittest.TestCase):
             "the soundness fixture must terminate on the gap, or every bound it "
             "asserts is a sample rather than a measurement",
         )
+
+
+if __name__ == "__main__":
+    unittest.main()
