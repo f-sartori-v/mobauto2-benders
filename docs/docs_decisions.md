@@ -1237,3 +1237,61 @@ Two more defects in the deleted code, recorded so they are not reintroduced: can
 values were read with `except Exception: val = 0.0`, fabricating a schedule of zeros from a
 read failure; and only `cuts[0]` was used, which predates multi-scenario cuts being the
 default and would silently drop every scenario but one.
+
+### D45 — With 150 cuts the binding constraint moves from the cut set to the master solve
+Two runs on top of D40's LP phase, same test point (Q=3, T=44, 4 scenarios), 1800 s.
+`configs/phase1/lp150_then_mip1.yaml` (one MIP iteration) and
+`lp150_then_mip8.yaml` (eight). Both differ from `lp_only_150.yaml` only in
+`max_iterations` and `per_iteration_time_limit_s` (30 -> 300, so the schedule's 102 s is
+no longer clipped to 30).
+
+**The good half. Branch and bound works now.** Root relaxation with these cuts is
+794.624549571966. One 102 s MIP solve lifts the best bound to **1080-1090** over ~19 000
+nodes, and the internal gap falls from Fase 1's **0.9994 to about 0.20**. An upper bound
+appears for the first time at Q=3.
+
+This kills a claim `phase1/README.md` states as a property of the master: *"the LB is
+limited by the master's own branch and bound being unable to lift its bound off zero in
+30 s, after ~4000 nodes."* It could not lift the bound because it started from a root of
+zero. From a root of 794 it lifts 36% in one solve, on the same machine, at a comparable
+node rate. Combined with D40: thin cuts caused the zero root, and the zero root caused the
+impotent B&B. They were never independent failures.
+
+**The bad half. More Benders iterations buy nothing.** Master best bound over the eight MIP
+iterations:
+
+    1080.4  1090.0  1072.8  1064.8  1074.0  1087.8  1067.8  1076.3
+
+It oscillates around ~1077 and does not trend. And the spread is not an effect: iteration
+151 is the *same* iteration under the *same* configuration in both runs, and it gave
+**1088.07** and **1080.36** -- 7.7 apart. Nodes explored in the same 102 s ranged 11 402 to
+31 412 across iterations. That is D26 exactly: a clock-truncated MIP is machine-dependent,
+and here the iteration-to-iteration spread is roughly the size of the run-to-run noise on a
+single cell.
+
+The UB behaves the same way -- 2166, 2399, 2455, 2477, 2209, 2061, 2030, 2329 -- best 2030,
+no trend. Final reported pair is LB 1089.98 / UB 2030.86, a Benders gap of 46.3% against
+50.4% after a single iteration. Both runs print `NOT REPRODUCIBLE`; every number here is a
+single draw and no gap from them should be quoted without saying so.
+
+**Why more iterations do not help, mechanically.** Each master solve stops on its 102 s
+clock at an internal gap of ~0.20, so the reported LB is the best bound of a *truncated*
+solve. Adding one cut and re-solving re-truncates at roughly the same place. The cut set is
+no longer what limits the bound; **the master solve is.**
+
+**Correction to a prediction made before the run.** I expected the per-solve budget to grow
+as the Benders gap closed, since `mp_gap = min(per_iteration_mipgap, max(0.001, g_bd))`.
+It did not: `g_bd` sat near 0.5 throughout, which saturates `mp_gap` at the 0.05 ceiling, so
+every solve was scheduled at 102 s. The adaptive branch only engages once the Benders gap
+falls below `per_iteration_mipgap`, which never happened.
+
+**What this makes the next measurement.** Run 1 -- the long master session -- now has a real
+hypothesis behind it rather than hope: if a single master solve is given far more than 102 s
+with this cut set, does the bound rise past ~1077, or does it saturate there too? That is
+the question D45 leaves open, and it is the one the 12 h session was designed for. Note the
+lever is `per_iteration_mipgap`, not the ceiling (handout 5.2).
+
+**One caveat on the reported LB.** `best_lb` is the maximum over iterations. Each master
+best bound is individually a valid lower bound, so the maximum is valid too -- but it is the
+maximum of eight noisy draws, which makes it an optimistic estimate of what one run yields.
+Quote 1090 as the best observed, not as what the configuration produces.
