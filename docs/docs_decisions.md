@@ -1383,3 +1383,50 @@ unlike the recourse anchor D33 found inert at Q=3, does not go slack as Q grows.
 
 Every number in this entry prints `NOT REPRODUCIBLE` and is a single draw except where two
 draws are quoted. Only `lp_only_150.yaml` reproduces.
+
+---
+
+## D47 — Run 1 is answered by three points, and the answer is that master seconds do not buy the bound
+
+Date: 2026-08-10.
+
+Run 1 (handout §5.2) was designed as a bounded 12-hour session with 30-minute master
+solves, to test whether a master given far more time lifts the bound past the ~1080 that a
+102 s solve reaches with the 150 seeded cuts. D45 gave it that hypothesis; D46's control
+path gives it a cheap way to sample the curve, because the control is one long master solve
+over the seeded cuts with no callback.
+
+Three points, all on the seeded 150-cut master:
+
+| master time | LB |
+|---:|---:|
+| 102 s | ~1080 |
+| 410 s | 1111.05 (two draws: 1106.15, 1111.05) |
+| 1520 s | **1148.65** |
+
+**Stated in advance, and it did not land on either.** The 1800 s config's header set the
+criteria before the run: ~1130 or below means the curve is flat and the session is answered;
+~1250 or above means it is still climbing and the session has a real question. The result is
+1148.65, in the band between them. Recording that rather than retrofitting a threshold is
+the point -- this project has three refuted conclusions from reading a number after choosing
+what it should mean.
+
+**What the curve says.** The bound is close to linear in `ln(t)`: the slope is 22.3 points
+per unit of `ln t` between the first two points and 28.7 between the last two. Extrapolating
+to 43 200 s (12 h) gives **~1245**. That is a projection, not a measurement, and the first
+point comes from a different code path (a loop MIP iteration, with a MIP start), so the
+same-path slope of 28.7 is the trustworthy one.
+
+**The reading.** 14× more master time than the 1520 s point is projected to buy ~8% of
+bound, reaching ~79% of the monolith's optimum of 1569.44 -- which the monolith itself
+produces exactly, in 39 s. The 12-hour session would not change any conclusion in this
+repository. It is **not** recommended as a bound-hunting exercise. What would change a
+conclusion is a valid inequality in `y` alone, which is where D46 already pointed
+(handout §5.6 A, the per-vehicle trip cap).
+
+**What this does not say.** It does not say the master is at its limit, and it does not
+close §5.2 as a decision the user cannot reverse -- the session is cheap to run and produces
+an honest number. It says the expected value of running it is low enough that it should not
+be the next thing done.
+
+Single draw at 1520 s, `NOT REPRODUCIBLE` (D26). The 410 s point is two draws 0.4% apart.
