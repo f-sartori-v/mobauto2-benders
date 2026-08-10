@@ -146,8 +146,21 @@ class ProblemMaster(MasterProblem):
     ) -> dict[str, Optional[float] | str]:
         return parse_cplex_log_bounds(log_path)
 
-    def _extract_cplex_api_stats(self, solver) -> dict[str, Any]:
-        """Extract MIP stats directly from CPLEX Python API when available."""
+    def _extract_cplex_api_stats(self, solver, lp_relax: bool = False) -> dict[str, Any]:
+        """Extract MIP stats directly from CPLEX Python API when available.
+
+        `lp_relax` skips the MIP-only queries. They are not merely useless on an LP
+        -- `solution.MIP` and `solution.progress` exist on the CPLEX object whatever
+        the problem type, so `hasattr` does not filter them, and calling them prints
+        `CPLEX Error 3003: Not a mixed-integer problem.` to the console from the C
+        library before the Python exception is raised and swallowed below. Two calls,
+        two lines, every iteration: 300 of them in a clean 150-iteration LP run. The
+        cost is not the wasted call, it is that a real CPLEX error is indistinguishable
+        from the wallpaper.
+
+        The caller already handles the LP case: with no branch and bound the objective
+        IS the bound, and it records `best_bound_source = "lp_relaxation"`.
+        """
         stats: dict[str, Any] = {}
         try:
             cpx = getattr(solver, "_solver_model", None)
@@ -160,6 +173,8 @@ class ProblemMaster(MasterProblem):
                 stats["incumbent"] = cpx.solution.get_objective_value()
         except Exception:
             pass
+        if lp_relax:
+            return stats
         try:
             if hasattr(cpx.solution, "MIP"):
                 stats["best_bound"] = cpx.solution.MIP.get_best_objective()
@@ -808,8 +823,15 @@ class ProblemMaster(MasterProblem):
         except Exception:
             pass
         # Apply warm start if provided: set initial y values only (x-only start)
+        #
+        # Never during the LP phase. `_relax_integrality()` has already turned yOUT
+        # and yRET into continuous variables, and a MIP start on a model with no
+        # integers is rejected by CPLEX with `Error 3003: Not a mixed-integer
+        # problem.` -- twice per iteration, ~250 times in a healthy 123-iteration
+        # run. It changes no result, which is exactly the problem: a real error line
+        # is indistinguishable from the noise.
         use_ws = False
-        if self._warm_start:
+        if self._warm_start and not lp_relax:
             try:
                 # Set binary starts only where provided; others left unset (partial MIP start)
                 eps_bin = float(self._p("eps_bin", 1e-6))
@@ -855,9 +877,11 @@ class ProblemMaster(MasterProblem):
             finally:
                 # Clear after applying to avoid reusing stale starts in later solves
                 self._warm_start = None
-        # Use previous master solution as MIP start if enabled and no explicit warm start
+        # Use previous master solution as MIP start if enabled and no explicit warm
+        # start. Same LP-phase exclusion as above.
         if (
             (not use_ws)
+            and (not lp_relax)
             and bool(self._p("use_mip_start", False))
             and self._last_solution
         ):
@@ -1048,7 +1072,7 @@ class ProblemMaster(MasterProblem):
         if stats.get("gap") is not None:
             sources["gap"] = "solver_results"
 
-        api_stats = self._extract_cplex_api_stats(solver)
+        api_stats = self._extract_cplex_api_stats(solver, lp_relax)
         for k in ("incumbent", "best_bound", "gap", "nodes"):
             if stats.get(k) is None and api_stats.get(k) is not None:
                 stats[k] = api_stats[k]

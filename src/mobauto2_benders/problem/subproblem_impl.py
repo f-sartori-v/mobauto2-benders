@@ -385,16 +385,51 @@ class ProblemSubproblem(Subproblem):
                     f"ub_base={float(ub_base):.10g}"
                 )
                 return None
+            # HANDLER_CENSUS.md Category A: this load was wrapped in
+            # `except Exception: pass` immediately before the readback below. Making
+            # it loud is right on its own terms, but it is NOT what broke the
+            # `Ybar_ret == 0` core point -- measured, the load succeeds and CPLEX
+            # reports `optimal`. Keep the two apart.
             try:
                 md.solutions.load_from(res)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._vprint(
+                    f"[MW FAIL] could not load the dual solution: "
+                    f"{type(exc).__name__}: {exc}. termination={term} "
+                    f"status={getattr(res.solver, 'status', None)}"
+                )
+                return None
 
-            dm_out = {}
-            dm_ret = {}
+            # A pi with no value is a variable the backend never sent to the solver:
+            # it carries a zero objective coefficient and appears in no row, which
+            # happens at any tau where the candidate schedules no trip in that
+            # direction. Its slope is exactly 0 -- that is arithmetic, not a guess.
+            #
+            # Reading it with a blanket `or 0.0` would be a guess, and the dangerous
+            # kind: a failed load also leaves every pi empty, and the census names
+            # the result -- "an all-zero slope vector, i.e. a cut that constrains
+            # nothing, with no error". So distinguish the two. Some empty is
+            # structural; all empty is a failure, and a failure returns None so the
+            # caller falls back and marks the cut NOT a valid lower bound (D39).
+            def _pi(v) -> tuple[float, bool]:
+                raw = getattr(v, "value", None)
+                return (0.0, False) if raw is None else (float(raw), True)
+
+            dm_out, dm_ret = {}, {}
+            n_seen = 0
             for tau in range(T_):
-                dm_out[tau] = float(S_cap) * float(pyo.value(md.pi_OUT[tau]))
-                dm_ret[tau] = float(S_cap) * float(pyo.value(md.pi_RET[tau]))
+                vo, ok_o = _pi(md.pi_OUT[tau])
+                vr, ok_r = _pi(md.pi_RET[tau])
+                n_seen += int(ok_o) + int(ok_r)
+                dm_out[tau] = float(S_cap) * vo
+                dm_ret[tau] = float(S_cap) * vr
+            if n_seen == 0 and T_ > 0:
+                self._vprint(
+                    "[MW FAIL] the dual solution carries no values at all "
+                    f"({2 * T_} multipliers, none set); refusing to build an "
+                    "all-zero slope vector from it."
+                )
+                return None
             return dm_out, dm_ret
 
         # Finite-difference coefficient builder: for each tau, solve with +S capacity
@@ -2320,6 +2355,19 @@ def solve_subproblem(
     # Component costs
     wait_cost_slots = 0.0
     fill_eps_cost = 0.0
+    # (contrib, t, tau, direction, x) with direction 0 = OUT, 1 = RET.
+    #
+    # The fourth field used to be the capacity-layer index `k`. D30 removed the
+    # layers; the OUT branch was updated to a literal 0 and the RET branch was left
+    # referencing `k`, which no longer exists in this scope. That is a
+    # NameError waiting for its trigger, and the trigger is rare: the append only
+    # runs when an individual arc contributes negatively, i.e. when the LP returns a
+    # slightly negative flow. It fired at iteration 123 of the LP-only run and took
+    # the whole run down -- the diagnostic built to report a numerical anomaly was
+    # destroyed by the anomaly it was built to report.
+    #
+    # Direction is the useful thing to record here now that there are no layers:
+    # when this does fire, the first question is which side it came from.
     neg_contribs: list[tuple[float, int, int, int, float]] = []
     for t, tau in m.ArcsOut:
         val = float(pyo.value(m.x_OUT[t, tau]) or 0.0)
@@ -2338,7 +2386,7 @@ def solve_subproblem(
         wait_cost_slots += w * val
         contrib = w * val
         if contrib < -1e-9:
-            neg_contribs.append((contrib, int(t), int(tau), int(k), val))
+            neg_contribs.append((contrib, int(t), int(tau), 1, val))
 
     penalty_pax = float(
         sum(float(pyo.value(m.u_OUT[t])) for t in Tset)
@@ -2384,8 +2432,11 @@ def solve_subproblem(
     if wait_cost_slots < -1e-9:
         neg_contribs.sort(key=lambda x: x[0])
         print("[SP DIAG] Negative waiting cost detected. Top negative contributions:")
-        for c, t, tau, k, val in neg_contribs[:10]:
-            print(f"  contrib={c:.6g} t={t} tau={tau} k={k} x={val:.6g}")
+        for c, t, tau, d, val in neg_contribs[:10]:
+            print(
+                f"  contrib={c:.6g} dir={'OUT' if d == 0 else 'RET'} "
+                f"t={t} tau={tau} x={val:.6g}"
+            )
         assert wait_cost_slots >= -1e-9
     if penalty_cost < -1e-9:
         print(f"[SP DIAG] Negative penalty cost detected: {penalty_cost:.6g}")

@@ -9,15 +9,35 @@ departures and prices waiting time plus a penalty `p` per unserved passenger.
 
 ## Headline result
 
-At **Q=3, T=44 slots (660 min / 15 min), four demand scenarios, 300 s**, the decomposition
-does not produce a usable lower bound. Every master MIP solve terminates on its time
-ceiling at an internal gap of **99.9%** — best bound 0.35 against its own incumbent of 636
-— and giving it 3.4× the time and 7.7× the nodes raises the bound by 1.2%. The monolithic
-MILP solves the same instance to optimality in 39 s.
+At **Q=3, T=44 slots (660 min / 15 min), four demand scenarios**, the decomposition
+produces a usable lower bound once it is given enough cuts, and is still not competitive.
 
-**Upper bounds are unaffected**: each is an exhibited feasible schedule. **No optimality
-gap may be quoted at Q≥3.** This is not a verdict on Q≤2, where the capacity anchor is
-worth 1662–7737 on the empty master.
+The earlier headline here — *"does not produce a usable lower bound … internal gap 99.9%,
+best bound 0.35"* — was measured with 14–19 cuts, because the master's LP phase was capped
+at 10 iterations. It is **withdrawn** (D40, D45).
+
+With the cap removed, 150 LP iterations at ~0.8 s each:
+
+| | lower bound |
+|---|---:|
+| LP root relaxation, 150 cuts | **794.62** (reproducible) |
+| after one 102 s MIP solve | **~1080** (single draw) |
+| monolithic MILP, for reference | 1569.44 |
+
+The master's internal gap falls from **0.9994 to about 0.20**, and an upper bound appears
+for the first time at this size. So the earlier reading — that the master's branch and
+bound cannot lift its own bound — described a symptom of a root relaxation sitting at zero,
+not a property of the master.
+
+**It is still not competitive.** The monolith solves the same instance to optimality in
+39 s; the run above spent ~1000 s to reach a Benders gap of 46%, and that gap comes from a
+clock-truncated run, so it is a single draw. Adding Benders iterations on top does not move
+the bound — it oscillates in 1064–1090 with no trend, a spread the size of the run-to-run
+noise. The binding constraint has moved from the cut set to **the master solve being
+truncated at ~20% internal gap**.
+
+**Upper bounds were never in doubt**: each is an exhibited feasible schedule. Nothing here
+is a verdict on Q≤2, where the capacity anchor is worth 1662–7737 on the empty master.
 
 Reading rules for the numbers below: [§ Reading rules](#reading-rules).
 Decision log: [`docs/docs_decisions.md`](docs/docs_decisions.md).
@@ -48,7 +68,31 @@ Every number quoted in `docs/` comes from a config in this repository. Run any o
 python -m mobauto2_benders --config configs/phase1/base_off.yaml run
 ```
 
-### The Phase 1 A/B (4 cells, 300 s each)
+### The cut-budget runs (these are the current result)
+
+```bash
+python -m mobauto2_benders --config configs/phase1/lp_only_150.yaml run
+```
+
+| config | what it does | LB | UB |
+|---|---|---:|---:|
+| `lp_only_150.yaml` | 150 LP iterations, no MIP phase | **794.624549571966** | none claimed |
+| `lp150_then_mip1.yaml` | the same, then one MIP iteration | ~1080 | ~2170 |
+| `lp150_then_mip8.yaml` | the same, then eight | 1089.98 | 2030.86 |
+
+`lp_only_150.yaml` is **reproducible**: two independent executions gave
+`794.624549571966` with identical trajectories point by point across all 150 iterations. An
+LP has no branch and bound and never stops on the clock, so D26 does not apply to it. It is
+the only number in this README that is not a single draw.
+
+The other two print `NOT REPRODUCIBLE` — their master solves stop on a 102 s clock, and the
+same iteration under the same configuration gave 1088.07 in one run and 1080.36 in another.
+
+### The Phase 1 A/B (4 cells, 300 s each) — superseded
+
+Kept because the configs reproduce it and because the reason it misleads is worth seeing.
+Every cell here ran with the LP phase capped at 10 iterations, which samples the flattest
+point of a curve that only starts climbing around iteration 12.
 
 | config | anchor | LP phase | LB obtained | UB obtained |
 |---|---|---|---|---|
@@ -58,19 +102,24 @@ python -m mobauto2_benders --config configs/phase1/base_off.yaml run
 | `configs/phase1/both_on.yaml` | on | on | 0.350915 | 2016.11 |
 
 `configs/phase1/master_headroom.yaml` is the 900 s diagnostic that gives the master 102 s
-per solve to show the bound is not time-starved.
+per solve. Its conclusion — that the bound is not time-starved — held for the cut set it
+was run with, and does not carry over to the 150-cut master.
 
 ### Reading rules
 
-These conditions travel with any number lifted from the table above. They are not caveats
+These conditions travel with any number lifted from the tables above. They are not caveats
 added after the fact; each one exists because a number was once quoted without it.
 
-- **Every cell is one draw**, and every run prints `NOT REPRODUCIBLE` because master solves
-  stop on the clock rather than the gap. Differences smaller than ~15% in the LB are machine
-  noise, not an effect (D26). Your numbers will differ in the last digits and in the UB; the
-  LB stays in the 0.29–0.36 band.
-- **Each UB is real** — an exhibited feasible schedule. **No LB here is within a factor of
-  1000 of useful, so no optimality gap may be quoted from this table.**
+- **Anything from a run with a MIP phase is one draw**, and prints `NOT REPRODUCIBLE`
+  because master solves stop on the clock rather than the gap (D26). `lp_only_150.yaml` is
+  the exception and the only one: it is pure LP, so it reproduces exactly.
+- **Say which cut budget produced a number.** The single largest source of wrong
+  conclusions in this project was quoting a bound measured at 10–19 cuts as if it described
+  the method. 794.62 is a 150-cut number; 0.35 is a 14-cut number; they are not comparable
+  and neither supersedes the other without the budget stated.
+- **Each UB is real** — an exhibited feasible schedule. A Benders gap may now be quoted at
+  Q=3, but only from the MIP-phase runs, only as a single draw, and never from the Phase 1
+  table, whose LB is not within a factor of 1000 of useful.
 - **The LP phase claims no upper bound while it is active**: a fractional schedule cannot be
   exhibited. The UB for `lp_on` and `both_on` comes only from MIP-phase iterations.
 - **State `(p, W_max) = (50, 60)` and `concurrency_penalty = 0.25`** on any table derived
