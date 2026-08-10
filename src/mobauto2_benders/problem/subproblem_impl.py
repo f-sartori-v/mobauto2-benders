@@ -400,6 +400,41 @@ class ProblemSubproblem(Subproblem):
                 )
                 return None
 
+            # Weak duality, checked on the dual that was actually selected.
+            #
+            # This is the runtime half of MW verification 3. The offline half is
+            # the underestimation test in tests/test_solver_soundness.py, which
+            # runs on a fixture; nothing checked the property on a live run, and
+            # the tightness assertion cannot substitute for it because
+            # `const = ub_base - sum(dm*y_inc)` makes tightness at the incumbent
+            # an identity the code imposes rather than a fact about the dual.
+            #
+            # Every dual-feasible point satisfies dual_obj <= ub_base. The
+            # OptFace constraint pins it from below at ub_base - face_tol, so the
+            # selected dual must land in a band of width face_tol. Above the band
+            # means the dual LP does not represent the true dual of the primal --
+            # a wrong row, a wrong sign, a stale right-hand side -- and the cut
+            # built from it would OVERESTIMATE the recourse, which is exactly the
+            # cut that excludes the optimum. D30 was that defect and it went six
+            # months unseen; refusing here costs one expression evaluation.
+            try:
+                dual_obj_val = float(pyo.value(dual_obj_expr(md)))
+            except Exception as exc:
+                self._vprint(
+                    f"[MW FAIL] the dual objective is unreadable after load: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return None
+            if dual_obj_val > float(ub_base) + face_tol:
+                self._vprint(
+                    "[MW FAIL] weak duality violated by the selected dual: "
+                    f"dual_obj={dual_obj_val:.10g} > ub_base={float(ub_base):.10g} "
+                    f"(tol={face_tol:.3g}). A cut from this dual would overestimate "
+                    "the recourse. Refusing it; the caller falls back and marks the "
+                    "cut NOT a valid lower bound (D39)."
+                )
+                return None
+
             # A pi with no value is a variable the backend never sent to the solver:
             # it carries a zero objective coefficient and appears in no row, which
             # happens at any tau where the candidate schedules no trip in that

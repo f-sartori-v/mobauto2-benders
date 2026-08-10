@@ -126,6 +126,14 @@ class BranchAndCutSection:
     # question -- whether the tree can build its own root -- and the two must not
     # be confused for one another.
     seed_from_lp_phase: bool = True
+    # The control for the branch-and-cut measurement: same seeded master, same
+    # persistent solver, same budget, same options -- and no callback registered.
+    # It exists because the first comparison available (a 102 s loop solve at
+    # ~1080 against a 600 s tree at 1004.6) differed in TWO things at once, the
+    # callback and the clock, and a two-variable comparison decides nothing.
+    # Requires lazy_cuts and user_cuts off, so the file cannot claim to generate
+    # cuts and not generate them.
+    control_no_callback: bool = False
 
 
 @dataclass(slots=True)
@@ -869,6 +877,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "lazy_cuts",
             "user_cuts",
             "seed_from_lp_phase",
+            "control_no_callback",
         },
         "master.branch_and_cut",
     )
@@ -890,6 +899,10 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             bnc_raw.get("seed_from_lp_phase", True),
             "master.branch_and_cut.seed_from_lp_phase",
         ),
+        control_no_callback=_ensure_bool(
+            bnc_raw.get("control_no_callback", False),
+            "master.branch_and_cut.control_no_callback",
+        ),
     )
     backend_raw = str(master_raw.get("solver_backend", "cplex_direct")).lower()
     # The tree builds its own cplex_persistent solver from the same model, so
@@ -904,11 +917,19 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "reproduces run 2 exactly."
         )
     if bnc_section.enabled:
-        if not (bnc_section.lazy_cuts or bnc_section.user_cuts):
+        if bnc_section.control_no_callback:
+            if bnc_section.lazy_cuts or bnc_section.user_cuts:
+                raise ValueError(
+                    "master.branch_and_cut.control_no_callback is the no-callback "
+                    "control and requires lazy_cuts=false and user_cuts=false; "
+                    "otherwise the file names generators it will not register."
+                )
+        elif not (bnc_section.lazy_cuts or bnc_section.user_cuts):
             raise ValueError(
                 "master.branch_and_cut.enabled with neither lazy_cuts nor user_cuts "
-                "registers no callback: the run would pay the callback's presolve "
-                "restrictions and generate nothing."
+                "and control_no_callback=false registers no callback and generates "
+                "nothing. If a no-callback control is what you want, say so with "
+                "control_no_callback=true."
             )
         if bnc_section.user_cuts:
             raise ValueError(

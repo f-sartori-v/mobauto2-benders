@@ -1295,3 +1295,91 @@ lever is `per_iteration_mipgap`, not the ceiling (handout 5.2).
 best bound is individually a valid lower bound, so the maximum is valid too -- but it is the
 maximum of eight noisy draws, which makes it an optimistic estimate of what one run yields.
 Quote 1090 as the best observed, not as what the configuration produces.
+
+---
+
+## D46 — Branch-and-cut is measured, and the callback costs more than the teardown it saves
+
+Date: 2026-08-10. Supersedes the void 2026-02 removal that D44 scoped.
+
+D44 revived branch-and-cut on the grounds that its previous verdict was reached against the
+pre-D30 subproblem -- the one whose constraint set moved with `y`, so no cut was a valid
+lower bound -- and was therefore void. It is now measured on the post-D30 model, and it has
+a verdict of its own.
+
+**The design.** One CPLEX tree over the master seeded with run 2's 150 LP cuts, with Benders
+cuts injected at integer incumbents by a `LazyConstraintCallback` that solves the real
+subproblem inline. `configs/phase1/lp150_then_bnc.yaml`.
+
+**The contract that does not carry over from the loop.** A lazy cut cannot be un-added. D39
+is fail-closed at the level of the *reported bound*: an INVALID or UNKNOWN cut is added and
+the lower bound is dropped afterwards, which is sound only where the loop owns the bound. In
+a tree, a cut that excludes the true optimum prunes a subtree that is never revisited. So
+the rule inverts: only `VALID` may be injected, and INVALID, UNKNOWN **and NO_CUT** abort
+the solve. NO_CUT is the surprise -- benign in the loop, and in a callback the opposite,
+because returning without adding a cut is how you tell CPLEX the incumbent is acceptable.
+
+**The measurement.** Same seeded cut set, same persistent solver, same options, same stop
+criterion, same budget. One variable: whether a callback is registered
+(`branch_and_cut.control_no_callback`).
+
+| run | callback | LB | UB (priced) | tree time |
+|---|---|---:|---:|---:|
+| `lp150_then_control` | no | **1111.05** | 2351.86 | 410 s |
+| `lp150_then_bnc` | yes | 1004.22 | **1923.86** | 384 s |
+| `lp150_then_mip8` (the loop, 8 iterations) | — | 1089.98 | 2030.86 | ~800 s |
+
+Both branch-and-cut rows replicate: the control gave 1106.15 and 1111.05 on two draws, the
+callback tree 1004.62 and 1004.22. The ~9.6% LB deficit is an order of magnitude outside
+that spread, so it is a real effect and not a draw.
+
+**Finding 1 — the callback's cost is what ate the bound.** Registering a lazy callback makes
+CPLEX disable dual reductions, restrict presolve to crushing forms and stop repeat
+represolve. That is not a footnote; it is paid on the master's own search, and here it cost
+9.6% of lower bound. The first branch-and-cut run also received 600 s (see the budget defect
+below) and reached 1004.62, against 1004.22 in 384 s -- the extra 216 s bought nothing, so
+the callback tree saturates rather than being time-starved.
+
+**Finding 2 — the loop's teardown is real waste, and this is not how to recover it.** The
+no-callback control is one plain master solve over the 150 seeded cuts, and at 410 s it
+produces a better bound than eight loop iterations produce in ~800 s (1111.05 vs 1089.98).
+D45's reading that the binding constraint moved to the master solve is confirmed. But
+persistence bought through a lazy callback costs more than the teardown it avoids.
+
+**Finding 3 — the callback buys the upper bound, not the lower one.** Its incumbents are all
+priced by the subproblem, so CPLEX is steered toward schedules whose theta is honest: UB
+1923.86 against the control's 2351.86, an 18% improvement. Benders gaps: loop 46.3%,
+callback tree 47.8%, control 52.8%. Nothing here is competitive -- the monolith still solves
+this instance in 39 s.
+
+**What this closes.** User cuts at fractional nodes (D44 step 2) are **not** the next move.
+They add the same callback cost at far more nodes than the incumbent-only callback that
+already lost, so the mechanism whose price is now measured would be paid more often. The
+step is dropped, not deferred.
+
+**Two defects found by the measurement, both in code written for it.**
+
+1. *The tree received the whole run budget instead of what was left.* The driver passed
+   `solver.total_time_limit_s` unchanged, so the first run spent ~150 s seeding plus 600 s of
+   tree against a 600 s budget -- a 25% silent overshoot of the one number that says what a
+   run costs. It gave the callback tree *more* time than intended, so it does not rescue that
+   result.
+
+2. *The master objective was reported as an upper bound.* It is `first_stage + theta`, and
+   theta is bounded only by the cuts the master holds. With the callback this is defensible
+   -- an accepted incumbent is one whose cut is satisfied -- but in the no-callback control
+   nothing prices the incumbent, and the first control run reported an "upper bound" of
+   1288.86 that is a relaxation value and can sit *below* the true optimum. A 14% Benders gap
+   read off that pair would have been fiction. Both paths now price the returned schedule
+   once with the subproblem and claim an upper bound only from that. The callback run is a
+   check on the fix: its master objective and its priced UB agree to six digits (1923.86),
+   which is what the accepted-incumbent argument predicts.
+
+**What it points at next.** Not more time for the same master, and not user cuts. The best
+configuration measured here is the plain one -- seed with LP cuts, then one long master
+solve -- and the remaining lever on the bound is the formulation: the per-vehicle trip cap
+derived from the battery block (handout 5.6 A), which is a valid inequality in `y` alone and,
+unlike the recourse anchor D33 found inert at Q=3, does not go slack as Q grows.
+
+Every number in this entry prints `NOT REPRODUCIBLE` and is a single draw except where two
+draws are quoted. Only `lp_only_150.yaml` reproduces.

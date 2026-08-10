@@ -591,7 +591,7 @@ def _run_branch_and_cut(
     from dataclasses import replace
 
     bnc = cfg.master.branch_and_cut
-    if not bnc.lazy_cuts:
+    if not (bnc.lazy_cuts or bnc.control_no_callback):
         # Reachable only via user_cuts, which the schema refuses today. Left as a
         # raise rather than an `if` that quietly solves an ordinary master.
         raise NotImplementedError(
@@ -611,9 +611,14 @@ def _run_branch_and_cut(
             "tree. Raise solver.total_time_limit_s rather than reporting a tree "
             "that never ran."
         )
+    label = (
+        "CONTROL, no callback registered"
+        if bnc.control_no_callback
+        else "one tree, lazy cuts at incumbents"
+    )
     if emit_cli_output:
         print(
-            f"\n=== Branch-and-cut: one tree over {master.cuts_count()} seeded cuts, "
+            f"\n=== Branch-and-cut ({label}) over {master.cuts_count()} seeded cuts, "
             f"{remaining:.0f} s left of a {cfg.solver.total_time_limit_s} s budget ==="
         )
 
@@ -621,9 +626,44 @@ def _run_branch_and_cut(
         sub.evaluate,
         time_limit_s=remaining,
         mipgap=cfg.master.per_iteration_mipgap,
+        register_callback=not bnc.control_no_callback,
     )
 
+    # The master's own objective is NOT an upper bound, and reporting it as one
+    # was wrong. It is first_stage + theta, and theta is bounded only by the cuts
+    # the master holds. With the lazy callback the final incumbent has been
+    # priced -- an accepted incumbent is one whose cut is satisfied, so theta is
+    # at or above its true recourse -- but in the no-callback control nothing
+    # prices it, and the first control run duly reported an "upper bound" of
+    # 1288.86 that is a relaxation value and can sit BELOW the true optimum. A
+    # 14% gap read off that pair would have been fiction.
+    #
+    # So the schedule is priced here, once, for both paths. That is the same
+    # thing the loop does and the same thing that makes an upper bound mean
+    # something: an exhibited feasible schedule with its recourse evaluated.
+    upper_bound = None
+    priced_recourse = None
+    cand = bnc_result.candidate
+    if cand is not None:
+        sres = sub.evaluate(cand)
+        if sres.upper_bound is not None:
+            priced_recourse = float(sres.upper_bound)
+            upper_bound = float(master.first_stage_cost(cand)) + priced_recourse
+
     if emit_cli_output:
+        if upper_bound is None:
+            print(
+                "[BNC] no upper bound claimed: the tree returned no schedule the "
+                "subproblem could price."
+            )
+        else:
+            print(
+                f"[BNC] UB from the exhibited schedule: "
+                f"first_stage + recourse = {upper_bound:.6g} "
+                f"(recourse {priced_recourse:.6g}); "
+                f"master objective was {bnc_result.objective:.6g}, which is "
+                "first_stage + theta and is NOT an upper bound"
+            )
         print(
             f"[BNC] callback invocations={stats.invocations} "
             f"cuts_injected={stats.cuts_injected} "
@@ -632,7 +672,7 @@ def _run_branch_and_cut(
         )
         print(
             f"[BNC] status={bnc_result.status.value} "
-            f"LB={bnc_result.lower_bound} UB={bnc_result.objective}"
+            f"LB={bnc_result.lower_bound} UB={upper_bound}"
         )
         # There is no iteration count in a tree. Saying so is cheaper than having
         # a reader assume the number below came from one.
@@ -645,7 +685,8 @@ def _run_branch_and_cut(
         seed_result,
         status=bnc_result.status,
         best_lower_bound=bnc_result.lower_bound,
-        best_upper_bound=bnc_result.objective,
+        best_upper_bound=upper_bound,
+        subproblem_obj=priced_recourse,
         # The loop's iteration counter does not describe a tree. Reporting the
         # seeding phase's count here would read as "N Benders iterations", which
         # is not what produced these bounds.

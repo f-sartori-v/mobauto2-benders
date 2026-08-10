@@ -2533,6 +2533,7 @@ class ProblemMaster(MasterProblem):
         *,
         time_limit_s: float | None = None,
         mipgap: float | None = None,
+        register_callback: bool = True,
     ) -> tuple[SolveResult, Any]:
         """Solve the master once, with Benders cuts injected inside the tree (D44).
 
@@ -2573,16 +2574,24 @@ class ProblemMaster(MasterProblem):
             solver.options[_cplex_direct_option_name(k)] = v
 
         stats = LazyCutStats()
-        raise_if_aborted = register_lazy_callback(
-            solver,
-            m,
-            cut_source,
-            stats,
-            shuttles=len(m.Q),
-            slots=len(m.T),
-            eps_violation=float(self._p("eps_cut", 1e-8)),
-            vprint=self._vprint,
-        )
+        if register_callback:
+            raise_if_aborted = register_lazy_callback(
+                solver,
+                m,
+                cut_source,
+                stats,
+                shuttles=len(m.Q),
+                slots=len(m.T),
+                eps_violation=float(self._p("eps_cut", 1e-8)),
+                vprint=self._vprint,
+            )
+        else:
+            # The control. Same solver, same options, same budget, same seeded
+            # cut set -- one variable changed. Registering nothing is also what
+            # keeps CPLEX's dual reductions and full presolve enabled, which is
+            # precisely the cost being measured.
+            def raise_if_aborted() -> None:
+                return None
 
         tee_flag = bool(self._p("solver_tee", self._p("mp_solve_tee", False)))
         res = solver.solve(tee=tee_flag, load_solutions=True)
