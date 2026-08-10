@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from _helpers import CONFIGS, load_cfg
+from _helpers import CONFIGS, DEFAULT_CONFIG, load_cfg
 
 
 class TestConfigSchema(unittest.TestCase):
@@ -224,7 +224,7 @@ class TestMultiScenarioBoundSemantics(unittest.TestCase):
         import yaml, tempfile, os
         from mobauto2_benders.config import load_config
 
-        raw = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))
+        raw = yaml.safe_load((CONFIGS / DEFAULT_CONFIG).read_text(encoding="utf-8"))
         raw["subproblem"]["multi_cuts_by_scenario"] = multi_cuts
         raw["master"]["theta_per_scenario"] = theta_per_scenario
         if not scenarios:
