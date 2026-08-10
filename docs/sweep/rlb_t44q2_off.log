@@ -1,0 +1,305 @@
+Run configuration:
+  solver: iterations=8 tol=1e-09 total_time_limit_s=3600 seed=42
+  master: solver=cplex Q=2 T_minutes=660 slot_res=15 (slots=44) trip_dur_min=30 Emax=150.0 L=30.0 eps=0.01 conc_pen=0.25 delta_chg=17.5
+  subproblem: solver=cplex_direct S=15.0 Wmax=60 p=50.0 fill_eps=1e-06 (slot_res=15)
+  demand_file: setups/base.yaml
+Initialized master problem.
+[MW] enabled=True alpha=0.3 eps=0.001
+
+=== Iteration 1 ===
+Solving Master (MP)...
+[SCHEDULE] master gap-tied: time_limit_s=102 mipgap=0.05 g_bd=0.05
+MP raw solver: status=ok term=optimal incumbent=0.0 best_bound=0.0
+MP solutions: count=1 keys=['Gap', 'Status', 'Message', 'Problem', 'Objective', 'Variable', 'Constraint']
+Shuttle totals (OUT+RET): q0=0, q1=0
+MP stats (solver): nodes=0 best_bound=0.0 incumbent=0.0 gap=0.0
+2026-08-06 15:18:37,558 INFO | mobauto2_benders.benders.solver | iter=1 master status=SolveStatus.OPTIMAL obj=0 lb=0
+MP result: status=SolveStatus.OPTIMAL obj=0 lb=0
+[CHECK] MP: first=0 theta=0 mp_total=0 inc_obj=0 best_bound=0
+[CHECK] MP bounds: mp_obj=0 mp_best_bound=0 mp_best_integer=0 term=optimal status=ok gap=0
+[MP] iter=1 incumbent=0 best_bound=0 gap=0 (src: inc=cplex_api bb=cplex_api gap=cplex_api)
+[MP] iter=1 cuts=0 obj=0.000
+[MW] core updated (t=0..): min=0.7 max=0.7 mean=0.7
+Evaluating Subproblem (SP) at candidate...
+SP result: recourse=15000 feasible=True
+[SP PIPELINE] iter=1 build=0.000s solve=0.000s extract=0.000s post=0.000s cutgen=0.027s mode=mw lb_valid=True tl_inc=False vars=- bin=- cons=- lp=-
+[CHECK] SP: recourse=15000 first=0 sp_total=15000
+[CUT TIGHTNESS] raw_line(y)=15000  SP_ub=15000  diff=0
+[BENDERS] Added cut #0: const_out=7500, const_ret=7500, nnz=84, slope_range=[-735,-690], raw_pos_dm=0, scale=1
+[BENDERS] Eval cut (dir): OUT lhs=0 rhs=7500; RET lhs=0 rhs=7500
+2026-08-06 15:18:37,652 INFO | mobauto2_benders.benders.solver | force-added CutType.OPTIMALITY cut 'opt_cut'
+2026-08-06 15:18:37,652 INFO | mobauto2_benders.benders.solver | added 1 cut(s)
+Master updated: added 1 cut(s): opt_cut
+[CUT SUMMARY] it=1 cand=candidate:idle decision=added skip=None theta_total=0.0 rec_total=15000.0 raw_rhs_total=15000.0 rhs_total=15000.0 lhs_total=0.0
+Timing: master=0.083s sp_solve=0.025s cutgen=0.027s cutadd=0.001s cuts_added=1 total_cuts=1
+MP stats: nodes=0 best_bound=0.0 incumbent=0.0 gap=0.0
+2026-08-06 15:18:37,652 INFO | mobauto2_benders.benders.solver | bounds: best_lb=0 best_ub=15000 gap=15000 rel=1
+[CHECK] GAP: LB=0 UB=15000 gap=15000 rel=1
+
+=== Iteration 2 ===
+Solving Master (MP)...
+[SCHEDULE] master gap-tied: time_limit_s=102 mipgap=0.05 g_bd=1
+[MIPSTART] x-only start applied: n_out=88 n_ret=88
+Warning:  No solution found from 1 MIP starts.
+MP raw solver: status=ok term=optimal incumbent=0.22000000000000003 best_bound=0.22000000000000003
+MP solutions: count=1 keys=['Gap', 'Status', 'Message', 'Problem', 'Objective', 'Variable', 'Constraint']
+Shuttle totals (OUT+RET): q0=12, q1=10
+MP stats (solver): nodes=51 best_bound=0.22000000000000003 incumbent=0.22000000000000003 gap=0.0
+2026-08-06 15:18:38,099 INFO | mobauto2_benders.benders.solver | iter=2 master status=SolveStatus.OPTIMAL obj=0.22 lb=0.22
+MP result: status=SolveStatus.OPTIMAL obj=0.22 lb=0.22
+[CHECK] MP: first=0.22 theta=0 mp_total=0.22 inc_obj=0.22 best_bound=0.22
+[CHECK] MP bounds: mp_obj=0.22 mp_best_bound=0.22 mp_best_integer=0.22 term=optimal status=ok gap=0
+[MP] iter=2 incumbent=0.22 best_bound=0.22 gap=0 (src: inc=cplex_api bb=cplex_api gap=cplex_api)
+[MP] iter=2 cuts=1 obj=0.220 last_const=15000.000 last_nnz=84
+[MW] core updated (t=0..): min=0.49 max=0.79 mean=0.565
+Evaluating Subproblem (SP) at candidate...
+SP result: recourse=7170 feasible=True
+[SP PIPELINE] iter=2 build=0.000s solve=0.000s extract=0.000s post=0.000s cutgen=0.045s mode=mw lb_valid=True tl_inc=False vars=- bin=- cons=- lp=-
+[CHECK] SP: recourse=7170 first=0.22 sp_total=7170.22
+[CUT TIGHTNESS] raw_line(y)=7170  SP_ub=7170  diff=0
+[BENDERS] Added cut #1: const_out=4665, const_ret=4755, nnz=62, slope_range=[-735,-15], raw_pos_dm=0, scale=1
+[BENDERS] Eval cut (dir): OUT lhs=-0 rhs=3900; RET lhs=0 rhs=3270
+2026-08-06 15:18:38,249 INFO | mobauto2_benders.benders.solver | force-added CutType.OPTIMALITY cut 'opt_cut'
+2026-08-06 15:18:38,249 INFO | mobauto2_benders.benders.solver | added 1 cut(s)
+Master updated: added 1 cut(s): opt_cut
+[CUT SUMMARY] it=2 cand=OUT[0,1]|RET[0,3]|OUT[0,7]|RET[0,9]|OUT[0,15]|RET[0,17]|OUT[0,19]|RET[0,21]|OUT[0,29]|RET[0,32]|OUT[0,38]|RET[0,40]|...(+10) decision=added skip=None theta_total=0.0 rec_total=7170.0 raw_rhs_total=7170.0 rhs_total=7170.0 lhs_total=0.0
+Timing: master=0.446s sp_solve=0.040s cutgen=0.045s cutadd=0.002s cuts_added=1 total_cuts=2
+MP stats: nodes=51 best_bound=0.22000000000000003 incumbent=0.22000000000000003 gap=0.0
+2026-08-06 15:18:38,249 INFO | mobauto2_benders.benders.solver | bounds: best_lb=0.22 best_ub=7170.22 gap=7170 rel=1
+[CHECK] GAP: LB=0.22 UB=7170.22 gap=7170 rel=1
+
+=== Iteration 3 ===
+Solving Master (MP)...
+[SCHEDULE] master gap-tied: time_limit_s=102 mipgap=0.05 g_bd=1
+[MIPSTART] x-only start applied: n_out=88 n_ret=88
+Warning:  No solution found from 1 MIP starts.
+MP raw solver: status=ok term=optimal incumbent=0.22 best_bound=0.22000000000000003
+MP solutions: count=1 keys=['Gap', 'Status', 'Message', 'Problem', 'Objective', 'Variable', 'Constraint']
+Shuttle totals (OUT+RET): q0=12, q1=10
+MP stats (solver): nodes=0 best_bound=0.22000000000000003 incumbent=0.22 gap=0.0
+2026-08-06 15:18:38,607 INFO | mobauto2_benders.benders.solver | iter=3 master status=SolveStatus.OPTIMAL obj=0.22 lb=0.22
+MP result: status=SolveStatus.OPTIMAL obj=0.22 lb=0.22
+[CHECK] MP: first=0.22 theta=0 mp_total=0.22 inc_obj=0.22 best_bound=0.22
+[CHECK] MP bounds: mp_obj=0.22 mp_best_bound=0.22 mp_best_integer=0.22 term=optimal status=ok gap=0
+[MP] iter=3 incumbent=0.22 best_bound=0.22 gap=0 (src: inc=cplex_api bb=cplex_api gap=cplex_api)
+[MP] iter=3 cuts=2 obj=0.220 last_const=9420.000 last_nnz=62
+[MW] core updated (t=0..): min=0.343 max=0.853 mean=0.47
+Evaluating Subproblem (SP) at candidate...
+SP result: recourse=6588 feasible=True
+[SP PIPELINE] iter=3 build=0.000s solve=0.000s extract=0.000s post=0.000s cutgen=0.041s mode=mw lb_valid=True tl_inc=False vars=- bin=- cons=- lp=-
+[CHECK] SP: recourse=6588 first=0.22 sp_total=6588.22
+[CUT TIGHTNESS] raw_line(y)=6588  SP_ub=6588  diff=0
+[BENDERS] Added cut #2: const_out=6064, const_ret=4094, nnz=62, slope_range=[-735,-15], raw_pos_dm=0, scale=1
+[BENDERS] Eval cut (dir): OUT lhs=0 rhs=3214; RET lhs=0 rhs=3374
+2026-08-06 15:18:38,747 INFO | mobauto2_benders.benders.solver | force-added CutType.OPTIMALITY cut 'opt_cut'
+2026-08-06 15:18:38,747 INFO | mobauto2_benders.benders.solver | added 1 cut(s)
+Master updated: added 1 cut(s): opt_cut
+[CUT SUMMARY] it=3 cand=OUT[0,4]|RET[0,6]|OUT[0,9]|RET[0,11]|OUT[0,20]|RET[0,22]|OUT[0,24]|RET[0,26]|OUT[0,30]|RET[0,32]|OUT[0,38]|RET[0,40]|...(+10) decision=added skip=None theta_total=0.0 rec_total=6588.0 raw_rhs_total=6588.0 rhs_total=6588.0 lhs_total=0.0
+Timing: master=0.358s sp_solve=0.041s cutgen=0.041s cutadd=0.002s cuts_added=1 total_cuts=3
+MP stats: nodes=0 best_bound=0.22000000000000003 incumbent=0.22 gap=0.0
+2026-08-06 15:18:38,747 INFO | mobauto2_benders.benders.solver | bounds: best_lb=0.22 best_ub=6588.22 gap=6588 rel=1
+[CHECK] GAP: LB=0.22 UB=6588.22 gap=6588 rel=1
+
+=== Iteration 4 ===
+Solving Master (MP)...
+[SCHEDULE] master gap-tied: time_limit_s=102 mipgap=0.05 g_bd=1
+[MIPSTART] x-only start applied: n_out=88 n_ret=88
+Warning:  No solution found from 1 MIP starts.
+MP raw solver: status=ok term=optimal incumbent=0.22 best_bound=0.22
+MP solutions: count=1 keys=['Gap', 'Status', 'Message', 'Problem', 'Objective', 'Variable', 'Constraint']
+Shuttle totals (OUT+RET): q0=12, q1=10
+MP stats (solver): nodes=0 best_bound=0.22 incumbent=0.22 gap=0.0
+2026-08-06 15:18:39,147 INFO | mobauto2_benders.benders.solver | iter=4 master status=SolveStatus.OPTIMAL obj=0.22 lb=0.22
+MP result: status=SolveStatus.OPTIMAL obj=0.22 lb=0.22
+[CHECK] MP: first=0.22 theta=0 mp_total=0.22 inc_obj=0.22 best_bound=0.22
+[CHECK] MP bounds: mp_obj=0.22 mp_best_bound=0.22 mp_best_integer=0.22 term=optimal status=ok gap=0
+[MP] iter=4 incumbent=0.22 best_bound=0.22 gap=0 (src: inc=cplex_api bb=cplex_api gap=cplex_api)
+[MP] iter=4 cuts=3 obj=0.220 last_const=10158.000 last_nnz=62
+[MW] core updated (t=0..): min=0.24 max=0.75 mean=0.404
+Evaluating Subproblem (SP) at candidate...
+SP result: recourse=5938 feasible=True
+[SP PIPELINE] iter=4 build=0.000s solve=0.000s extract=0.000s post=0.000s cutgen=0.040s mode=mw lb_valid=True tl_inc=False vars=- bin=- cons=- lp=-
+[CHECK] SP: recourse=5938 first=0.22 sp_total=5938.22
+[CUT TIGHTNESS] raw_line(y)=5938  SP_ub=5938  diff=0
+[BENDERS] Added cut #3: const_out=4742, const_ret=4946, nnz=63, slope_range=[-735,-15], raw_pos_dm=0, scale=1
+[BENDERS] Eval cut (dir): OUT lhs=0 rhs=3182; RET lhs=0 rhs=2756
+2026-08-06 15:18:39,297 INFO | mobauto2_benders.benders.solver | force-added CutType.OPTIMALITY cut 'opt_cut'
+2026-08-06 15:18:39,297 INFO | mobauto2_benders.benders.solver | added 1 cut(s)
+Master updated: added 1 cut(s): opt_cut
+[CUT SUMMARY] it=4 cand=OUT[0,1]|RET[0,3]|OUT[0,6]|RET[0,8]|OUT[0,12]|RET[0,14]|OUT[0,25]|RET[0,28]|OUT[0,34]|RET[0,37]|OUT[0,39]|RET[0,41]|...(+10) decision=added skip=None theta_total=0.0 rec_total=5938.0 raw_rhs_total=5938.0 rhs_total=5938.0 lhs_total=0.0
+Timing: master=0.401s sp_solve=0.035s cutgen=0.040s cutadd=0.002s cuts_added=1 total_cuts=4
+MP stats: nodes=0 best_bound=0.22 incumbent=0.22 gap=0.0
+2026-08-06 15:18:39,298 INFO | mobauto2_benders.benders.solver | bounds: best_lb=0.22 best_ub=5938.22 gap=5938 rel=1
+[CHECK] GAP: LB=0.22 UB=5938.22 gap=5938 rel=1
+
+=== Iteration 5 ===
+Solving Master (MP)...
+[SCHEDULE] master gap-tied: time_limit_s=102 mipgap=0.05 g_bd=1
+[MIPSTART] x-only start applied: n_out=88 n_ret=88
+Warning:  No solution found from 1 MIP starts.
+MP raw solver: status=ok term=optimal incumbent=0.24000000000000002 best_bound=0.22801891807878819
+MP solutions: count=1 keys=['Gap', 'Status', 'Message', 'Problem', 'Objective', 'Variable', 'Constraint']
+Shuttle totals (OUT+RET): q0=12, q1=12
+MP stats (solver): nodes=12133 best_bound=0.22801891807878819 incumbent=0.24000000000000002 gap=0.04992117465091548
+2026-08-06 15:19:43,817 INFO | mobauto2_benders.benders.solver | iter=5 master status=SolveStatus.FEASIBLE obj=0.24 lb=0.228019
+MP result: status=SolveStatus.FEASIBLE obj=0.24 lb=0.228019
+[CHECK] MP: first=0.24 theta=0 mp_total=0.24 inc_obj=0.24 best_bound=0.228019
+[CHECK] MP bounds: mp_obj=0.24 mp_best_bound=0.228019 mp_best_integer=0.24 term=optimal status=ok gap=0.0499212
+[MP] iter=5 incumbent=0.24 best_bound=0.228019 gap=0.0499212 (src: inc=cplex_api bb=cplex_api gap=cplex_api)
+[MP] iter=5 cuts=4 obj=0.240 last_const=9688.000 last_nnz=63
+[MW] core updated (t=0..): min=0.168 max=0.781 mean=0.365
+Evaluating Subproblem (SP) at candidate...
+SP result: recourse=4631 feasible=True
+[SP PIPELINE] iter=5 build=0.000s solve=0.000s extract=0.000s post=0.000s cutgen=0.028s mode=mw lb_valid=True tl_inc=False vars=- bin=- cons=- lp=-
+[CHECK] SP: recourse=4631 first=0.24 sp_total=4631.24
+[CUT TIGHTNESS] raw_line(y)=4631  SP_ub=4631  diff=0
+[BENDERS] Added cut #4: const_out=6100, const_ret=5521, nnz=62, slope_range=[-735,-15], raw_pos_dm=0, scale=1
+[BENDERS] Eval cut (dir): OUT lhs=0 rhs=2575; RET lhs=0 rhs=2056
+2026-08-06 15:19:43,947 INFO | mobauto2_benders.benders.solver | force-added CutType.OPTIMALITY cut 'opt_cut'
+2026-08-06 15:19:43,947 INFO | mobauto2_benders.benders.solver | added 1 cut(s)
+Master updated: added 1 cut(s): opt_cut
+[CUT SUMMARY] it=5 cand=OUT[0,3]|RET[0,5]|OUT[0,9]|RET[0,11]|OUT[0,15]|RET[0,19]|OUT[0,25]|RET[0,29]|OUT[0,35]|RET[0,37]|OUT[0,39]|RET[0,41]|...(+12) decision=added skip=None theta_total=0.0 rec_total=4631.0 raw_rhs_total=4631.0 rhs_total=4631.0 lhs_total=0.0
+Timing: master=64.519s sp_solve=0.030s cutgen=0.028s cutadd=0.002s cuts_added=1 total_cuts=5
+MP stats: nodes=12133 best_bound=0.22801891807878819 incumbent=0.24000000000000002 gap=0.04992117465091548
+2026-08-06 15:19:43,947 INFO | mobauto2_benders.benders.solver | bounds: best_lb=0.228019 best_ub=4631.24 gap=4631.01 rel=1
+[CHECK] GAP: LB=0.228019 UB=4631.24 gap=4631.01 rel=1
+
+=== Iteration 6 ===
+Solving Master (MP)...
+[SCHEDULE] master gap-tied: time_limit_s=102 mipgap=0.05 g_bd=1
+[MIPSTART] x-only start applied: n_out=88 n_ret=88
+Warning:  No solution found from 1 MIP starts.
+2026-08-06 15:21:26,073 WARNING | pyomo.core | Loading a SolverResults object with an 'aborted' status, but containing a solution
+2026-08-06 15:21:26,078 WARNING | pyomo.core | Loading a SolverResults object with an 'aborted' status, but containing a solution
+MP raw solver: status=aborted term=maxTimeLimit incumbent=1096.7399999999998 best_bound=87.92072393727342
+MP solutions: count=1 keys=['Gap', 'Status', 'Message', 'Problem', 'Objective', 'Variable', 'Constraint']
+Shuttle totals (OUT+RET): q0=12, q1=12
+MP stats (solver): nodes=25140 best_bound=87.92072393727342 incumbent=1096.7399999999998 gap=0.9198344877205487
+2026-08-06 15:21:26,081 INFO | mobauto2_benders.benders.solver | iter=6 master status=SolveStatus.FEASIBLE obj=1096.74 lb=87.9207
+MP result: status=SolveStatus.FEASIBLE obj=1096.74 lb=87.9207
+[CHECK] MP: first=0.74 theta=1096 mp_total=1096.74 inc_obj=1096.74 best_bound=87.9207
+[CHECK] MP bounds: mp_obj=1096.74 mp_best_bound=87.9207 mp_best_integer=1096.74 term=maxTimeLimit status=aborted gap=0.919834
+[MP] iter=6 incumbent=1096.74 best_bound=87.9207 gap=0.919834 (src: inc=cplex_api bb=cplex_api gap=cplex_api)
+[MP] iter=6 cuts=5 obj=1096.740 last_const=11621.000 last_nnz=62
+[MW] core updated (t=0..): min=0.118 max=1.07 mean=0.337
+Evaluating Subproblem (SP) at candidate...
+SP result: recourse=5274 feasible=True
+[SP PIPELINE] iter=6 build=0.000s solve=0.000s extract=0.000s post=0.000s cutgen=0.061s mode=mw lb_valid=True tl_inc=False vars=- bin=- cons=- lp=-
+[CHECK] SP: recourse=5274 first=0.74 sp_total=5274.74
+[CUT TIGHTNESS] raw_line(y)=5274  SP_ub=5274  diff=-1.82e-12
+[BENDERS] Added cut #5: const_out=5702, const_ret=7282, nnz=59, slope_range=[-1.38e+03,-15], raw_pos_dm=0, scale=1
+[BENDERS] Eval cut (dir): OUT lhs=0 rhs=2897; RET lhs=1096 rhs=2377
+2026-08-06 15:21:26,299 INFO | mobauto2_benders.benders.solver | force-added CutType.OPTIMALITY cut 'opt_cut'
+2026-08-06 15:21:26,300 INFO | mobauto2_benders.benders.solver | added 1 cut(s)
+Master updated: added 1 cut(s): opt_cut
+[CUT SUMMARY] it=6 cand=OUT[0,1]|RET[0,3]|OUT[0,5]|RET[0,7]|OUT[0,11]|RET[0,13]|OUT[0,20]|RET[0,24]|OUT[0,28]|RET[0,33]|OUT[0,39]|RET[0,41]|...(+12) decision=added skip=None theta_total=1096.0 rec_total=5274.000015 raw_rhs_total=5274.000014999999 rhs_total=5274.0000150000005 lhs_total=1096.0
+Timing: master=102.133s sp_solve=0.060s cutgen=0.061s cutadd=0.003s cuts_added=1 total_cuts=6
+MP stats: nodes=25140 best_bound=87.92072393727342 incumbent=1096.7399999999998 gap=0.9198344877205487
+2026-08-06 15:21:26,300 INFO | mobauto2_benders.benders.solver | bounds: best_lb=87.9207 best_ub=4631.24 gap=4543.32 rel=0.981
+[CHECK] GAP: LB=87.9207 UB=4631.24 gap=4543.32 rel=0.981
+
+=== Iteration 7 ===
+Solving Master (MP)...
+[SCHEDULE] master gap-tied: time_limit_s=102 mipgap=0.05 g_bd=0.981
+[MIPSTART] x-only start applied: n_out=88 n_ret=88
+Warning:  No solution found from 1 MIP starts.
+2026-08-06 15:23:08,525 WARNING | pyomo.core | Loading a SolverResults object with an 'aborted' status, but containing a solution
+2026-08-06 15:23:08,530 WARNING | pyomo.core | Loading a SolverResults object with an 'aborted' status, but containing a solution
+MP raw solver: status=aborted term=maxTimeLimit incumbent=1310.74 best_bound=465.3728988658345
+MP solutions: count=1 keys=['Gap', 'Status', 'Message', 'Problem', 'Objective', 'Variable', 'Constraint']
+Shuttle totals (OUT+RET): q0=12, q1=12
+MP stats (solver): nodes=23614 best_bound=465.3728988658345 incumbent=1310.74 gap=0.6449540726109686
+2026-08-06 15:23:08,534 INFO | mobauto2_benders.benders.solver | iter=7 master status=SolveStatus.FEASIBLE obj=1310.74 lb=465.373
+MP result: status=SolveStatus.FEASIBLE obj=1310.74 lb=465.373
+[CHECK] MP: first=0.74 theta=1310 mp_total=1310.74 inc_obj=1310.74 best_bound=465.373
+[CHECK] MP bounds: mp_obj=1310.74 mp_best_bound=465.373 mp_best_integer=1310.74 term=maxTimeLimit status=aborted gap=0.644954
+[MP] iter=7 incumbent=1310.74 best_bound=465.373 gap=0.644954 (src: inc=cplex_api bb=cplex_api gap=cplex_api)
+[MP] iter=7 cuts=6 obj=1310.740 last_const=12984.000 last_nnz=59
+[MW] core updated (t=0..): min=0.0824 max=1.35 mean=0.318
+Evaluating Subproblem (SP) at candidate...
+SP result: recourse=5462 feasible=True
+[SP PIPELINE] iter=7 build=0.000s solve=0.000s extract=0.000s post=0.000s cutgen=0.116s mode=mw lb_valid=True tl_inc=False vars=- bin=- cons=- lp=-
+[CHECK] SP: recourse=5462 first=0.74 sp_total=5462.74
+[CUT TIGHTNESS] raw_line(y)=5462  SP_ub=5462  diff=-1.82e-12
+[BENDERS] Added cut #6: const_out=5590, const_ret=6892, nnz=66, slope_range=[-1.38e+03,-15], raw_pos_dm=0, scale=1
+[BENDERS] Eval cut (dir): OUT lhs=94 rhs=2770; RET lhs=1216 rhs=2692
+2026-08-06 15:23:08,827 INFO | mobauto2_benders.benders.solver | force-added CutType.OPTIMALITY cut 'opt_cut'
+2026-08-06 15:23:08,827 INFO | mobauto2_benders.benders.solver | added 1 cut(s)
+Master updated: added 1 cut(s): opt_cut
+[CUT SUMMARY] it=7 cand=OUT[0,1]|RET[0,3]|OUT[0,5]|RET[0,7]|OUT[0,11]|RET[0,13]|OUT[0,21]|RET[0,24]|OUT[0,27]|RET[0,30]|OUT[0,39]|RET[0,41]|...(+12) decision=added skip=None theta_total=1310.0000000000002 rec_total=5462.000015 raw_rhs_total=5462.000014999999 rhs_total=5462.0000150000005 lhs_total=1310.0000000000002
+Timing: master=102.234s sp_solve=0.061s cutgen=0.116s cutadd=0.003s cuts_added=1 total_cuts=7
+MP stats: nodes=23614 best_bound=465.3728988658345 incumbent=1310.74 gap=0.6449540726109686
+2026-08-06 15:23:08,827 INFO | mobauto2_benders.benders.solver | bounds: best_lb=465.373 best_ub=4631.24 gap=4165.87 rel=0.9
+[CHECK] GAP: LB=465.373 UB=4631.24 gap=4165.87 rel=0.9
+
+=== Iteration 8 ===
+Solving Master (MP)...
+[SCHEDULE] master gap-tied: time_limit_s=102 mipgap=0.05 g_bd=0.9
+[MIPSTART] x-only start applied: n_out=88 n_ret=88
+2026-08-06 15:24:51,074 WARNING | pyomo.core | Loading a SolverResults object with an 'aborted' status, but containing a solution
+2026-08-06 15:24:51,079 WARNING | pyomo.core | Loading a SolverResults object with an 'aborted' status, but containing a solution
+MP raw solver: status=aborted term=maxTimeLimit incumbent=1332.9899999810686 best_bound=451.24925094029237
+MP solutions: count=1 keys=['Gap', 'Status', 'Message', 'Problem', 'Objective', 'Variable', 'Constraint']
+Shuttle totals (OUT+RET): q0=12, q1=12
+MP stats (solver): nodes=21187 best_bound=451.24925094029237 incumbent=1332.9899999810686 gap=0.6614758918320713
+2026-08-06 15:24:51,083 INFO | mobauto2_benders.benders.solver | iter=8 master status=SolveStatus.FEASIBLE obj=1332.99 lb=451.249
+MP result: status=SolveStatus.FEASIBLE obj=1332.99 lb=451.249
+[CHECK] MP: first=1.99 theta=1331 mp_total=1332.99 inc_obj=1332.99 best_bound=451.249
+[CHECK] MP bounds: mp_obj=1332.99 mp_best_bound=451.249 mp_best_integer=1332.99 term=maxTimeLimit status=aborted gap=0.661476
+[MP] iter=8 incumbent=1332.99 best_bound=451.249 gap=0.661476 (src: inc=cplex_api bb=cplex_api gap=cplex_api)
+[MP] iter=8 cuts=7 obj=1332.990 last_const=12482.000 last_nnz=66
+[MW] core updated (t=0..): min=0.0576 max=1.55 mean=0.304
+Evaluating Subproblem (SP) at candidate...
+SP result: recourse=6554 feasible=True
+[SP PIPELINE] iter=8 build=0.000s solve=0.000s extract=0.000s post=0.000s cutgen=0.144s mode=mw lb_valid=True tl_inc=False vars=- bin=- cons=- lp=-
+[CHECK] SP: recourse=6554 first=1.99 sp_total=6555.99
+[CUT TIGHTNESS] raw_line(y)=6554  SP_ub=6554  diff=9.09e-13
+[BENDERS] Added cut #7: const_out=9203, const_ret=7116, nnz=66, slope_range=[-1.41e+03,-15], raw_pos_dm=0, scale=1
+[BENDERS] Eval cut (dir): OUT lhs=280 rhs=3623; RET lhs=1051 rhs=2931
+2026-08-06 15:24:51,486 INFO | mobauto2_benders.benders.solver | force-added CutType.OPTIMALITY cut 'opt_cut'
+2026-08-06 15:24:51,486 INFO | mobauto2_benders.benders.solver | added 1 cut(s)
+Master updated: added 1 cut(s): opt_cut
+[CUT SUMMARY] it=8 cand=OUT[0,4]|RET[0,6]|OUT[0,9]|RET[0,12]|OUT[0,17]|RET[0,20]|OUT[0,27]|RET[0,30]|OUT[0,33]|RET[0,35]|OUT[0,39]|RET[0,41]|...(+12) decision=added skip=None theta_total=1330.999999981068 rec_total=6554.000045 raw_rhs_total=6554.000044946859 rhs_total=6554.000044946856 lhs_total=1330.999999981068
+Timing: master=102.255s sp_solve=0.107s cutgen=0.144s cutadd=0.005s cuts_added=1 total_cuts=8
+MP stats: nodes=21187 best_bound=451.24925094029237 incumbent=1332.9899999810686 gap=0.6614758918320713
+2026-08-06 15:24:51,486 INFO | mobauto2_benders.benders.solver | bounds: best_lb=465.373 best_ub=4631.24 gap=4165.87 rel=0.9
+[CHECK] GAP: LB=465.373 UB=4631.24 gap=4165.87 rel=0.9
+2026-08-06 15:24:51,487 WARNING | mobauto2_benders.benders.solver | Max iterations reached: 8
+
+Max iterations reached: 8
+Total solve time: 374.087 seconds
+Best bounds: LB=465.373 UB=4631.24 gap=4165.87 rel=0.9
+
+Best Master Solution:
+Q=2 T=44
+theta = 0
+  - theta_out = 0
+  - theta_ret = 0
+Timeline (per shuttle):
+           0     1     2     3     4     5     6     7     8     9    10    11    12    13    14    15    16    17    18    19    20    21    22    23    24    25    26    27    28    29    30    31    32    33    34    35    36    37    38    39    40    41    42    43
+  q=0:   IDL   IDL   IDL   OUT   INT   RET   INT   CHR   CHR   OUT   INT   RET   INT   CHR   CHR   OUT   INT   IDL   IDL   RET   INT   CHR   CHR   CHR   CHR   OUT   INT   IDL   IDL   RET   INT   CHR   CHR   CHR   CHR   OUT   INT   RET   INT   OUT   INT   RET   INT   IDL
+  q=1:   IDL   IDL   OUT   INT   RET   INT   OUT   INT   RET   INT   CHR   CHR   OUT   INT   IDL   RET   INT   CHR   CHR   CHR   CHR   OUT   INT   RET   INT   CHR   CHR   CHR   CHR   CHR   CHR   CHR   OUT   INT   RET   INT   CHR   OUT   INT   IDL   RET   INT   IDL   IDL
+Battery (per shuttle):
+           0     1     2     3     4     5     6     7     8     9    10    11    12    13    14    15    16    17    18    19    20    21    22    23    24    25    26    27    28    29    30    31    32    33    34    35    36    37    38    39    40    41    42    43
+  q=0:   150   150   150   150   150   120   120    90    90   107    77    77    77    47    47    65    82   100    70    70    70    40    40    57    75    92   110   127    97    97    97    67    67    85    55    55    25    25    42    60    30    30     0     0
+  q=1:   150   150   150   150   150   120   120    90    90   107    77    77    77    47    47    65    82    52    52    52    52    22    22    40    57    75    92    62    62    32    33    50    68    85   103    73    73    43    43    60    30    30     0     0
+
+Demand per slot (OUT/RET):
+         0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22  23  24  25  26  27  28  29  30  31  32  33  34  35  36  37  38  39  40  41  42  43
+  OUT:   7  12  13   9  12  17  16   6   7  10   5   3   2   2   2   2   2   0   1   3   4   1   2   1   0   1   3   1   1   0   0   2   0   0   1   0   0   0   2   0   0   0   0   0
+  RET:   1   2   1   0   1   1   0   0   0   0   2   2   2   1   3   4   1   3   2   2   5   3   3   9   1   7   3   4   4   2   2   5  10   9   6   9  10  14   9   7   0   0   0   0
+
+Pax per shuttle and slot (total):
+         0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22  23  24  25  26  27  28  29  30  31  32  33  34  35  36  37  38  39  40  41  42  43
+  q=0:   0   0   0  15   0   1   0   0   0  15   0   2   0   0   0   9   0   0   0  10   0   0   0   0   0   4   0   0   0  15   0   0   0   0   0   1   0  15   0   2   0  15   0   0
+  q=1:   0   0  15   0   4   0  15   0   1   0   0   0  15   0   0   8   0   0   0   0   0   8   0  13   0   0   0   0   0   0   0   0   3   0  15   0   0   0   0   0  15   0   0   0
+Pax served: 216/300
+Pax served: 216/300
+Subproblem (last): obj=4631 wait_slots=431 fill_eps=0 penalty_cost=4200 penalty_pax=84 total_demand=300
+Avg wait (min): 29.9306
+UB_total (best): 4631.24
+
+Result: status=UNKNOWN iterations=8 best_lb=465.3728988658345 best_ub=4631.24
+NOT REPRODUCIBLE: 3 master solve(s) stopped on the clock, not the gap. Bounds from this run vary with machine load. For a comparable number, raise master.per_iteration_time_limit_s and solver.total_time_limit_s until the master always terminates on the gap (configs/baseline_d9.yaml).
+
+Manifest: C:\Users\fabio\My Drive\05_Projects\19_MobAuto2_Benders\manifests\manifest_rlb_t44q2_off_20260806_132451.json

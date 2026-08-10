@@ -91,6 +91,19 @@ manifests/
 Report/
 aux_py/
 
+# docs/ and configs/ are TRACKED as of the simulation phase.
+# docs/ carries docs_decisions.md, AUDIT_v*, BENDERS_SPEC_v* and the reference run
+# logs those documents cite by name (e.g. baseline_d9_D30.log). configs/ carries the
+# baseline fixtures every refactor is verified against. Without them a clone receives
+# breaking changes -- notably a2d9e97, which voids every historical lower bound --
+# with no record of why, and cannot reproduce the runs that justify them.
+
+# Project-specific generated scenarios; keep only one example
+setups/*
+!setups/demo_cont_demand.yaml
+# Run manifests (provenance for individual runs; regenerated per run)
+manifests/
+
 # Sweep and experiment scratch: scripts/sweep.py writes both of these, and the
 # tables they produced are quoted in docs/ with their provenance.
 configs/sweep/

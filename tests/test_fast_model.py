@@ -6,7 +6,7 @@ import unittest
 
 import pyomo.environ as pyo
 
-from _helpers import CONFIGS, build_master, constraint_names, master_params
+from _helpers import CONFIGS, DEFAULT_CONFIG, build_master, constraint_names, master_params
 
 
 class TestSymmetryBreaking(unittest.TestCase):
@@ -214,10 +214,10 @@ class TestRecourseLowerBound(unittest.TestCase):
         from mobauto2_benders.config import load_config
         from mobauto2_benders.app import _prepare_params
 
-        raw = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))
-        # default.yaml is a live experiment file; pin the data section so these
-        # tests describe the single-scenario form of the inequality, not whatever
-        # run is being set up in it. The multi-scenario form is exercised in
+        raw = yaml.safe_load((CONFIGS / DEFAULT_CONFIG).read_text(encoding="utf-8"))
+        # Pin the data section so these tests describe the single-scenario form of
+        # the inequality regardless of what the reference config ships with. The
+        # multi-scenario form is exercised in
         # TestRecourseLowerBoundMultiScenario below.
         raw["data"] = {**raw["data"], "scenario_files": None, "scenarios": None}
         raw["model"]["time"]["slot_resolution"] = res
@@ -243,7 +243,7 @@ class TestRecourseLowerBound(unittest.TestCase):
         data section, which is legitimately multi-scenario at times."""
         from mobauto2_benders.config import load_config
 
-        cfg = load_config(str(CONFIGS / "default.yaml"))
+        cfg = load_config(str(CONFIGS / DEFAULT_CONFIG))
         self.assertTrue(cfg.master.recourse_lower_bound)
 
     def test_built_when_asked_on_single_scenario_data(self):
@@ -337,7 +337,7 @@ class TestRecourseLowerBoundMultiScenario(unittest.TestCase):
         from mobauto2_benders.config import load_config
         from mobauto2_benders.app import _prepare_params
 
-        raw = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))
+        raw = yaml.safe_load((CONFIGS / DEFAULT_CONFIG).read_text(encoding="utf-8"))
         raw["data"] = {**raw["data"], "scenarios": None, "scenario_weights": weights}
         raw["model"]["time"]["slot_resolution"] = res
         raw["model"]["fleet"]["Q"] = 2
@@ -375,7 +375,7 @@ class TestRecourseLowerBoundMultiScenario(unittest.TestCase):
         params = self._params(True)
         rlb = params["recourse_bound_data"]
         T, res = int(params["T"]), int(params["slot_resolution"])
-        files = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))[
+        files = yaml.safe_load((CONFIGS / DEFAULT_CONFIG).read_text(encoding="utf-8"))[
             "data"
         ]["scenario_files"]
         exp_out = [0.0] * T
@@ -413,7 +413,7 @@ class TestRecourseLowerBoundMultiScenario(unittest.TestCase):
         params = self._params(True)
         rlb = params["recourse_bound_data"]
         T, res = int(params["T"]), int(params["slot_resolution"])
-        files = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))[
+        files = yaml.safe_load((CONFIGS / DEFAULT_CONFIG).read_text(encoding="utf-8"))[
             "data"
         ]["scenario_files"]
         per_scen = [
@@ -430,7 +430,7 @@ class TestRecourseLowerBoundMultiScenario(unittest.TestCase):
         from mobauto2_benders.config import load_config
         from mobauto2_benders.app import _prepare_params
 
-        raw = yaml.safe_load((CONFIGS / "default.yaml").read_text(encoding="utf-8"))
+        raw = yaml.safe_load((CONFIGS / DEFAULT_CONFIG).read_text(encoding="utf-8"))
         raw["data"] = {
             **raw["data"],
             "scenario_files": None,
@@ -464,7 +464,7 @@ class TestLpPhase(unittest.TestCase):
     def test_off_by_default(self):
         from mobauto2_benders.config import load_config
 
-        cfg = load_config(str(CONFIGS / "default.yaml"))
+        cfg = load_config(str(CONFIGS / DEFAULT_CONFIG))
         self.assertFalse(cfg.master.lp_phase)
 
     def test_relaxation_is_reversible(self):

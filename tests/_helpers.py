@@ -12,6 +12,15 @@ if str(SRC) not in sys.path:
 
 CONFIGS = REPO_ROOT / "configs"
 
+# The tracked reference config. NOT configs/default.yaml, which is untracked and
+# is the live experiment file: it is edited by runs, by sweeps and by the parallel
+# external audit working in this folder, so a test reading it asserts against
+# whatever someone is setting up right now. That already happened -- six D29 tests
+# failed the moment the live file went multi-scenario, and the tests were not
+# wrong. Reading the tracked copy also means the suite runs on a fresh clone,
+# where configs/default.yaml does not exist at all.
+DEFAULT_CONFIG = "default.example.yaml"
+
 
 def load_cfg(name: str):
     from mobauto2_benders.config import load_config

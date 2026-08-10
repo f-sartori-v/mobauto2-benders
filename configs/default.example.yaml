@@ -16,8 +16,12 @@ run:
 data:
   # Demand source (preferred): file with requests or R_out/R_ret arrays
   demand_file: setups/base.yaml
-  # Optional scenario files for multi-scenario runs
-  #scenario_files: [setups/base.yaml, setups/base_plus100_out_noon.yaml, setups/base_ret_peak_adv.yaml, setups/base_vol20_pm60.yaml]
+  # Scenario files for multi-scenario runs. These four are the reference set: the
+  # multi-scenario tests in tests/test_fast_model.py read this list and recompute
+  # the recourse anchor's demand from the files directly, so commenting it out
+  # here turns four of them red. Comment it out in your own configs/default.yaml,
+  # not in this one.
+  scenario_files: [setups/base.yaml, setups/base_plus100_out_noon.yaml, setups/base_ret_peak_adv.yaml, setups/base_vol20_pm60.yaml]
   #scenario_files: #[setups/prob/base.yaml, setups/prob/base_plus100_out_noon.yaml, setups/prob/base_ret_peak_adv.yaml, setups/prob/base_vol20_pm60.yaml]
   # Optional weights aligned with scenario_files
   scenario_weights: null
