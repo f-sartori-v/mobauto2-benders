@@ -1188,3 +1188,52 @@ fall back, mark the cut not a valid lower bound per D39). It matters more now th
 long runs worth doing.
 
 78 tests pass.
+
+### D44 — Branch-and-cut is feasible here, and cannot reuse D39's validity model
+Scoping the revival of lazy cuts (removed 2026-02-19, verdict void per D40 because it
+predates D30). Two findings, and the second is the one that matters.
+
+**Feasibility: confirmed, with a measured cost.** The blocker the deleted code worked
+around -- `lazy_cb_lp_solver` existed "to avoid nested CPLEX" -- does not bite in this
+installation. Measured: a `cplex_persistent` MIP with a registered
+`LazyConstraintCallback` solving a Pyomo `cplex_direct` LP inside the callback completes
+and returns the right answer. CPLEX 22.1.1.0.
+
+The cost is not zero, and it is printed rather than hidden:
+
+    Lazy constraint callback is present.
+      Disabling dual reductions (CPX_PARAM_REDUCE) in presolve.
+      Disabling presolve reductions that prevent crushing forms.
+      Disabling repeat represolve.
+    Warning: Control callbacks may disable some MIP features.
+
+So the master loses presolve strength and some MIP machinery in exchange for continuous cut
+generation. Whether that trade is positive is a measurement, not an argument -- and this
+round has been wrong four times reasoning about exactly this kind of trade.
+
+**The blocking design constraint: a lazy cut cannot be un-added.** D39 models cut validity
+as four states and handles the bad ones by dropping the lower bound afterwards -- `INVALID`
+and `UNKNOWN` mean "warn and drop the LB". That works in a loop, where the bound is a
+number the loop owns and can revise.
+
+It does not transfer. A cut injected into a branch-and-bound tree becomes a constraint on
+the search. If it is not a valid lower bound -- `mw_fdiff_fallback` slopes are the live
+example, and D39 already marks them `INVALID` -- it can **cut off the true optimum**, and
+no later bookkeeping recovers it. The run then reports an optimum that is not one, with no
+marker, which is the exact failure class this whole round exists to close.
+
+The old implementation had no notion of this: it predates D39 by six months, and its
+handler was `except Exception: return` around `subproblem.evaluate` -- a silent skip. In a
+loop a skipped cut costs an iteration. **In a lazy callback a skipped cut means CPLEX
+accepts the incumbent as feasible and optimal**, because refusing to cut it off is exactly
+how a lazy constraint says "this solution is fine".
+
+Therefore the revival is gated on a rule the loop never needed:
+
+    Only `CutValidity.VALID` may be injected. Anything else must abort the solve,
+    not skip the cut and not drop a bound.
+
+Two more defects in the deleted code, recorded so they are not reintroduced: candidate
+values were read with `except Exception: val = 0.0`, fabricating a schedule of zeros from a
+read failure; and only `cuts[0]` was used, which predates multi-scenario cuts being the
+default and would silently drop every scenario but one.
