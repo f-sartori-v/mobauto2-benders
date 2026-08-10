@@ -7,6 +7,7 @@ instead of by someone noticing an implausible number.
 Run just these:
     python -m unittest tests.test_solver_soundness -v
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -33,6 +34,38 @@ KNOWN_FEASIBLE_UB = 4183.24
 
 
 _CACHE: tuple | None = None
+_FAILURE: BaseException | None = None
+
+# The solvers the fixture names. Kept next to FIXTURE so the two cannot drift.
+_REQUIRED_SOLVERS = ("cplex", "cplex_direct")
+
+
+def _require_solvers(*names: str) -> None:
+    """Skip only when a solver is genuinely absent.
+
+    This exists because the three entry points below used to wrap their work in
+    `except Exception: raise SkipTest("solver unavailable")`. That turned EVERY
+    failure into a skip with a label blaming the environment -- a config error, a
+    RuntimeError from the D39 validity guards, an AssertionError, a bug in this
+    file. The class whose tests each correspond to a defect that was once live
+    would switch itself off and report the machine's fault.
+
+    Asking the question directly separates the two states: "the solver is not
+    installed" is an environment fact worth skipping on, and everything else is a
+    failure worth seeing. `SolverFactory` returns an UnknownSolver for a name it
+    does not recognise rather than raising, so no exception handling is needed
+    here either.
+    """
+    import pyomo.environ as pyo
+
+    missing = [n for n in names if not pyo.SolverFactory(n).available(exception_flag=False)]
+    if missing:
+        raise unittest.SkipTest(
+            "not run: solver(s) unavailable: "
+            + ", ".join(missing)
+            + ". These are end-to-end soundness invariants; a green suite without "
+            "them has not checked any of them."
+        )
 
 
 def _run_once():
@@ -40,8 +73,14 @@ def _run_once():
 
     Memoised: every assertion in this module examines the same solve, so running
     it per TestCase class would multiply the only slow part of the suite.
+
+    A failure is memoised too, and re-raised unchanged. Three classes call this;
+    without it, a solve that raises would be retried three times at a couple of
+    minutes each. Re-raising is not swallowing -- the caller still sees it.
     """
-    global _CACHE
+    global _CACHE, _FAILURE
+    if _FAILURE is not None:
+        raise _FAILURE
     if _CACHE is not None:
         return _CACHE
 
@@ -56,6 +95,9 @@ def _run_once():
         with contextlib.redirect_stdout(buf):
             result = app_run(FIXTURE, {"emit_cli_output": True})
         _CACHE = (result, buf.getvalue())
+    except BaseException as exc:
+        _FAILURE = exc
+        raise
     finally:
         logging.getLogger("mobauto2_benders").setLevel(prev)
     return _CACHE
@@ -69,10 +111,8 @@ class SoundnessTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        try:
-            cls.result, cls.output = _run_once()
-        except Exception as exc:  # pragma: no cover - environment dependent
-            raise unittest.SkipTest(f"solver unavailable: {exc}")
+        _require_solvers(*_REQUIRED_SOLVERS)
+        cls.result, cls.output = _run_once()
 
     # -- Magnanti-Wong actually runs ------------------------------------
 
@@ -109,7 +149,8 @@ class SoundnessTests(unittest.TestCase):
         if lb is None:
             self.skipTest("no lower bound claimed; nothing to validate")
         self.assertLessEqual(
-            lb, KNOWN_FEASIBLE_UB + 1e-6,
+            lb,
+            KNOWN_FEASIBLE_UB + 1e-6,
             f"LB={lb} exceeds a known feasible objective {KNOWN_FEASIBLE_UB}; "
             "the master is not a valid relaxation",
         )
@@ -156,7 +197,9 @@ class SoundnessTests(unittest.TestCase):
         m = re.search(r"Pax served: (\d+)/(\d+)", tail)
         self.assertIsNotNone(m, "served total not printed")
         self.assertAlmostEqual(
-            table_total, float(m.group(1)), delta=0.5,
+            table_total,
+            float(m.group(1)),
+            delta=0.5,
             msg="per-shuttle table does not account for every served passenger",
         )
 
@@ -167,7 +210,6 @@ class SoundnessTests(unittest.TestCase):
         if self.result.pax_served is None or self.result.pax_total is None:
             self.skipTest("passenger totals unavailable")
         self.assertLessEqual(self.result.pax_served, self.result.pax_total)
-
 
 
 class ManifestTests(unittest.TestCase):
@@ -182,10 +224,8 @@ class ManifestTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        try:
-            cls.result, cls.output = _run_once()
-        except Exception as exc:  # pragma: no cover
-            raise unittest.SkipTest(f"solver unavailable: {exc}")
+        _require_solvers(*_REQUIRED_SOLVERS)
+        cls.result, cls.output = _run_once()
 
     def test_result_carries_cut_provenance(self):
         self.assertIsNotNone(self.result.cut_generation_mode)
@@ -198,7 +238,10 @@ class ManifestTests(unittest.TestCase):
 
         cfg = load_config(FIXTURE)
         m = build_manifest(
-            cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1],
+            cfg,
+            _P(FIXTURE),
+            self.result,
+            _P(__file__).resolve().parents[1],
             {
                 "cut_generation_mode": self.result.cut_generation_mode,
                 "cut_valid_lower_bound": self.result.cut_valid_lower_bound,
@@ -215,7 +258,9 @@ class ManifestTests(unittest.TestCase):
         from mobauto2_benders.manifest import build_manifest
 
         cfg = load_config(FIXTURE)
-        m = build_manifest(cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1], {})
+        m = build_manifest(
+            cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1], {}
+        )
         self.assertIsNotNone(m["swept_parameters"]["p"])
         self.assertIsNotNone(m["swept_parameters"]["Wmax_minutes"])
         self.assertIsNotNone(m["objective_terms"]["concurrency_penalty"])
@@ -235,7 +280,9 @@ class ManifestTests(unittest.TestCase):
         from mobauto2_benders.manifest import build_manifest
 
         cfg = load_config(FIXTURE)
-        m = build_manifest(cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1], {})
+        m = build_manifest(
+            cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1], {}
+        )
         rep = m["reproducibility"]
         self.assertIsNotNone(rep["clock_truncated_master_solves"])
         self.assertEqual(rep["clock_truncated_master_solves"], 0)
@@ -255,9 +302,12 @@ class ManifestTests(unittest.TestCase):
         truncated.clock_truncated_master_solves = 3
 
         cfg = load_config(FIXTURE)
-        m = build_manifest(cfg, _P(FIXTURE), truncated, _P(__file__).resolve().parents[1], {})
+        m = build_manifest(
+            cfg, _P(FIXTURE), truncated, _P(__file__).resolve().parents[1], {}
+        )
         self.assertEqual(m["reproducibility"]["clock_truncated_master_solves"], 3)
         self.assertFalse(m["reproducibility"]["bit_reproducible"])
+
 
 class RecourseMatchesTheMonolith(unittest.TestCase):
     """The subproblem must price a schedule exactly as an independent MILP does.
@@ -290,7 +340,9 @@ class RecourseMatchesTheMonolith(unittest.TestCase):
         sp["T"] = T
 
         acts = {q: a.split() for q, a in self.SCHEDULE.items()}
-        self.assertEqual(len(acts[0]), T, "fixture horizon no longer matches the schedule")
+        self.assertEqual(
+            len(acts[0]), T, "fixture horizon no longer matches the schedule"
+        )
 
         candidate, trips = {}, 0
         for q, a in acts.items():
@@ -299,16 +351,22 @@ class RecourseMatchesTheMonolith(unittest.TestCase):
                 candidate[f"yRET[{q},{t}]"] = 1.0 if x == "RET" else 0.0
                 trips += 1 if x in ("OUT", "RET") else 0
 
-        try:
-            res = ProblemSubproblem(sp).evaluate(candidate)
-        except Exception as exc:  # pragma: no cover - environment dependent
-            raise unittest.SkipTest(f"solver unavailable: {exc}")
+        # This is the external oracle (D30): the MILP's own schedule, priced by
+        # THIS codebase's subproblem, must reproduce the MILP objective. Wrapping
+        # it in a broad catch meant a subproblem that had stopped working was
+        # reported as a missing solver.
+        _require_solvers(*_REQUIRED_SOLVERS)
+        res = ProblemSubproblem(sp).evaluate(candidate)
 
-        total = float(res.upper_bound) + float(mp.get("start_cost_epsilon", 0.0)) * trips
+        total = (
+            float(res.upper_bound) + float(mp.get("start_cost_epsilon", 0.0)) * trips
+        )
         self.assertAlmostEqual(
-            total, self.MILP_OPTIMUM, places=2,
+            total,
+            self.MILP_OPTIMUM,
+            places=2,
             msg="the subproblem no longer prices the monolith's optimum; the two "
-                "models have diverged and every bound this code reports is suspect",
+            "models have diverged and every bound this code reports is suspect",
         )
 
 
@@ -333,34 +391,38 @@ class TestDemandOutsideHorizonIsReported(unittest.TestCase):
         from mobauto2_benders.problem.subproblem_impl import ProblemSubproblem
 
         T = T_minutes // slot_resolution
-        sp = ProblemSubproblem({
-            "T": T,
-            "T_minutes": T_minutes,
-            "slot_resolution": slot_resolution,
-            "trip_duration_minutes": slot_resolution,
-            "Q": 1,
-            "S": 15.0,
-            "Emax": 150.0,
-            "L": 30.0,
-            "delta_chg": 35.0,
-            "Wmax_minutes": slot_resolution,
-            "p": 50.0,
-            "lp_solver": "cplex_direct",
-            "scenarios": [{"requests": requests}],
-            "use_magnanti_wong": False,
-            "eps_cut": 1e-8,
-        })
+        sp = ProblemSubproblem(
+            {
+                "T": T,
+                "T_minutes": T_minutes,
+                "slot_resolution": slot_resolution,
+                "trip_duration_minutes": slot_resolution,
+                "Q": 1,
+                "S": 15.0,
+                "Emax": 150.0,
+                "L": 30.0,
+                "delta_chg": 35.0,
+                "Wmax_minutes": slot_resolution,
+                "p": 50.0,
+                "lp_solver": "cplex_direct",
+                "scenarios": [{"requests": requests}],
+                "use_magnanti_wong": False,
+                "eps_cut": 1e-8,
+            }
+        )
         candidate = {f"yOUT[0,{t}]": 0.0 for t in range(T)}
         candidate.update({f"yRET[0,{t}]": 0.0 for t in range(T)})
-        with self.assertLogs("mobauto2_benders.problem.subproblem_impl", level="WARNING") as cm:
+        with self.assertLogs(
+            "mobauto2_benders.problem.subproblem_impl", level="WARNING"
+        ) as cm:
             sp.evaluate(candidate)
         return "\n".join(cm.output)
 
     def test_requests_past_the_horizon_are_counted_and_warned(self):
         requests = [
-            {"dir": "OUT", "time": 10},    # inside
-            {"dir": "OUT", "time": 700},   # past a 60-minute horizon
-            {"dir": "RET", "time": 900},   # past
+            {"dir": "OUT", "time": 10},  # inside
+            {"dir": "OUT", "time": 700},  # past a 60-minute horizon
+            {"dir": "RET", "time": 900},  # past
         ]
         log = self._evaluate_with_requests(requests)
         self.assertIn("[DEMAND]", log)

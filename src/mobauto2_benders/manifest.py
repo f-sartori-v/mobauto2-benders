@@ -23,6 +23,7 @@ The manifest therefore records, alongside the usual provenance:
     distribution. Same failure shape as the two defects above -- a run that
     stopped on the clock looks exactly like one that converged.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -40,15 +41,21 @@ def _git_commit(repo_root: Path) -> dict[str, Any]:
     out: dict[str, Any] = {"commit": None, "dirty": None, "branch": None}
     try:
         out["commit"] = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=repo_root, text=True,
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
         out["branch"] = subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root, text=True,
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_root,
+            text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
         status = subprocess.check_output(
-            ["git", "status", "--porcelain"], cwd=repo_root, text=True,
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            text=True,
             stderr=subprocess.DEVNULL,
         )
         out["dirty"] = bool(status.strip())
@@ -75,6 +82,7 @@ def _config_hash(config_path: Path | None) -> dict[str, Any]:
 def _solver_version(solver_name: str) -> str | None:
     try:
         import pyomo.environ as pyo
+
         s = pyo.SolverFactory(solver_name)
         v = getattr(s, "version", None)
         if callable(v):
@@ -155,7 +163,9 @@ def build_manifest(
             "S": cfg.subproblem.S,
             "Emax": cfg.model.energy.Emax,
             "L": cfg.model.energy.L,
-            "symmetry_breaking": bool(cfg.master.use_fifo_symmetry or cfg.master.symmetry_breaking),
+            "symmetry_breaking": bool(
+                cfg.master.use_fifo_symmetry or cfg.master.symmetry_breaking
+            ),
             "charge_before_idle": cfg.master.charge_before_idle,
             "aggregate_cuts_by_tau": cfg.master.aggregate_cuts_by_tau,
             "theta_per_scenario": cfg.master.theta_per_scenario,
@@ -184,7 +194,9 @@ def build_manifest(
     }
 
 
-def write_manifest(manifest: dict[str, Any], out_dir: Path, run_name: str | None) -> Path:
+def write_manifest(
+    manifest: dict[str, Any], out_dir: Path, run_name: str | None
+) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     name = f"manifest_{run_name or 'run'}_{stamp}.json"

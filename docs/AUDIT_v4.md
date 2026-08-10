@@ -253,8 +253,8 @@ leave a worse best-bound when the solve stops on gap or time.
 > 300 s the master ends every solve at a 99.9% internal MIP gap and the Benders lower
 > bound reaches 0.35 against a 785 target; 3.4x the per-solve time buys 1.2% of bound.
 > No optimality gap may be quoted at Q>=3, and performance items below that assume the
-> cut set is the binding constraint do not apply there. Evidence and reading rules:
-> `docs/phase1/README.md`.
+> cut set is the binding constraint do not apply there. Reading rules: `README.md`,
+> § Reading rules. The five configs that produced it ship as `configs/phase1/*.yaml`.
 
 The correctness phase is closed. The ordering below is by value, and the first two items
 are research output rather than code.

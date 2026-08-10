@@ -8,4 +8,3 @@ from .master_impl import ProblemMaster  # noqa: F401
 from .subproblem_impl import ProblemSubproblem  # noqa: F401
 
 __all__ = ["ProblemMaster", "ProblemSubproblem"]
-

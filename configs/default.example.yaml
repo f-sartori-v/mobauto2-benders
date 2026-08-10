@@ -16,7 +16,11 @@ run:
 data:
   # Demand source (preferred): file with requests or R_out/R_ret arrays
   demand_file: setups/base.yaml
-  # Optional scenario files for multi-scenario runs
+  # Scenario files for multi-scenario runs. These four are the reference set: the
+  # multi-scenario tests in tests/test_fast_model.py read this list and recompute
+  # the recourse anchor's demand from the files directly, so commenting it out
+  # here turns four of them red. Comment it out in your own configs/default.yaml,
+  # not in this one.
   scenario_files: [setups/base.yaml, setups/base_plus100_out_noon.yaml, setups/base_ret_peak_adv.yaml, setups/base_vol20_pm60.yaml]
   #scenario_files: #[setups/prob/base.yaml, setups/prob/base_plus100_out_noon.yaml, setups/prob/base_ret_peak_adv.yaml, setups/prob/base_vol20_pm60.yaml]
   # Optional weights aligned with scenario_files
@@ -30,12 +34,12 @@ model:
     # Total horizon length in minutes (T_minutes) or discrete slots (T)
     T_minutes: 660
     # Minutes per slot
-    slot_resolution: 15
+    slot_resolution: 30
     # Trip duration in minutes (converted internally to slots)
     trip_duration_minutes: 30
   fleet:
     # Number of shuttles
-    Q: 3
+    Q: 2
     # Initial battery level per shuttle (length Q)
     initial_battery: [150.0, 150.0, 150.0]
     # Forced first action per shuttle at t=0: IDL, CHR, OUT, RET
@@ -78,7 +82,7 @@ master:
   # This is NOT the run budget -- that is solver.total_time_limit_s below.
   # The Benders loop runs a gap-tied schedule that picks a per-iteration limit;
   # this caps it. Test phase: 30. Simulation phase: 600.
-  per_iteration_time_limit_s: 30
+  per_iteration_time_limit_s: 120
   # Ceiling on the master MIP gap, per Benders iteration.
   # This is NOT the convergence criterion -- that is solver.tolerance below.
   # The schedule tightens the gap on its own (down to 0.001) as the Benders gap
@@ -133,7 +137,7 @@ solver:
   #   solver.tolerance                   -- relative BD gap that counts as converged
   #   master.per_iteration_time_limit_s  -- ceiling on ONE master solve (above)
   #
-  max_iterations: 100
+  max_iterations: 10
   # Relative Benders gap (UB-LB)/|UB| at which the run is declared converged.
   tolerance: 0.01
   # Budget for the whole Benders loop, in seconds. This is the knob that decides

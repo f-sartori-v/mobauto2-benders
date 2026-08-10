@@ -13,13 +13,13 @@ captured from a real solver run, because emit_reports is off by default so no
 log was to hand. Replacing them with genuinely captured output would make this
 a stronger drift detector; the parsing contract it pins is the same either way.
 """
+
 from __future__ import annotations
 
 import unittest
 
 import _helpers  # noqa: F401  (puts src/ on sys.path)
 from mobauto2_benders.benders.cplex_log import parse_cplex_log_text
-
 
 SUMMARY_LOG = """
 Version identifier: 22.1.1.0

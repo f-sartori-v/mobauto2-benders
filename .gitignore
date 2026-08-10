@@ -107,4 +107,29 @@ manifests/
 # Sweep and experiment scratch: scripts/sweep.py writes both of these, and the
 # tables they produced are quoted in docs/ with their provenance.
 configs/sweep/
+configs/bench/
+
+# configs/phase1/ is deliberately NOT ignored: those five configs reproduce the
+# Phase 1 A/B table quoted in README.md, and a published repo carries what
+# regenerates a result (D38).
+#
+# docs/phase1/ IS ignored. It is a working research document, not a finding. Its
+# reading rules -- the conditions that stop the A/B table being misquoted -- are
+# inlined into README.md, which is where they have to survive.
+docs/phase1/
 docs/sweep/
+docs/AUDIT_v3.md
+docs/BENDERS_SPEC_v3.md
+docs/HANDLER_CENSUS.md
+docs/SESSION_TOOLING.md
+docs/design.md
+
+handout.md
+
+# The live experiment config. It is edited constantly -- by runs, by sweeps, and
+# by the parallel external audit working in this same folder -- and none of those
+# edits belong in a commit. configs/default.example.yaml is the tracked copy:
+#
+#     cp configs/default.example.yaml configs/default.yaml
+#
+configs/default.yaml
