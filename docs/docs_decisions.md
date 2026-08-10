@@ -722,7 +722,9 @@ that derives its expectation from the thing it is checking (D30).
 
 ---
 
-## Fase 1 — 2026-08-06. Is the master tractable? Results in `docs/phase1/README.md`.
+## Fase 1 — 2026-08-06. Is the master tractable? Verdict in D37; the five configs that
+produced it ship as `configs/phase1/*.yaml` and the reading rules are in `README.md`. The
+working write-up is not published (see the standing directive in the handout §6).
 
 ### D33 — The recourse anchor extends to multi-scenario runs, and is inert at Q=3
 D29 stated the anchor per prefix for a single demand vector and `_recourse_bound_data`

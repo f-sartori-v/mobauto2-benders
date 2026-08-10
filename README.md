@@ -19,7 +19,7 @@ MILP solves the same instance to optimality in 39 s.
 gap may be quoted at Q≥3.** This is not a verdict on Q≤2, where the capacity anchor is
 worth 1662–7737 on the empty master.
 
-Evidence and reading rules: [`docs/phase1/README.md`](docs/phase1/README.md).
+Reading rules for the numbers below: [§ Reading rules](#reading-rules).
 Decision log: [`docs/docs_decisions.md`](docs/docs_decisions.md).
 Formulation: [`docs/BENDERS_SPEC_v4.md`](docs/BENDERS_SPEC_v4.md).
 
@@ -32,7 +32,13 @@ Formulation: [`docs/BENDERS_SPEC_v4.md`](docs/BENDERS_SPEC_v4.md).
 
 ```bash
 pip install -e .
+cp configs/default.example.yaml configs/default.yaml
 ```
+
+The second line is needed once. `configs/default.yaml` is not tracked — it is the live
+experiment file and is edited constantly, so its edits would otherwise land in every
+commit. `configs/default.example.yaml` is the tracked copy. The named configs under
+`configs/phase1/` and the two `baseline_d9*` files are tracked and run without it.
 
 ## Reproducing the results
 
@@ -54,10 +60,25 @@ python -m mobauto2_benders --config configs/phase1/base_off.yaml run
 `configs/phase1/master_headroom.yaml` is the 900 s diagnostic that gives the master 102 s
 per solve to show the bound is not time-starved.
 
-**These runs are budget-truncated and print `NOT REPRODUCIBLE`** when master solves stop on
-the clock rather than the gap. Your numbers will differ in the last digits and in the UB;
-the LB stays in the 0.29–0.36 band. Differences under ~15% in the LB are machine noise, not
-an effect.
+### Reading rules
+
+These conditions travel with any number lifted from the table above. They are not caveats
+added after the fact; each one exists because a number was once quoted without it.
+
+- **Every cell is one draw**, and every run prints `NOT REPRODUCIBLE` because master solves
+  stop on the clock rather than the gap. Differences smaller than ~15% in the LB are machine
+  noise, not an effect (D26). Your numbers will differ in the last digits and in the UB; the
+  LB stays in the 0.29–0.36 band.
+- **Each UB is real** — an exhibited feasible schedule. **No LB here is within a factor of
+  1000 of useful, so no optimality gap may be quoted from this table.**
+- **The LP phase claims no upper bound while it is active**: a fractional schedule cannot be
+  exhibited. The UB for `lp_on` and `both_on` comes only from MIP-phase iterations.
+- **State `(p, W_max) = (50, 60)` and `concurrency_penalty = 0.25`** on any table derived
+  from these runs (D18). `concurrency_penalty` is active in the objective and is not part of
+  the published formulation. The manifest records all three.
+- **Every reported number states which subproblem mode produced it** — `mw`,
+  `mw_fdiff_fallback`, `dual`, `finite_difference`, or `mixed(a+b)` for a multi-scenario
+  aggregate.
 
 ### The regression baselines
 
@@ -83,9 +104,10 @@ the recourse anchor, the LP phase, and configuration combinations that are refus
 
 ## Configuration
 
-`configs/default.yaml` is the annotated reference and is the source of truth — it carries
-the meaning of every key inline, including which of them changes a reported bound. This
-README deliberately does not duplicate it, because the duplicate went stale.
+`configs/default.example.yaml` is the annotated reference and is the source of truth — it
+carries the meaning of every key inline, including which of them changes a reported bound.
+This README deliberately does not duplicate it, because the duplicate went stale. Copy it
+to `configs/default.yaml` to get a working local config; that copy is not tracked.
 
 Three limits are easy to confuse:
 

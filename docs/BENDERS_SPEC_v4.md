@@ -427,8 +427,8 @@ Gates 2–5. D1–D8 and D10–D13 stand as written.
 > 300 s the master ends every solve at a 99.9% internal MIP gap and the Benders lower
 > bound reaches 0.35 against a 785 target; 3.4x the per-solve time buys 1.2% of bound.
 > No optimality gap may be quoted at Q>=3, and performance items below that assume the
-> cut set is the binding constraint do not apply there. Evidence and reading rules:
-> `docs/phase1/README.md`.
+> cut set is the binding constraint do not apply there. Reading rules: `README.md`,
+> § Reading rules. The five configs that produced it ship as `configs/phase1/*.yaml`.
 
 The correctness contract above is now enforced by tests. The remaining work is research
 output and performance, ordered in `AUDIT_v4` §3:
