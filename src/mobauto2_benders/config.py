@@ -86,6 +86,49 @@ class ModelSection:
 
 
 @dataclass(slots=True)
+class BranchAndCutSection:
+    """Branch-and-cut: cuts injected inside one master tree instead of a loop (D44).
+
+    Every default here is off. The previous implementation was deleted in 2026-02
+    without a decision record, and it was judged against the pre-D30 subproblem
+    whose constraint set moved with `y` -- so its verdict is void on the same
+    grounds as every pre-D30 lower bound, and nothing about it is inherited as a
+    default.
+
+    The one contract that does NOT carry over from the Benders loop: **a lazy cut
+    cannot be un-added.** D39 is fail-closed at the level of the reported bound --
+    an INVALID or UNKNOWN cut is added and the lower bound is dropped afterwards,
+    which works only where the loop owns the bound. Inside a branch-and-bound tree
+    a cut that excludes the true optimum cannot be retracted and nothing recovers
+    it. So the rule inverts: only CutValidity.VALID may be injected, and anything
+    else aborts the solve. It must never merely skip the cut -- in a callback,
+    skipping is how you tell CPLEX the incumbent is acceptable.
+    """
+
+    # Off by default. Turning this on changes the master's solve path, not a
+    # heuristic: the backend must be cplex_persistent, which is the only Pyomo
+    # CPLEX interface here that exposes register_callback.
+    enabled: bool = False
+    # Solver for the subproblem LP solved *inside* the callback. The deleted
+    # implementation carried this key to "avoid nested CPLEX"; nesting is measured
+    # to work on this installation, so the key stays as a lever rather than a
+    # workaround.
+    callback_lp_solver: str = "cplex_direct"
+    # Lazy constraints at integer incumbents. This reproduces the current loop's
+    # semantics inside one tree, so a run is comparable against lp150_then_mip8.
+    lazy_cuts: bool = True
+    # User cuts at fractional nodes. The part with no equivalent in the loop, and
+    # deliberately a separate step: enabling both at once makes an unexpected
+    # result uninterpretable.
+    user_cuts: bool = False
+    # Keep the LP phase as a warm-up that seeds the tree. The 150 LP cuts are what
+    # makes the root strong (D40/D45), so leaving this off asks a different
+    # question -- whether the tree can build its own root -- and the two must not
+    # be confused for one another.
+    seed_from_lp_phase: bool = True
+
+
+@dataclass(slots=True)
 class MasterSection:
     use_fifo_symmetry: bool = False
     symmetry_breaking: bool = False
@@ -123,6 +166,7 @@ class MasterSection:
     lp_phase_stall_iters: int = 3
     # Relative improvement in the LP master objective that counts as progress.
     lp_phase_min_rel_improve: float = 0.005
+    branch_and_cut: BranchAndCutSection = field(default_factory=BranchAndCutSection)
 
 
 @dataclass(slots=True)
@@ -384,14 +428,30 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
     master_params = _as_mapping(master.get("params", {}), "master.params")
     sub_params = _as_mapping(sub.get("params", {}), "subproblem.params")
 
-    lazy_key = "use_" + "lazy" + "_cuts"
-    lazy_cb_key = "lazy" + "_cb" + "_lp_solver"
+    # Branch-and-cut was removed in 2026-02 and revived under D44. A v1 config that
+    # still carries the old keys predates the revival by a year and predates D30 by
+    # six months, so its settings were tuned against a subproblem whose constraint
+    # set moved with y. Upgrading them silently would carry that tuning forward as
+    # if it meant something. Refuse, and make the user re-state the intent in v2.
+    lazy_key = "use_lazy_cuts"
+    lazy_cb_key = "lazy_cb_lp_solver"
     if lazy_key in master_params:
-        raise ValueError("lazy " + "cuts removed; delete key " + lazy_key)
+        raise ValueError(
+            f"master.params.{lazy_key} is a pre-D30 key and does not upgrade. "
+            "Branch-and-cut is available again in the v2 schema as "
+            "master.branch_and_cut; set it there deliberately (D44)."
+        )
     if lazy_cb_key in master_params:
-        raise ValueError("callback cuts removed; delete key " + lazy_cb_key)
+        raise ValueError(
+            f"master.params.{lazy_cb_key} is a pre-D30 key and does not upgrade. "
+            "The v2 equivalent is master.branch_and_cut.callback_lp_solver (D44)."
+        )
     if str(master_params.get("solver", "")).lower() == "cplex_persistent":
-        raise ValueError("persistent solver mode removed; use solver=cplex")
+        raise ValueError(
+            "master.params.solver=cplex_persistent does not upgrade. In v2 the "
+            "backend is master.solver_backend, and cplex_persistent is only "
+            "accepted there when master.branch_and_cut.enabled is true (D44)."
+        )
 
     def _note(msg: str) -> None:
         warnings_list.append(msg)
@@ -759,8 +819,11 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
     )
 
     master_raw = _as_mapping(data.get("master"), "master")
-    if ("use_" + "lazy" + "_cuts") in master_raw:
-        raise ValueError("lazy " + "cuts removed; delete key use_" + "lazy" + "_cuts")
+    if "use_lazy_cuts" in master_raw:
+        raise ValueError(
+            "master.use_lazy_cuts is the pre-D30 flag and is not read. Branch-and-cut "
+            "is configured under master.branch_and_cut (D44)."
+        )
     # Renamed for clarity: both were confusable with the run-level budget and the
     # convergence tolerance, and both were silently overwritten before they were wired.
     if "solve_time_limit_s" in master_raw:
@@ -793,9 +856,72 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "lp_phase_max_iters",
             "lp_phase_stall_iters",
             "lp_phase_min_rel_improve",
+            "branch_and_cut",
         },
         "master",
     )
+    bnc_raw = _as_mapping(master_raw.get("branch_and_cut", {}), "master.branch_and_cut")
+    _check_unknown_keys(
+        bnc_raw,
+        {
+            "enabled",
+            "callback_lp_solver",
+            "lazy_cuts",
+            "user_cuts",
+            "seed_from_lp_phase",
+        },
+        "master.branch_and_cut",
+    )
+    bnc_section = BranchAndCutSection(
+        enabled=_ensure_bool(
+            bnc_raw.get("enabled", False), "master.branch_and_cut.enabled"
+        ),
+        callback_lp_solver=_ensure_str(
+            bnc_raw.get("callback_lp_solver", "cplex_direct"),
+            "master.branch_and_cut.callback_lp_solver",
+        ),
+        lazy_cuts=_ensure_bool(
+            bnc_raw.get("lazy_cuts", True), "master.branch_and_cut.lazy_cuts"
+        ),
+        user_cuts=_ensure_bool(
+            bnc_raw.get("user_cuts", False), "master.branch_and_cut.user_cuts"
+        ),
+        seed_from_lp_phase=_ensure_bool(
+            bnc_raw.get("seed_from_lp_phase", True),
+            "master.branch_and_cut.seed_from_lp_phase",
+        ),
+    )
+    backend_raw = str(master_raw.get("solver_backend", "cplex_direct")).lower()
+    if bnc_section.enabled:
+        # Not a preference. cplex_direct exposes no register_callback, so a run that
+        # asked for branch-and-cut and got cplex_direct would solve the plain master
+        # and report a number that looks like branch-and-cut and is not.
+        if backend_raw != "cplex_persistent":
+            raise ValueError(
+                "master.branch_and_cut.enabled requires "
+                "master.solver_backend=cplex_persistent; "
+                f"got {backend_raw!r}, which exposes no callback interface."
+            )
+        if not (bnc_section.lazy_cuts or bnc_section.user_cuts):
+            raise ValueError(
+                "master.branch_and_cut.enabled with neither lazy_cuts nor user_cuts "
+                "registers no callback: the run would pay the callback's presolve "
+                "restrictions and generate nothing."
+            )
+        if bnc_section.user_cuts:
+            raise ValueError(
+                "master.branch_and_cut.user_cuts is not implemented yet (D44 step 2). "
+                "Lazy constraints at integer incumbents come first, because they "
+                "reproduce the loop's semantics inside one tree and make a "
+                "regression against lp150_then_mip8.yaml legible."
+            )
+    elif backend_raw == "cplex_persistent":
+        raise ValueError(
+            "master.solver_backend=cplex_persistent is only accepted with "
+            "master.branch_and_cut.enabled=true; the loop path is measured on "
+            "cplex_direct and the two backends are not interchangeable for a "
+            "reported number."
+        )
     master_section = MasterSection(
         use_fifo_symmetry=_ensure_bool(
             master_raw.get("use_fifo_symmetry", False), "master.use_fifo_symmetry"
@@ -876,7 +1002,15 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             ),
             "master.lp_phase_min_rel_improve",
         ),
+        branch_and_cut=bnc_section,
     )
+    if bnc_section.enabled and bnc_section.seed_from_lp_phase and not master_section.lp_phase:
+        raise ValueError(
+            "master.branch_and_cut.seed_from_lp_phase=true needs master.lp_phase=true. "
+            "The strong root measured in D40/D45 comes from the LP phase's cuts; "
+            "without it the tree starts from a root of ~0, which is a different "
+            "experiment and must be asked for explicitly (seed_from_lp_phase=false)."
+        )
 
     sub_raw = _as_mapping(data.get("subproblem"), "subproblem")
     _check_unknown_keys(
@@ -1062,8 +1196,14 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         ),
     )
     if solver_section.master_solver.lower() == "cplex_persistent":
+        # Deliberately still refused even under D44. Two keys can name a backend and
+        # master.solver_backend is the one master_impl reads first; accepting the
+        # backend here too would let a config set them to different values and give
+        # no way to tell which one the run used.
         raise ValueError(
-            "persistent solver mode removed; use solver.master_solver=cplex"
+            "solver.master_solver=cplex_persistent is not the branch-and-cut switch. "
+            "Set master.solver_backend=cplex_persistent together with "
+            "master.branch_and_cut.enabled=true, and leave solver.master_solver=cplex."
         )
 
     tol_raw = _as_mapping(data.get("tolerances", {}), "tolerances")

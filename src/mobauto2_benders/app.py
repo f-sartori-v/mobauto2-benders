@@ -208,6 +208,23 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
         mp["cplex_options"] = dict(cfg.master.cplex_options)
     if cfg.master.solver_backend:
         mp["solver_backend"] = str(cfg.master.solver_backend)
+    bnc = cfg.master.branch_and_cut
+    mp["bnc_enabled"] = bool(bnc.enabled)
+    mp["bnc_lazy_cuts"] = bool(bnc.lazy_cuts)
+    mp["bnc_user_cuts"] = bool(bnc.user_cuts)
+    mp["bnc_callback_lp_solver"] = str(bnc.callback_lp_solver)
+    mp["bnc_seed_from_lp_phase"] = bool(bnc.seed_from_lp_phase)
+    if bnc.enabled:
+        # The config gate (D44) accepts this combination; the callback that makes
+        # it mean anything is not wired yet. Without this the run would solve the
+        # plain master on cplex_persistent and report a number that reads as
+        # branch-and-cut -- an inert knob of exactly the shape the receitas
+        # invariants forbid, and worse than inert because it would be quoted.
+        raise NotImplementedError(
+            "master.branch_and_cut.enabled is accepted by the schema but the "
+            "callback is not registered yet (D44 step 1 in progress). Refusing to "
+            "run rather than report a plain master solve as branch-and-cut."
+        )
     mp["aggregate_cuts_by_tau"] = bool(cfg.master.aggregate_cuts_by_tau)
     mp["cut_coeff_threshold"] = float(cfg.master.cut_coeff_threshold)
     mp["theta_per_scenario"] = bool(cfg.master.theta_per_scenario)
