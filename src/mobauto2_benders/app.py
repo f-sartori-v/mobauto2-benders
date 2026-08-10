@@ -2,6 +2,10 @@
 
 import math
 from pathlib import Path
+# Imported under an alias on purpose: `_prepare_params` binds a local named
+# `time` to cfg.model.time, so a plain `import time` would read as available in
+# this module and be shadowed exactly where someone would reach for it.
+from time import monotonic as _monotonic
 
 from .config import DEFAULT_CONFIG_PATH, load_config, resolve_energy_params
 from .logging_config import setup_logging
@@ -208,6 +212,12 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
         mp["cplex_options"] = dict(cfg.master.cplex_options)
     if cfg.master.solver_backend:
         mp["solver_backend"] = str(cfg.master.solver_backend)
+    bnc = cfg.master.branch_and_cut
+    mp["bnc_enabled"] = bool(bnc.enabled)
+    mp["bnc_lazy_cuts"] = bool(bnc.lazy_cuts)
+    mp["bnc_user_cuts"] = bool(bnc.user_cuts)
+    mp["bnc_callback_lp_solver"] = str(bnc.callback_lp_solver)
+    mp["bnc_seed_from_lp_phase"] = bool(bnc.seed_from_lp_phase)
     mp["aggregate_cuts_by_tau"] = bool(cfg.master.aggregate_cuts_by_tau)
     mp["cut_coeff_threshold"] = float(cfg.master.cut_coeff_threshold)
     mp["theta_per_scenario"] = bool(cfg.master.theta_per_scenario)
@@ -537,7 +547,7 @@ def _run_single(
     warm_start: dict | None = None,
     emit_summary: bool = True,
 ):
-    solver, master, _sub = _build_solver(cfg, mp, sp)
+    solver, master, sub = _build_solver(cfg, mp, sp)
     if warm_start:
         try:
             master.set_warm_start(warm_start)
@@ -545,10 +555,144 @@ def _run_single(
             pass
     if emit_cli_output:
         _print_cfg(cfg, mp, sp)
+    _t_seed_start = _monotonic()
     result = solver.run()
+    if cfg.master.branch_and_cut.enabled:
+        result = _run_branch_and_cut(
+            cfg,
+            master,
+            sub,
+            result,
+            emit_cli_output,
+            seeding_elapsed_s=_monotonic() - _t_seed_start,
+        )
     if emit_cli_output and emit_summary:
         _maybe_print_summary(result, sp)
     return result, master
+
+
+def _run_branch_and_cut(
+    cfg, master, sub, seed_result, emit_cli_output: bool, *, seeding_elapsed_s: float
+):
+    """Solve the seeded master once inside a single tree, and report it as such.
+
+    `solver.run()` above stopped at the end of the LP phase -- the config refuses
+    any other iteration budget when seeding is on -- so the master now holds
+    exactly the cut set that run 2 produced, and the tree starts from run 2's
+    root. That is the comparison D45 asks for: same cuts, one tree instead of a
+    loop that rebuilds one per iteration.
+
+    The seeding phase is pure LP and claims no upper bound (a fractional schedule
+    cannot be exhibited), so the seed result's bound is a lower bound only. What
+    the tree returns replaces it wholesale rather than being merged with it: two
+    bounds from two different solves, silently maxed, is how a number stops being
+    attributable to a run.
+    """
+    from dataclasses import replace
+
+    bnc = cfg.master.branch_and_cut
+    if not (bnc.lazy_cuts or bnc.control_no_callback):
+        # Reachable only via user_cuts, which the schema refuses today. Left as a
+        # raise rather than an `if` that quietly solves an ordinary master.
+        raise NotImplementedError(
+            "branch_and_cut with lazy_cuts=false has no generator wired yet"
+        )
+
+    # solver.total_time_limit_s is documented as the budget for the WHOLE run.
+    # Passing it to the tree unchanged made the first measured run take
+    # 150 s of seeding + 600 s of tree against a 600 s budget -- a 25% overshoot
+    # of the one number a reader uses to decide what a run costs. The tree gets
+    # what is left, and is told so.
+    remaining = float(cfg.solver.total_time_limit_s) - float(seeding_elapsed_s)
+    if remaining <= 0.0:
+        raise RuntimeError(
+            f"the seeding LP phase used {seeding_elapsed_s:.0f} s of a "
+            f"{cfg.solver.total_time_limit_s} s budget, leaving nothing for the "
+            "tree. Raise solver.total_time_limit_s rather than reporting a tree "
+            "that never ran."
+        )
+    label = (
+        "CONTROL, no callback registered"
+        if bnc.control_no_callback
+        else "one tree, lazy cuts at incumbents"
+    )
+    if emit_cli_output:
+        print(
+            f"\n=== Branch-and-cut ({label}) over {master.cuts_count()} seeded cuts, "
+            f"{remaining:.0f} s left of a {cfg.solver.total_time_limit_s} s budget ==="
+        )
+
+    bnc_result, stats = master.solve_branch_and_cut(
+        sub.evaluate,
+        time_limit_s=remaining,
+        mipgap=cfg.master.per_iteration_mipgap,
+        register_callback=not bnc.control_no_callback,
+    )
+
+    # The master's own objective is NOT an upper bound, and reporting it as one
+    # was wrong. It is first_stage + theta, and theta is bounded only by the cuts
+    # the master holds. With the lazy callback the final incumbent has been
+    # priced -- an accepted incumbent is one whose cut is satisfied, so theta is
+    # at or above its true recourse -- but in the no-callback control nothing
+    # prices it, and the first control run duly reported an "upper bound" of
+    # 1288.86 that is a relaxation value and can sit BELOW the true optimum. A
+    # 14% gap read off that pair would have been fiction.
+    #
+    # So the schedule is priced here, once, for both paths. That is the same
+    # thing the loop does and the same thing that makes an upper bound mean
+    # something: an exhibited feasible schedule with its recourse evaluated.
+    upper_bound = None
+    priced_recourse = None
+    cand = bnc_result.candidate
+    if cand is not None:
+        sres = sub.evaluate(cand)
+        if sres.upper_bound is not None:
+            priced_recourse = float(sres.upper_bound)
+            upper_bound = float(master.first_stage_cost(cand)) + priced_recourse
+
+    if emit_cli_output:
+        if upper_bound is None:
+            print(
+                "[BNC] no upper bound claimed: the tree returned no schedule the "
+                "subproblem could price."
+            )
+        else:
+            print(
+                f"[BNC] UB from the exhibited schedule: "
+                f"first_stage + recourse = {upper_bound:.6g} "
+                f"(recourse {priced_recourse:.6g}); "
+                f"master objective was {bnc_result.objective:.6g}, which is "
+                "first_stage + theta and is NOT an upper bound"
+            )
+        print(
+            f"[BNC] callback invocations={stats.invocations} "
+            f"cuts_injected={stats.cuts_injected} "
+            f"incumbents_accepted={stats.incumbents_accepted} "
+            f"validity={stats.validity_counts}"
+        )
+        print(
+            f"[BNC] status={bnc_result.status.value} "
+            f"LB={bnc_result.lower_bound} UB={upper_bound}"
+        )
+        # There is no iteration count in a tree. Saying so is cheaper than having
+        # a reader assume the number below came from one.
+        print(
+            "[BNC] NOT REPRODUCIBLE: the tree stops on the clock, and a lazy "
+            "callback makes CPLEX's node order thread-dependent (D26)."
+        )
+
+    return replace(
+        seed_result,
+        status=bnc_result.status,
+        best_lower_bound=bnc_result.lower_bound,
+        best_upper_bound=upper_bound,
+        subproblem_obj=priced_recourse,
+        # The loop's iteration counter does not describe a tree. Reporting the
+        # seeding phase's count here would read as "N Benders iterations", which
+        # is not what produced these bounds.
+        iterations=0,
+        clock_truncated_master_solves=1,
+    )
 
 
 def _emit_manifest(cfg, config_path, result, master, emit_cli_output: bool) -> None:

@@ -1,0 +1,223 @@
+# Branch-and-cut on top of run 2's 150 LP cuts (handout section 5.6 B, D44).
+#
+# WHAT IT MEASURES. D45 found that with these 150 cuts the loop's first MIP solve
+# lifts the bound 794.62 -> ~1080 and then stops improving: eight further Benders
+# iterations gave 1080, 1090, 1073, 1065, 1074, 1088, 1068, 1076 -- no trend, a
+# spread the size of the run-to-run noise. Each iteration throws away a ~19 000
+# node tree and rebuilds it to add one cut, and each rebuild re-truncates at the
+# same ~20% internal gap. The binding constraint is the master solve, not the cut
+# set.
+#
+# This run changes exactly that and nothing else: ONE tree, with cuts injected at
+# integer incumbents by a CPLEX LazyConstraintCallback as the search finds them.
+# The tree is never torn down, so the search it accumulates is not discarded.
+#
+# HOW TO READ IT. The comparison is against lp150_then_mip8.yaml, which starts
+# from the identical cut set. A bound above ~1090 says one persistent tree buys
+# what eight rebuilt ones did not. A bound at or below it says the callback's
+# cost -- CPLEX disables dual reductions, restricts presolve to crushing forms
+# and stops repeat represolve whenever a lazy callback is registered -- ate the
+# gain. Both readings are useful; neither is competitiveness, since the monolith
+# still solves this instance in 39 s.
+#
+# NOT REPRODUCIBLE, and more strongly than the loop is. The tree stops on the
+# clock (D26), and a lazy callback makes CPLEX's node order depend on thread
+# scheduling. Two runs of this config will not agree to the last digit and are
+# not expected to. Only lp_only_150.yaml reproduces.
+#
+# WHY max_iterations EQUALS lp_phase_max_iters. The seeding loop must end when
+# the LP phase ends. If it were larger the loop would run MIP iterations before
+# the tree, and the tree's cut budget would not be the one this file names --
+# the "say which cut budget produced a number" failure the README's reading
+# rules exist for. The config layer refuses any other pairing.
+#
+# WHY the master backend stays cplex_direct. The tree builds its own persistent
+# solver; the master's own backend is what the seeding LP phase runs on, and
+# changing it would make the seeded cuts differ from run 2's.
+#
+# Derived from lp_only_150.yaml, same test point: Q=3, T=44, 4 scenarios.
+
+schema:
+  name: mobauto2_benders_config
+  version: 2
+
+run:
+  # Optional run label for logs/outputs
+  name: p1_lp150_then_bnc
+  # log_level controls verbosity: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_level: INFO
+  # Optional paths for log/report outputs
+  log_file: null
+  report_dir: null
+  # Optional random seed (set to null to disable)
+  seed: 41
+
+data:
+  # Demand source (preferred): file with requests or R_out/R_ret arrays
+  demand_file: setups/base.yaml
+  # Optional scenario files for multi-scenario runs
+  scenario_files: [setups/base.yaml, setups/base_plus100_out_noon.yaml, setups/base_ret_peak_adv.yaml, setups/base_vol20_pm60.yaml]
+  #scenario_files: #[setups/prob/base.yaml, setups/prob/base_plus100_out_noon.yaml, setups/prob/base_ret_peak_adv.yaml, setups/prob/base_vol20_pm60.yaml]
+  # Optional weights aligned with scenario_files
+  scenario_weights: null
+  # Optional inline demand arrays (single scenario)
+  R_out: null
+  R_ret: null
+
+model:
+  time:
+    # Total horizon length in minutes (T_minutes) or discrete slots (T)
+    T_minutes: 660
+    # Minutes per slot
+    slot_resolution: 15
+    # Trip duration in minutes (converted internally to slots)
+    trip_duration_minutes: 30
+  fleet:
+    # Number of shuttles
+    Q: 3
+    # Initial battery level per shuttle (length Q)
+    initial_battery: [150.0, 150.0, 150.0]
+    # Forced first action per shuttle at t=0: IDL, CHR, OUT, RET
+    initial_actions: [IDL, IDL, IDL]
+  energy:
+    # Battery capacity
+    Emax: 150
+    # Energy consumed when starting a trip
+    L: 30
+    # Max charge added per slot when charging; expressions allowed here only
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    # Small penalty on starting trips
+    # Departure regularisation (D4). At 0.01, 100 extra trips equal one unit of
+    # waiting-time reduction, so it only breaks ties between equal-waiting
+    # solutions and never competes with the primary objective.
+    start_cost_epsilon: 0.01
+    # Penalty per extra concurrent departure beyond one per slot per direction.
+    # Adds conc_pen * sum_t (eOut[t] + eRet[t]) to the master objective, where
+    # eOut[t] >= Yout[t] - 1 captures departures beyond the first in slot t.
+    # Operationally it spreads departures rather than bunching both shuttles into
+    # the same slot.
+    #
+    # This term is NOT part of the originally published formulation. It is small
+    # in magnitude -- about 1.75 of a ~4190 objective on the baseline instance,
+    # roughly 7 penalised slots -- but large enough to select between otherwise
+    # equal schedules, so state the value used on every reported table. It is a
+    # separate knob from start_cost_epsilon above and must not be conflated with
+    # it (D4).
+    concurrency_penalty: 0.25
+
+master:
+  # Optional FIFO symmetry-breaking across vehicles
+  use_fifo_symmetry: true
+  # Symmetry breaking: order vehicles by total departures
+  symmetry_breaking: true
+  # Use previous master solution as a MIP start
+  use_mip_start: true
+  # Ceiling on ONE master MIP solve, per Benders iteration (seconds).
+  # This is NOT the run budget -- that is solver.total_time_limit_s below.
+  # The Benders loop runs a gap-tied schedule that picks a per-iteration limit;
+  # this caps it. Test phase: 30. Simulation phase: 600.
+  per_iteration_time_limit_s: 30
+  # Ceiling on the master MIP gap, per Benders iteration.
+  # This is NOT the convergence criterion -- that is solver.tolerance below.
+  # The schedule tightens the gap on its own (down to 0.001) as the Benders gap
+  # closes; this is the loosest it is allowed to be. Leave at 0.05 for both phases.
+  per_iteration_mipgap: 0.05
+  # Optional CPLEX parameters
+  cplex_options:
+    CPXPARAM_Preprocessing_Symmetry: 5
+    CPXPARAM_Threads: 0
+  # Master solver backend (preferred: cplex_direct)
+  solver_backend: cplex_direct
+  # Stronger aggregated cuts by tau
+  aggregate_cuts_by_tau: true
+  # Use one theta per scenario (requires multi-cuts)
+  theta_per_scenario: false
+  # Drop tiny cut coefficients to improve numerics
+  cut_coeff_threshold: 0.001
+  # Debug: write LP after each new cut
+  write_lp_after_cut: false
+  # Anchor theta to installed capacity, per prefix of the horizon (D29).
+  # Demand up to slot j can only be served by departures up to j+W_slots, so
+  # theta >= p*(R_cum[j] - S*Y_cum[j+W]) per direction. Without it the master
+  # answers "cost 0.22, no vehicles" for the first five iterations; with it its
+  # bound starts at ~1569 instead of 0.
+  recourse_lower_bound: false
+  # LP phase (Fase 1, item 2). The first iterations solve the master without
+  # integrality: cuts from a fractional y are valid because the recourse value
+  # function is convex in y, but the fractional schedule is not exhibitable, so
+  # the loop claims no upper bound while this is on.
+  lp_phase: true
+  lp_phase_max_iters: 150
+  lp_phase_stall_iters: 0
+  lp_phase_min_rel_improve: 0.005
+  # One tree over the seeded cuts, lazy constraints at integer incumbents.
+  # user_cuts (fractional nodes) is step 2 and the schema refuses it today.
+  branch_and_cut:
+    enabled: true
+    lazy_cuts: true
+    user_cuts: false
+    seed_from_lp_phase: true
+    callback_lp_solver: cplex_direct
+
+subproblem:
+  # Multi-cuts vs averaged cut across scenarios
+  multi_cuts_by_scenario: false
+  # Magnanti–Wong selection for Pareto-optimal cuts
+  use_magnanti_wong: true
+  # Core-point mixing factor alpha in (0,1]
+  mw_core_alpha: 0.3
+  # Use dual slopes for cut generation
+  use_dual_slopes: true
+  # Capacity units contributed by one vehicle starting at time tau
+  S: 15
+  # Max waiting time in minutes or slots
+  Wmax_minutes: 60
+  # Penalty per unit of unserved demand
+  p: 50.0
+  # Restricted fallback probing when proxy cuts are degenerate
+  degenerate_cut_probe_top_k: 6
+  # Treat slopes with max abs value below this threshold as zero
+  degenerate_cut_zero_tol: 1.0e-9
+
+solver:
+  # Benders loop settings.
+  #
+  # Three limits decide when a run stops. They are easy to confuse:
+  #   solver.total_time_limit_s          -- wall clock for the WHOLE loop
+  #   solver.tolerance                   -- relative BD gap that counts as converged
+  #   master.per_iteration_time_limit_s  -- ceiling on ONE master solve (above)
+  #
+  max_iterations: 150
+  # Relative Benders gap (UB-LB)/|UB| at which the run is declared converged.
+  tolerance: 0.01
+  # Budget for the whole Benders loop, in seconds -- and, in this config, the
+  # ceiling on the TREE as well: the driver passes this value straight to the
+  # branch-and-cut solve as its time limit.
+  #
+  # 600 is chosen against what the comparison spent. The seeding LP phase costs
+  # ~150 s, leaving ~450 s of tree, against the ~800 s that lp150_then_mip8.yaml
+  # spent on eight rebuilt trees. The tree is therefore given LESS time than the
+  # thing it is being compared to, which is the right direction to err: a win
+  # under that handicap is a win, and a loss leaves "it needed more time" open
+  # and cheap to test.
+  total_time_limit_s: 600
+  # Optional stall-based early stopping
+  stall_max_no_improve_iters: 0
+  stall_min_abs_improve: 1.0
+  stall_min_rel_improve: 0.002
+  # Backend solver names (Pyomo)
+  master_solver: cplex
+  subproblem_solver: cplex_direct
+  # Emit solver logs during MP solves
+  solver_tee: false
+
+tolerances:
+  # Binary projection tolerance
+  eps_bin: 1.0e-5
+  # Feasibility residual tolerance
+  eps_feas: 1.0e-7
+  # Cut violation/tightness tolerance
+  eps_cut: 1.0e-8
+  # Near-duplicate cut hash tolerance
+  eps_hash: 1.0e-6

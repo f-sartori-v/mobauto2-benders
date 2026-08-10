@@ -21,8 +21,13 @@ With the cap removed, 150 LP iterations at ~0.8 s each:
 | | lower bound |
 |---|---:|
 | LP root relaxation, 150 cuts | **794.62** (reproducible) |
-| after one 102 s MIP solve | **~1080** (single draw) |
+| after one 102 s MIP solve | ~1080 (single draw) |
+| after one 410 s MIP solve | 1111.05 (two draws) |
+| after one 1520 s MIP solve | **1148.65** (single draw) |
 | monolithic MILP, for reference | 1569.44 |
+
+Those three points are close to linear in `ln(t)`: **14× more master time is projected to buy
+about 8% of bound** (D47). Master seconds are not what the lower bound is short of.
 
 The master's internal gap falls from **0.9994 to about 0.20**, and an upper bound appears
 for the first time at this size. So the earlier reading — that the master's branch and
@@ -79,14 +84,30 @@ python -m mobauto2_benders --config configs/phase1/lp_only_150.yaml run
 | `lp_only_150.yaml` | 150 LP iterations, no MIP phase | **794.624549571966** | none claimed |
 | `lp150_then_mip1.yaml` | the same, then one MIP iteration | ~1080 | ~2170 |
 | `lp150_then_mip8.yaml` | the same, then eight | 1089.98 | 2030.86 |
+| `lp150_then_control.yaml` | the same, then ONE long master solve (410 s) | 1111.05 | 2351.86 |
+| `lp150_then_control_1800.yaml` | the same at a 1800 s budget (1520 s of solve) | **1148.65** | 2349.61 |
+| `lp150_then_bnc.yaml` | the same, then one branch-and-cut tree | 1004.22 | **1923.86** |
 
-`lp_only_150.yaml` is **reproducible**: two independent executions gave
-`794.624549571966` with identical trajectories point by point across all 150 iterations. An
-LP has no branch and bound and never stops on the clock, so D26 does not apply to it. It is
-the only number in this README that is not a single draw.
+The last three answer a question the first three cannot: the loop rebuilds a ~19 000-node tree
+every iteration to add one cut, so is the teardown the problem? Partly — one plain solve over
+the same 150 cuts beats eight loop iterations in half the time. But recovering it with a
+CPLEX lazy callback costs more than it saves: registering one disables dual reductions,
+restricts presolve to crushing forms and stops repeat represolve, and that is worth 9.6% of
+lower bound here. Branch-and-cut buys the *upper* bound instead (18% better, because every
+incumbent it accepts has been priced by the subproblem). Details and the two defects the
+measurement found: D46.
 
-The other two print `NOT REPRODUCIBLE` — their master solves stop on a 102 s clock, and the
-same iteration under the same configuration gave 1088.07 in one run and 1080.36 in another.
+`lp_only_150.yaml` is **reproducible**: three independent executions gave
+`794.624549571966` with identical trajectories point by point across all 150 iterations —
+the last two as the seeding phase of the branch-and-cut runs, which is what makes those
+comparable to it at all. An LP has no branch and bound and never stops on the clock, so D26
+does not apply to it. It is the only number in this README that is not a single draw.
+
+The other five print `NOT REPRODUCIBLE` — their solves stop on the clock, and the same
+iteration under the same configuration gave 1088.07 in one run and 1080.36 in another. The
+two branch-and-cut rows were each drawn twice and held to within 0.4%
+(control 1106.15 / 1111.05, tree 1004.62 / 1004.22), which is why the gap between them is
+readable as an effect rather than as noise.
 
 ### The Phase 1 A/B (4 cells, 300 s each) — superseded
 
@@ -122,6 +143,11 @@ added after the fact; each one exists because a number was once quoted without i
   table, whose LB is not within a factor of 1000 of useful.
 - **The LP phase claims no upper bound while it is active**: a fractional schedule cannot be
   exhibited. The UB for `lp_on` and `both_on` comes only from MIP-phase iterations.
+- **The master's objective is not an upper bound.** It is `first_stage + theta`, and theta is
+  bounded only by the cuts the master currently holds, so it can sit *below* the true
+  optimum. Every UB in this file comes from pricing an exhibited schedule with the
+  subproblem. This rule exists because the branch-and-cut driver briefly reported the master
+  objective as a UB, which would have produced a 14% Benders gap that does not exist (D46).
 - **State `(p, W_max) = (50, 60)` and `concurrency_penalty = 0.25`** on any table derived
   from these runs (D18). `concurrency_penalty` is active in the objective and is not part of
   the published formulation. The manifest records all three.
@@ -147,7 +173,7 @@ did not move behaviour unintentionally.
 python -m unittest discover -s tests
 ```
 
-72 tests, about 8 seconds. They cover cut soundness invariants, Magnanti–Wong provenance
+98 tests, about 50 seconds. They cover cut soundness invariants, Magnanti–Wong provenance
 and fallback, symmetry validity, the conditions under which a lower bound may be reported,
 the recourse anchor, the LP phase, and configuration combinations that are refused.
 
@@ -187,7 +213,7 @@ src/mobauto2_benders/
   app.py        parameter assembly    config.py  YAML schema (v2)
 configs/        run configurations, including the Phase 1 cells
 setups/         demand scenarios -- the inputs every config reads
-tests/          72 tests, no network, CPLEX required for the soundness fixture
+tests/          98 tests, no network, CPLEX required for the soundness fixture
 scripts/        sweep driver and a diagnostics smoke check
 docs/           formulation, audit, decision log, Phase 1 evidence
 ```

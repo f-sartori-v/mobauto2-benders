@@ -43,6 +43,20 @@ def _cplex_direct_option_name(key: str) -> str:
     return name[len("CPXPARAM_") :].lower()
 
 
+def _termination_carries_no_solution(term) -> bool:
+    """True when Pyomo legitimately has nothing to load.
+
+    Kept as a named predicate because the alternative -- catching everything --
+    is what let a failed load pass for an infeasible solve. These are the states
+    where "no solution" is the correct answer rather than a symptom.
+    """
+    name = str(term).lower()
+    return any(
+        k in name
+        for k in ("infeasible", "unbounded", "nosolution", "error", "unknown")
+    )
+
+
 def _validate_cplex_options(options: dict, backend: str) -> None:
     """Reject a CPLEX parameter name that will not resolve, at build time.
 
@@ -786,7 +800,19 @@ class ProblemMaster(MasterProblem):
         solver = self._get_solver()
         tee_flag = bool(self._p("solver_tee", self._p("mp_solve_tee", False)))
         emit_reports = bool(self._p("emit_reports", False))
-        # Per-iteration solver controls
+        # Per-iteration solver controls.
+        #
+        # This whole block used to sit under `except Exception: pass`. Everything in
+        # it decides how long the master runs and how tightly it solves, so a
+        # failure here does not degrade the run, it silently changes what the run
+        # IS -- the solve keeps the previous iteration's time limit and mipgap and
+        # nothing is logged. On a long session that is an expensive silent failure,
+        # and it is the same shape as the guard D19 closed when a mistyped CPLEX
+        # parameter was being dropped without a word.
+        #
+        # The narrow catches below are the point: a missing or unset parameter is an
+        # expected state that yields None and is skipped, and anything that is
+        # present but unusable is a defect worth stopping for.
         try:
             time_limit = self._p("solve_time_limit_s")
             if time_limit is not None:
@@ -820,8 +846,13 @@ class ProblemMaster(MasterProblem):
             else:
                 for k, v in cplex_opts.items():
                     solver.options[_cplex_direct_option_name(k)] = v
-        except Exception:
-            pass
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "the master's per-iteration solver controls could not be applied: "
+                f"{type(exc).__name__}: {exc}. Continuing would run this solve under "
+                "the previous iteration's time limit and mipgap, which changes what "
+                "the run measures without saying so."
+            ) from exc
         # Apply warm start if provided: set initial y values only (x-only start)
         #
         # Never during the LP phase. `_relax_integrality()` has already turned yOUT
@@ -985,6 +1016,7 @@ class ProblemMaster(MasterProblem):
             symbolic_solver_labels=True,
         )
         term = getattr(res.solver, "termination_condition", None)
+        solution_loaded = False
         if term in (
             pyo.TerminationCondition.optimal,
             pyo.TerminationCondition.feasible,
@@ -992,8 +1024,17 @@ class ProblemMaster(MasterProblem):
         ):
             try:
                 m.solutions.load_from(res)
-            except Exception:
-                # Retry once with solution loading enabled
+                solution_loaded = True
+            except (ValueError, AttributeError, RuntimeError) as exc:
+                # Retry once with solution loading enabled. The retry is a real
+                # recovery, not a swallow -- but it re-solves, so it costs a full
+                # master solve and silently doubles an iteration's time. Say so,
+                # or a session's timing becomes unaccountable.
+                self._vprint(
+                    f"[MP] load_from failed ({type(exc).__name__}: {exc}); "
+                    "re-solving once with load_solutions=True. This costs a second "
+                    "full master solve for this iteration."
+                )
                 res = solver.solve(
                     m,
                     tee=bool(tee_flag and emit_reports),
@@ -1002,6 +1043,7 @@ class ProblemMaster(MasterProblem):
                     keepfiles=bool(emit_reports),
                     symbolic_solver_labels=True,
                 )
+                solution_loaded = True
         # Try to capture the actual solver log path (including temp log from direct interfaces)
         try:
             for attr in (
@@ -1057,10 +1099,37 @@ class ProblemMaster(MasterProblem):
                 )
             except Exception:
                 pass
-        try:
-            m.solutions.load_from(res)
-        except Exception:
-            pass
+        # HANDLER_CENSUS.md Category A -- and narrowing the catch is what showed
+        # what it was hiding. This load ran UNCONDITIONALLY, including right after
+        # the block above had already loaded the same results object. Pyomo
+        # consumes the symbol map on load, so the second call raised `KeyError`
+        # on every ordinary iteration and `except Exception: pass` absorbed it.
+        # The handler was not protecting against a rare failure; it was making a
+        # redundant call survivable, which is why nobody ever saw the failure it
+        # was nominally there for.
+        #
+        # Now it runs only when nothing has been loaded yet. Swallowing a real
+        # failure here would leave every master variable holding the PREVIOUS
+        # iteration's values, and the candidate collected below is read from them
+        # -- the run would price a schedule it never solved for and call the
+        # resulting cut valid.
+        if not solution_loaded:
+            term_now = getattr(res.solver, "termination_condition", None)
+            try:
+                m.solutions.load_from(res)
+            except (ValueError, AttributeError, RuntimeError, KeyError) as exc:
+                if not _termination_carries_no_solution(term_now):
+                    raise RuntimeError(
+                        f"the master reported {term_now} but its solution could "
+                        f"not be loaded: {type(exc).__name__}: {exc}. Every "
+                        "variable still holds the previous iteration's values, so "
+                        "continuing would price a schedule this solve never "
+                        "produced."
+                    ) from exc
+                self._vprint(
+                    f"[MP] no solution to load (termination={term_now}); this is "
+                    "expected for that status."
+                )
         st = getattr(res.solver, "status", None)
 
         stats = self._extract_solver_stats(res)
@@ -2526,6 +2595,116 @@ class ProblemMaster(MasterProblem):
             cost += conc_pen * sum(max(0.0, y - 1.0) for y in Yout)
             cost += conc_pen * sum(max(0.0, y - 1.0) for y in Yret)
         return float(cost)
+
+    def solve_branch_and_cut(
+        self,
+        cut_source: Any,
+        *,
+        time_limit_s: float | None = None,
+        mipgap: float | None = None,
+        register_callback: bool = True,
+    ) -> tuple[SolveResult, Any]:
+        """Solve the master once, with Benders cuts injected inside the tree (D44).
+
+        Deliberately a separate entry point rather than a branch inside
+        `_solve_inner`. That method is ~900 lines carrying the loop's warm starts,
+        the gap-tied schedule, the CPLEX log parsing and the LP-phase option
+        surgery; threading a second backend through it would put every measured
+        result in this repository at risk to buy nothing. The loop's path is
+        untouched by this method's existence.
+
+        `cut_source` is called with a `Candidate` and must return a
+        `SubproblemResult` -- normally `subproblem.evaluate`. The master stays
+        ignorant of the subproblem class, exactly as it is in the loop.
+
+        Returns `(SolveResult, LazyCutStats)`. The stats are not optional
+        decoration: a branch-and-cut run has no iteration count, so they are the
+        only record of how many cuts the tree actually saw, and
+        `aborted_reason` is what stops a stopped tree being read as a finished
+        one.
+        """
+        assert self.m is not None, "Call initialize() before solve_branch_and_cut()"
+        from ..benders.lazy_cuts import LazyCutStats, register_lazy_callback
+
+        m = self.m
+        # This method builds its own persistent solver and does not touch
+        # `self._solver`. That is what lets `master.solver_backend` stay
+        # `cplex_direct` for the seeding LP phase, so the cuts the tree starts
+        # from are the same cuts run 2 produced, digit for digit. An earlier
+        # draft required the config to declare cplex_persistent; that gate was
+        # protecting against a failure this construction removes, so it went.
+        solver = pyo.SolverFactory("cplex_persistent")
+        solver.set_instance(m)
+        if time_limit_s is not None:
+            solver.options["timelimit"] = float(time_limit_s)
+        if mipgap is not None:
+            solver.options["mipgap"] = float(mipgap)
+        for k, v in (self._p("cplex_options", {}) or {}).items():
+            solver.options[_cplex_direct_option_name(k)] = v
+
+        stats = LazyCutStats()
+        if register_callback:
+            raise_if_aborted = register_lazy_callback(
+                solver,
+                m,
+                cut_source,
+                stats,
+                shuttles=len(m.Q),
+                slots=len(m.T),
+                eps_violation=float(self._p("eps_cut", 1e-8)),
+                vprint=self._vprint,
+            )
+        else:
+            # The control. Same solver, same options, same budget, same seeded
+            # cut set -- one variable changed. Registering nothing is also what
+            # keeps CPLEX's dual reductions and full presolve enabled, which is
+            # precisely the cost being measured.
+            def raise_if_aborted() -> None:
+                return None
+
+        tee_flag = bool(self._p("solver_tee", self._p("mp_solve_tee", False)))
+        res = solver.solve(tee=tee_flag, load_solutions=True)
+        # Before anything is read off the model. A tree that stopped because the
+        # subproblem could not guarantee a cut has a bound certified on nothing,
+        # and every field below would look ordinary.
+        raise_if_aborted()
+
+        term = str(getattr(res.solver, "termination_condition", "")).lower()
+        if term == "optimal":
+            status = SolveStatus.OPTIMAL
+        elif term in ("maxtimelimit", "maxiterations", "other", "feasible"):
+            status = SolveStatus.FEASIBLE
+        elif term == "infeasible":
+            status = SolveStatus.INFEASIBLE
+        else:
+            status = SolveStatus.UNKNOWN
+
+        objective = None
+        lower_bound = None
+        try:
+            objective = float(pyo.value(m.obj))
+        except Exception:
+            objective = None
+        try:
+            lower_bound = float(res.problem.lower_bound)
+        except Exception:
+            lower_bound = None
+
+        self._vprint(
+            f"[BNC] status={status.value} obj={objective} lb={lower_bound} "
+            f"invocations={stats.invocations} cuts={stats.cuts_injected} "
+            f"accepted={stats.incumbents_accepted} validity={stats.validity_counts}"
+        )
+        candidate = self._collect_candidate() if status is not SolveStatus.INFEASIBLE else None
+        return (
+            SolveResult(
+                status=status,
+                objective=objective,
+                candidate=candidate,
+                lower_bound=lower_bound,
+            ),
+            stats,
+        )
 
     def add_cut(self, cut: Cut) -> None:
         # Normal filtered path
