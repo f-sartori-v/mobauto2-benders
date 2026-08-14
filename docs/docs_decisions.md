@@ -2720,3 +2720,143 @@ the function deliberately bypasses `MobautoMilpModel.solve()`, which is the only
 reads `mp`. The cap was accepted, stored, and inert. Q=3 finished in 181 s and hid it. It
 now goes to `opt.options["timelimit"]`, which is why the Q=5 row above stops at 1208.7 s
 and reports itself as truncated instead of running until something else stopped it.
+
+---
+
+## D60 — CPLEX's own root cuts beat the Dantzig-Wolfe root everywhere, by a lot, in a tenth of the time. Stage 3 closes
+
+Date: 2026-08-14. The question D59 set up, asked properly. Script:
+`stage3_column_generation.py --compact --cplex-root`.
+
+### 1. The question D59 asked was the wrong one, and the right one is worse for us
+
+D59 asked whether the DW root exceeds the monolith's bound after 1200 s. That pits a root
+against twenty minutes of tree search — unfair in the direction that makes the
+reformulation look bad, exactly as D52's and D54's slot baselines were unfair in the
+direction that made the decomposition look good. A root is comparable to a root.
+
+CPLEX's root bound at node limit 0 — its own presolve and cutting planes, nothing else —
+against the pure LP relaxation and against the reformulation. T=44, 15-min slots, four
+scenarios, `p_minutes = 56`, minute recourse, all cores:
+
+| Q | compact LP | **DW root** | **CPLEX root** | optimum | DW as % | CPLEX as % |
+|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 248.98 | 281.69 | **415.19** | 431.54 | 65.3% | **96.2%** |
+| 4 | 173.17 | 183.11 | **289.37** | 302.05 | 60.6% | **95.8%** |
+| 5 | 173.15 | 173.15 | **219.55** | 231.25* | 74.9% | **94.9%** |
+
+\* incumbent, not proven — the Q=5 monolith stopped on the clock (D59).
+
+**CPLEX reaches 95–96% of the optimum at its root, in 9–15 seconds.** Column generation
+reaches 61–75% in 50–208 seconds. The reformulation is both far weaker and an order of
+magnitude slower than what a commercial solver does for free before it branches once.
+
+Stated as improvement over the same starting point — the pure LP relaxation:
+
+| Q | DW reformulation | CPLEX root cuts |
+|---:|---:|---:|
+| 3 | +13.1% | **+66.8%** |
+| 4 | +5.7% | **+67.1%** |
+| 5 | +0.0% | **+26.8%** |
+
+Cuts beat reformulation everywhere, by five to twelve times.
+
+### 2. And the DW lift collapses exactly where it is needed
+
+Within one instance family, as the fleet grows:
+
+| Q | lift | monolith |
+|---:|---:|---|
+| 3 | +13.1% | 181 s, optimal |
+| 4 | +5.7% | 315 s, optimal |
+| 5 | **+0.0%** | >1200 s, NOT closed |
+
+**At Q=5 the DW root equals the compact root to four decimals** — 173.1543 both, converged
+on reduced cost with 62 columns. `conv(integer per-vehicle points)` and the per-vehicle LP
+relaxation coincide on the face that matters. With a slack fleet the LP already lands on
+convex combinations of feasible integer trajectories, and there is nothing for the
+reformulation to tighten.
+
+So the lift is largest where the monolith is fastest, and zero where the monolith fails.
+That is the opposite of the shape a method needs.
+
+### 3. What was left, and why it does not save it
+
+Difficulty at Q=5 is not bound quality: the compact root is *relatively tighter* there
+(74.9% of the optimum) than at Q=3 (57.7%), while the solve is six times slower. The
+binding difficulty is tree size and symmetry — 440 binaries at Q=5 against 264 at Q=3, with
+many near-equivalent solutions.
+
+That is precisely what Dantzig-Wolfe is supposed to fix: the vehicle index is gone, so
+symmetry does not exist to be broken. A root measurement is structurally blind to it, so
+for a while the honest position was "the cheap proxy is exhausted, this needs the tree".
+
+**Section 1 removes that hope.** A branch-and-price tree would start 20 to 35 percentage
+points of the optimum behind a branch-and-cut tree — 65.3% against 96.2% at Q=3 — and would
+have to make that up through symmetry alone, having already spent ten times longer to reach
+its worse starting point. Branch-price-and-cut could add cuts on top of the reformulation,
+but this is not a near miss that better engineering closes.
+
+### 4. Verdict
+
+**Stage 3 closes, the way stage 2 did: measured, not abandoned.** The design's premise —
+that the bound lives at the LP root and the reformulation is the way to attack it — is half
+right. The bound does live at the root. The reformulation is simply a much weaker way to
+improve it than the cuts CPLEX already applies for free.
+
+D40 said the bound lives at the fractional LP root and nothing moved it. The reason nothing
+moved it is now clear: **CPLEX had already moved it, 96% of the way, before this project's
+machinery was invited.** Every bound this repository has compared against was measured
+against the LP root, not against what the solver reaches at its own root.
+
+### 5. On the "hard band" framing
+
+The framing — a method that wins where the direct solve fails, and loses on either side of
+it — is legitimate and is how crossover results are normally stated. It requires three
+measurements: the band exists, we win inside it, we lose outside it, all reported equally.
+
+**Measured: the band exists (D59, Q=5 does not close). We do not win inside it.** The lift
+inside the band is exactly zero, and CPLEX's root is 27% better than ours there. The
+framing is sound; this method does not satisfy it.
+
+
+### 5b. The hardness curve, and what it does and does not establish
+
+The "it gets easy again" hypothesis, tested by pushing Q further. Same family throughout.
+
+| Q | incumbent | bound | gap | status | cap |
+|---:|---:|---:|---:|---|---:|
+| 3 | 431.5433 | 431.5433 | 0 | optimal, 181.0 s | 1200 s |
+| 4 | 302.0467 | 302.0464 | 0 | optimal, 314.8 s | 1200 s |
+| 5 | 231.2500 | 226.0703 | 2.24% | NOT closed | 1200 s |
+| 6 | 196.6383 | 186.9012 | **4.95%** | NOT closed | 600 s |
+| 7 | 175.6117 | 175.2526 | **0.20%** | NOT closed | 600 s |
+
+**What this establishes.** Q=6 and Q=7 ran under the SAME 600 s cap, so they are directly
+comparable, and Q=7 is dramatically easier: 0.20% remaining against 4.95%. Difficulty does
+fall away at large fleets, and the hypothesis has real support in that pair.
+
+**What it does not establish.** Q=5 ran under a 1200 s cap and Q=6 under 600 s, so those
+two cannot be ranked against each other. The peak is somewhere in Q=5-6 and this data
+cannot say which, nor how sharp it is. Ranking them needs equal caps and was not run.
+
+The mechanism is visible in the objectives: 431.54, 302.05, 231.25, 196.64, 175.61. Adding
+vehicles buys less and less unmet demand, and once nearly all demand is served the
+instance loses its bite. The hard band is where capacity is neither clearly short nor
+clearly sufficient -- which is, as the operator put it, the interesting part of the
+problem. **It is also, per section 2, exactly where the reformulation contributes nothing.**
+
+### 6. What survives
+
+Nothing here touches the multi-resolution result, which is the contribution: slot
+aggregation misprices its own schedules by 28.5% on the objective and 66–86% on waiting,
+chooses schedules 3–22% worse single-scenario and ~3.84% worse over four scenarios, and a
+minute-level recourse corrects both at under 1% of iteration cost with the cut machinery
+unchanged (D51–D55). That result is independent of every decomposition question in D56–D60,
+and it does not need the decomposition to win.
+
+The decomposition line of work — Benders, the down-set cut, Dantzig-Wolfe — has now been
+measured against the right baseline three times and lost three times: 390x slower than the
+monolith (D56), dominated as a cut (D57), and beaten at the root by the solver's own cuts
+(here). The honest conclusion is that this problem, at these sizes, does not want to be
+decomposed.

@@ -348,7 +348,31 @@ what M1 did in spec §2.9.
 *Note the interaction with stage 1:* both act on the LP root. Measure them separately
 before measuring them together, or neither number means anything.
 
-### Stage 3 — Dantzig-Wolfe over per-vehicle trajectories — **ROOT MEASURED, IT MOVES (D57)**
+### Stage 3 — Dantzig-Wolfe over per-vehicle trajectories — **CLOSED, BEATEN BY THE SOLVER'S OWN CUTS (D60)**
+
+*Do not build the tree.* Measured against the right baseline: CPLEX's root bound at node
+limit 0 reaches **95–96% of the optimum in 9–15 s**, while the Dantzig-Wolfe root reaches
+**61–75% in 50–208 s**. Over the same pure LP relaxation the reformulation buys
++13.1%/+5.7%/+0.0% at Q=3/4/5 where CPLEX's root cuts buy +66.8%/+67.1%/+26.8%.
+
+Worse for the design's premise, the lift **collapses as the instance hardens**: +13.1% at
+Q=3 (monolith 181 s), +5.7% at Q=4 (315 s), **+0.0% at Q=5** (does not close in 1200 s). At
+Q=5 the DW root equals the compact root to four decimals — with a slack fleet,
+`conv(integer per-vehicle points)` and the per-vehicle LP relaxation coincide on the face
+that matters.
+
+The one remaining argument — that difficulty at Q=5 is tree size and symmetry, which a root
+cannot see and which the reformulation deletes — does not survive: branch-and-price would
+start 20–35 points of the optimum behind branch-and-cut, having taken ten times longer to
+get there.
+
+**The premise below is half right.** The bound does live at the LP root. The reformulation
+is simply a far weaker way to raise it than cuts the solver already applies for free — and
+that is why D40 found nothing moved the bound. It had already been moved.
+
+The text below is kept because it is the reasoning that had to be checked.
+
+### Stage 3 (original text) — Dantzig-Wolfe over per-vehicle trajectories
 
 At Q=2/T=22 the whole pool enumerates (159 768 columns after the battery filter), so the
 reformulation was built **exactly** — no pricing, no dominance rule — and the root went

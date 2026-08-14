@@ -296,6 +296,53 @@ def monolith(config: str, p_minutes: float, policy: str, time_limit_s: float,
     return obj, bound, secs, str(res.solver.termination_condition)
 
 
+def cplex_root_bound(config: str, p_minutes: float, policy: str, time_limit_s: float,
+                     ) -> tuple[float, float]:
+    """CPLEX's OWN root bound: node limit 0, so presolve and root cuts run and nothing else.
+
+    This is the comparison the D59 question should have asked. "Does the DW root exceed
+    the monolith's bound after 1200 s?" pits a root against twenty minutes of tree search
+    and is unfair in the direction that makes the reformulation look bad, exactly as the
+    earlier slot-monolith comparisons were unfair in the direction that made it look good.
+
+    A root is comparable to a root. If the DW root beats what CPLEX reaches at ITS root
+    after its own cuts, a branch-and-price tree starts ahead of a branch-and-cut tree, and
+    that is a claim about relaxations that survives. If it does not, the reformulation is
+    weaker than cuts CPLEX already applies for free.
+    """
+    import pyomo.environ as pyo
+    from mobauto2_milp.config import load_config
+    from mobauto2_milp.app import _prepare_params
+    from mobauto2_milp.model import MobautoMilpModel
+    from mobauto2_benders.minute_pricer import attach_minute_recourse, load_request_minutes
+
+    cfg = load_config(config)
+    mp, _sp = _prepare_params(cfg, {})
+    delta = int(cfg.model.time.slot_resolution)
+    pm = MobautoMilpModel(dict(mp))
+    pm.initialize()
+    attach_minute_recourse(
+        pm.m, None, delta, float(cfg.service.S), float(cfg.service.Wmax_minutes),
+        p_minutes, policy=policy, objective_scale=1.0 / float(delta),
+        scenarios=_scenarios(cfg, load_request_minutes),
+    )
+    opt = pyo.SolverFactory("cplex_direct")
+    opt.options["mip_limits_nodes"] = 0
+    opt.options["timelimit"] = float(time_limit_s)
+    t0 = time.perf_counter()
+    # `load_solutions=False` is required, not tidiness: at node limit 0 CPLEX may finish
+    # with no incumbent at all, and pyomo raises "bad status: error" trying to load a
+    # solution that does not exist. The bound is what is wanted here and it survives on
+    # the results object either way.
+    res = opt.solve(pm.m, tee=False, load_solutions=False)
+    secs = time.perf_counter() - t0
+    try:
+        bound = float(res.problem.lower_bound)
+    except Exception:
+        bound = float("nan")
+    return bound, secs
+
+
 def compact_root(config: str, p_minutes: float, policy: str) -> tuple[float, float]:
     """The control: the master's own formulation with its binaries relaxed.
 
@@ -348,6 +395,9 @@ def main() -> int:
                          "optimum the lift is a fraction of. Argument is the time cap.")
     ap.add_argument("--monolith-only", action="store_true",
                     help="Solve only the monolith and stop.")
+    ap.add_argument("--cplex-root", type=float, default=None, metavar="SECONDS",
+                    help="Also report CPLEX's own root bound (node limit 0). The "
+                         "root-vs-root comparison; see cplex_root_bound.")
     args = ap.parse_args()
 
     if args.monolith_only:
@@ -368,6 +418,12 @@ def main() -> int:
     print("Stage 3 -- DW root by column generation (pricing = the master at Q=1)")
     print(f"  {args.config}   policy={args.policy}   p_minutes={args.p_minutes:.0f}")
     print("=" * 78)
+
+    if args.cplex_root is not None:
+        b, t = cplex_root_bound(args.config, args.p_minutes, args.policy, args.cplex_root)
+        print(f"\nCPLEX root bound (node limit 0, its own cuts)  {b:12.4f}   {t:.1f}s")
+        if not args.compact:
+            return 0
 
     z_compact = None
     if args.compact:
