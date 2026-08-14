@@ -1,0 +1,130 @@
+# DESIGN_DD_v1 stage 1, the CONTROL arm. Window trip caps OFF.
+#
+# WHAT IT MEASURES. Whether the window trip caps derived from the single-vehicle
+# decision diagram (D48) lift the master's LP root. This file is the "off" arm; its
+# twin `dd_lp_caps_on.yaml` differs in EXACTLY ONE key, master.window_trip_caps.
+# D46 is the standing warning about two-variable comparisons: its first available
+# branch-and-cut comparison differed in both the callback and the clock, and decided
+# nothing.
+#
+# WHY LP-ONLY. The master LP objective IS the Benders lower bound, and it is exact --
+# an LP has no branch and bound, so nothing is truncated and the number is not a best
+# bound. Whatever this reports is a statement about the cut set and the formulation
+# alone, not about how long branch and bound had. It is also the only regime in this
+# repository that reproduces to the digit: D26's clock/reproducibility incompatibility
+# does not apply, because an LP never stops on the clock.
+#
+# WHY stall exit is OFF (lp_phase_stall_iters: 0). D40: the LP objective curve is flat
+# until roughly iteration 12 and only then climbs. The stall detector calls that flat
+# stretch a stall and would end the phase at its flattest point -- which is exactly how
+# Fase 1 reached a structural verdict that was wrong.
+#
+# THE TEST POINT is baseline_d9: T_minutes 660 / slot_resolution 30 -> T=22,
+# trip_duration 30 -> trip_slots=1, delta_chg = 70/(60/30) = 35, Q=2, one scenario.
+# Chosen over the Q=3 / T=44 Fase 1 point so a run finishes in minutes, and because
+# **the optimum of this instance is known independently**: 4183.24, from a monolithic
+# MILP rather than from a Benders run of this same code. So both arms carry a validity
+# check that costs nothing -- any LP root above 4183.24 proves the master has stopped
+# being a relaxation, which is what an invalid inequality looks like.
+#
+# NO UPPER BOUND is claimed: a fractional schedule cannot be exhibited, and the loop
+# says so on exit. Only the LB is readable here.
+
+schema:
+  name: mobauto2_benders_config
+  version: 2
+
+run:
+  name: dd_lp_caps_off
+  log_level: INFO
+  log_file: null
+  report_dir: null
+  seed: 42
+
+data:
+  demand_file: setups/base.yaml
+  scenario_files:
+  scenario_weights: null
+  R_out: null
+  R_ret: null
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0]
+    initial_actions: [IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+master:
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  recourse_lower_bound: false
+  # THE ONE VARIABLE UNDER TEST. false here, true in dd_lp_caps_on.yaml.
+  window_trip_caps: false
+  per_iteration_time_limit_s: 120
+  per_iteration_mipgap: 0.05
+  cplex_options:
+    CPXPARAM_Preprocessing_Symmetry: 5
+    CPXPARAM_Threads: 1
+  solver_backend: cplex_direct
+  aggregate_cuts_by_tau: true
+  theta_per_scenario: false
+  cut_coeff_threshold: 0.001
+  write_lp_after_cut: false
+  lp_phase: true
+  lp_phase_max_iters: 150
+  lp_phase_stall_iters: 0
+  lp_phase_min_rel_improve: 0.005
+
+subproblem:
+  multi_cuts_by_scenario: false
+  use_magnanti_wong: true
+  mw_core_alpha: 0.3
+  use_dual_slopes: true
+  S: 15
+  Wmax_minutes: 60
+  p: 50.0
+  degenerate_cut_probe_top_k: 6
+  degenerate_cut_zero_tol: 1.0e-9
+
+solver:
+  # Budgeted by iterations, not seconds (D26). max_iterations binds;
+  # total_time_limit_s is set generously so it does not.
+  #
+  # 40, not 150, and the reason is measured rather than guessed. On the caps-off arm
+  # the LP phase ends itself at iteration 39 with "no cut generated" -- i.e. the LP
+  # root is CONVERGED, no cut is violated any more, and that final LP objective is
+  # the number stage 1 is about. Letting the loop continue past it turns the run into
+  # a MIP convergence run: the same instance ran 75 iterations / 524 s to
+  # status=OPTIMAL with LB 4179.07 / UB 4183.24. That is a worthwhile measurement and
+  # it is a DIFFERENT one, so it gets its own pair of configs rather than being mixed
+  # in here.
+  #
+  # Equal iteration counts across the two arms are a reproducible basis for
+  # comparison; equal seconds are not (D26).
+  max_iterations: 40
+  tolerance: 0.001
+  total_time_limit_s: 600
+  stall_max_no_improve_iters: 0
+  stall_min_abs_improve: 1.0
+  stall_min_rel_improve: 0.002
+  master_solver: cplex
+  subproblem_solver: cplex_direct
+  solver_tee: false
+
+tolerances:
+  eps_bin: 1.0e-5
+  eps_feas: 1.0e-7
+  eps_cut: 1.0e-8
+  eps_hash: 1.0e-6

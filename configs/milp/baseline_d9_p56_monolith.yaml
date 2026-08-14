@@ -1,0 +1,81 @@
+# The baseline_d9 instance in the POLICY regime, p_minutes = 56.
+#
+# WHERE 56 COMES FROM. The operator's own indifference statement: delaying a shuttle
+# already carrying 14 passengers by 4 minutes costs 4 x 14 = 56 passenger-minutes, and
+# is judged worth one additional passenger carried. So one unserved passenger is worth
+# about 56 passenger-minutes. Five minutes was called "the yellow zone", which puts the
+# ceiling near 70; 56 is the stated figure and is used as-is.
+#
+# WHY THIS IS A SEPARATE FILE AND NOT AN EDIT. `configs/baseline_d9.yaml` states
+# `p: 50` in SLOT units, i.e. 50 x 30 = 1500 passenger-minutes -- 27x the policy above.
+# At 1500 the model will delay 14 passengers by 107 minutes to pick up one more. That
+# number is nonetheless load-bearing: the reference optimum 4183.24, the whole
+# soundness suite and every result from D30 onward are computed against it. Editing it
+# in place would silently invalidate all of them. Both regimes therefore ship, and
+# every reported number says which one it used.
+#
+# WHAT CHANGES. Measured (D53): at p_minutes 1500 waiting is 4.1% of the objective and
+# minute-level valuation changes nothing under the `start` placement assumption. At 56
+# waiting is ~47% and minute-level valuation serves 15-24 more passengers under BOTH
+# placement assumptions. The regime is not a detail -- it decides whether the
+# multi-resolution result exists at all.
+
+schema:
+  name: mobauto2_milp_config
+  version: 3
+
+run:
+  name: baseline_d9_p56_monolith
+  log_level: INFO
+  seed: 42
+
+data:
+  # Single scenario, matching baseline_d9.yaml's demand_file.
+  scenario_files: [setups/base.yaml]
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0]
+    initial_actions: [IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+milp:
+  # Symmetry breaking is valid here for the same reason it is in the Benders master
+  # (2.8): a homogeneous fleet ordered by TOTAL departures. The fleet is homogeneous
+  # -- one-element lists above pad by repeating the last entry (4.2).
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  # Tight gap: this run exists to produce a reference number, so it must terminate on
+  # the gap and not on the clock. A clock-truncated MIP is machine-dependent (D26),
+  # and a reference produced that way would be a different number on every machine.
+  solve_time_limit_s: 900
+  mipgap: 1.0e-6
+  solver_backend: cplex
+  cplex_options:
+    CPXPARAM_MIP_Strategy_Symmetry: 5
+    # Single-threaded for reproducibility, matching baseline_d9.yaml.
+    CPXPARAM_Threads: 1
+
+service:
+  S: 15
+  Wmax_minutes: 60
+  p_minutes: 56.0
+  # Unused on the default aggregate path (aggregate_service_by_start), which is the
+  # one that matches the post-D30 subproblem. Left at 0 so it cannot silently
+  # perturb the objective if that path is ever switched off.
+  fill_first_epsilon: 0.0
+
+solver:
+  solver_tee: false

@@ -148,6 +148,11 @@ def build_manifest(
             "Wmax_minutes": cfg.subproblem.Wmax_minutes,
             "Wmax_slots": cfg.subproblem.Wmax_slots,
             "p": cfg.subproblem.p,
+            # Slot units. p_minutes is the resolution-independent form it came
+            # from, or null when p was stated directly (D50).
+            "p_minutes": cfg.subproblem.p_minutes,
+            "recourse_resolution": cfg.subproblem.recourse_resolution,
+            "departure_policy": cfg.subproblem.departure_policy,
         },
         "objective_terms": {
             "start_cost_epsilon": cfg.model.costs.start_cost_epsilon,

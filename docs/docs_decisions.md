@@ -1430,3 +1430,847 @@ an honest number. It says the expected value of running it is low enough that it
 be the next thing done.
 
 Single draw at 1520 s, `NOT REPRODUCIBLE` (D26). The 410 s point is two draws 0.4% apart.
+
+---
+
+## D48 — The recourse depends on `y` only through the per-slot aggregate, and that is a design, not a remark
+
+Date: 2026-08-13. Design recorded in `DESIGN_DD_v1.md`. **Nothing here is measured yet.**
+
+`ProblemSubproblem.evaluate` reads the master candidate only to build
+`C_d[τ] = S · Σ_q y_d[q,τ]`, and `solve_subproblem` puts that vector in the right-hand side
+of the capacity rows and nowhere else. The arc set, the variable set, the demand rows and
+the objective coefficients are functions of `(T, Wmax_slots, p)` alone. So the recourse is a
+function of the **signature** `(Y_OUT, Y_RET) ∈ Z_{≥0}^{2T}`, not of `y`: two schedules with
+the same signature produce a byte-identical LP, hence the same value **and the same dual**.
+
+At Q=3 / T=44 one signature can carry ~`3.9 × 10^8` distinct `y`.
+
+**Half of this is already exploited, and saying otherwise would be wrong.** With
+`aggregate_cuts_by_tau` the cut is written on `Yout[τ]`/`Yret[τ]` and `_assert_q_invariant`
+enforces that the collapse is an identity. One cut has always bound the whole fibre. That
+dates from D10 and is not a new opportunity.
+
+**What is not exploited is two things.**
+
+1. *The master still branches per vehicle.* `2·Q·T` binaries, and symmetry breaking orders
+   vehicles only by **total** departures (`Q−1` rows). The spec §2.8 is right that the
+   stronger prefix form is invalid — the answer is therefore not a stronger symmetry
+   constraint but a formulation without a vehicle index. Traced constraint by constraint,
+   every master row is separable by vehicle; the coupling is exactly three terms
+   (`θ` cuts, `ε·Σ Z`, the concurrency penalty), and all three are functions of the
+   signature alone. That is a Dantzig-Wolfe structure, and its LP relaxation optimises over
+   `conv(integer points of the per-vehicle polytope)` rather than that polytope's LP
+   relaxation. D40 put the bound at the LP root, so this is aimed at the measured
+   bottleneck rather than at tidiness.
+
+2. *The cut is convex where it only needs to be valid on a lattice.* The recourse is convex
+   **and non-increasing** in the signature, so one LP solve proves `Q(Y) ≥ Q(Ŷ)` for every
+   integer `Y ≤ Ŷ` — a whole down-set, which is the LBBD shape in Hooker §6.2 and is not
+   implied by the convex envelope at fractional `Y`. The obstacle is linearising it: 88
+   indicators at T=44. Spec §2.9 (M1) is the standing warning that a sound inequality can
+   still make the master worse, so this is staged behind something cheaper.
+
+**Four exactness conditions are pinned, each with the test that must fail if it stops
+holding:** E1 recourse constant on the fibre (duals too, not only values); E2 `y` in the
+RHS only — D30 restated as a standing condition rather than a past fix; E3 master rows
+separable by vehicle, with an explicit allow-list for the three coupling terms; E4
+homogeneous fleet, reusing the precondition symmetry breaking already enforces.
+
+**The trap this closes in advance.** The CP research note proposes a minute-level
+availability profile driven by the master's slot decision. Built naively that is D30 again —
+`y` enters `A`, not `b`, and no cut generator on top is valid. It is safe if and only if the
+minute grid is fixed and `y` scales the right-hand side through a constant 0/1 incidence
+matrix, which holds for a deterministic trip duration and per scenario for travel-time
+scenarios, and fails the moment trip duration becomes a decision. Note that the signature
+property survives the extension unchanged, which is the actual argument for
+multi-resolution: the master-side structure is indifferent to the subproblem's resolution.
+
+**Staged, with the refutation stated in advance for each:** (0) count signature revisits in
+the D40 LP run — diagnostic, free; (1) window trip-cap inequalities in `Y` alone from a
+single-vehicle diagram, which is D46's own named lever, refuted if the LP root does not move
+off 794.62; (2) the down-set cut, measured offline before integration; (3) the
+Dantzig-Wolfe reformulation with pricing as a resource-constrained shortest path.
+
+Stage 3 carries one claim that must be **verified by enumeration, not argued**: the pricing
+DP's max-battery dominance. `charge_before_idle` makes charging in slot `t` depend on
+`c[t−1]`, so the greedy policy is constrained by its own past. It looks monotone. This round
+has four refuted conclusions that also looked obvious, so it gets checked against the MILP
+at Q=1, T≤12 before anything relies on it.
+
+**Standing caveat, unchanged from D46/D47.** The monolith solves the Q=3 test point exactly
+in 39 s and the best measured Benders configuration reaches 1148.65 in 1520 s. None of this
+is competitive until that comparison changes, and a better bound that is still an order of
+magnitude behind must be reported as a result about Benders, not as a method.
+
+---
+
+## D49 — The window trip caps lift the LP root 6.6% and cost nothing, and the prediction that said otherwise was mine
+
+Date: 2026-08-13. Stage 1 of `DESIGN_DD_v1`, measured. Configs:
+`configs/phase1/dd_lp_caps_{off,on}.yaml` (small point) and
+`configs/phase1/dd_p1_caps_{off,on}.yaml` (Fase 1 point).
+
+**The inequality.** From the single-vehicle relaxed decision diagram
+(`problem/vehicle_dd.py`), for every window `[t1,t2]`
+
+    sum_{tau in [t1,t2]} ( Y_OUT[tau] + Y_RET[tau] )  <=  Q * max_trips(t1,t2)
+
+`max_trips` is maximised over every entry state, so it bounds any vehicle's departures in
+the window whatever preceded it; summing over Q independent vehicles gives the right-hand
+side. It is in `Y` alone, so it constrains the first stage and cannot touch the validity of
+the Benders cuts. Every simplification in the diagram is in the permissive direction --
+`charge_before_idle` dropped, entry battery `Emax`, entry location maximised -- because a
+cap that is too large is merely weak while a cap that is too small stops the master being a
+relaxation, which is the 2.8 / D30 failure mode.
+
+**Two points, one variable, `master.window_trip_caps`.**
+
+| point | slot | Q | trip_slots | LP root off | LP root on | delta | wall off | wall on |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| small | 30 | 2 | 1 | 2769.52 | 2781.83 | **+0.44%** | 19 s | 43 s |
+| Fase 1 | 15 | 3 | 2 | 794.624549571966 | **846.936259826576** | **+6.58%** | 508 s | **465 s** |
+
+Both arms of both pairs: zero `CHECK FAIL`, `MW FAIL`, `SP WARN`, `CHECK ERROR`, `INVALID`,
+`NOT REPRODUCIBLE`. The LP phase never stops on the clock, so D26 does not apply and these
+reproduce.
+
+**The control is also a regression test, and it passed.** With caps off,
+`dd_p1_caps_off.yaml` is `lp_only_150.yaml` plus one inert key, and it reproduced D40's
+number to the digit -- 794.624549571966 -- with the whole trajectory matching point by
+point (0.311 at 10, 601.424 at 40, 773.996 at 80). So the D48 work adds to the model
+without changing it.
+
+**The mechanism is local density, not total mass.** The caps-off LP ends at a total
+departure mass of 39.2557 against a whole-horizon cap of 39; with caps on it ends at 38.6.
+The horizon-wide constraint moved the total by 0.66 departures and is essentially slack.
+The 6.58% came from the ~942 *window* caps redistributing where departures sit. This also
+explains the small point: at `trip_slots = 1` the travel-time half of the cap is vacuous --
+"departures at least one slot apart" is every slot -- leaving only the energy bound, which
+the master's own LP relaxation largely already derives, since `b` is continuous and
+`C4_bal` is an equality. Relative tightness of the whole-horizon cap tracks this: 26 vs a
+trivial 40 (1.5x) at the small point, 39 vs 123 (3.2x) at Fase 1.
+
+**The prediction, recorded in the config header before the run, and refuted.** It said
++1% to +5% at 2-4x the master time. The result is +6.58% at 0.92x the master time: wrong
+on the magnitude and wrong on the sign of the cost. Worse, mid-run -- after seeing the
+control's 39.26 against a cap of 39 -- I revised the expectation down to "well under 1%" on
+the grounds that the cap was nearly slack. The observation was correct and the inference
+was wrong: the gain never depended on cutting total mass. That is D30/D40/D45's pattern
+again, and it happened *with the prediction already written down*. Writing it down makes
+the miss legible; it does not prevent it.
+
+**Reading, per the criteria the header set in advance.** Above +5% means the mechanism is
+scale-sensitive in the direction hoped for, and the next question is **Q**, not which subset
+of caps to add. The cap's right-hand side is `Q * max_trips`, so its bite scales with the
+fleet.
+
+**What does NOT change: standing.** The root goes from 50.6% to 54.0% of the monolith's
+1569.44, which the monolith still produces exactly in 39 s. A 46% gap is not closed by 6.6%
+of root. What this does change is the input to D47's curve -- the 1148.65-at-1520 s point
+started from a root of 794.62, and whether a root of 846.94 moves it is a separate,
+unrun measurement.
+
+**Stage 0, the fibre count, is answered and it is a negative.** Across 150 iterations the
+loop hands the subproblem 150 distinct signatures and repeats none. Caching priced
+signatures buys nothing. At the small point only 5 of 40 candidates were integral, each
+carrying a fibre of `2^24 = 16 777 216` master solutions the subproblem cannot distinguish
+-- so the redundancy is real, but it lives in the master's search, not in the loop. That is
+evidence for stages 1 and 3 and against a memo, which is what `DESIGN_DD_v1` predicted.
+
+**Exactness conditions E1-E4 are now enforced rather than assumed** (`tests/`, 132 tests
+green). E1 checks that the recourse is constant on the fibre **including the duals**, since
+value equality alone would let two members of one fibre produce two different cuts. E2 is
+D30 as a standing condition: recourse non-increasing in the signature over a strict
+ascending chain, and the dual row set unchanged. E3 walks every master row and asserts it
+touches at most one vehicle, with a four-entry allow-list -- the contract stage 3 needs.
+
+**One open question, deliberately not closed.** The caps-on arm at the small point fired
+`[CHECK FAIL] MP total exceeds SP total` once. The line printed both sides at `%.6g`, where
+any violation under ~0.005 renders identically, so it could not be triaged; it now prints
+17 digits and the excess. Measured: excess `5.48e-05`, relative `1.97e-08`, against a check
+whose tolerance is **absolute 1e-6** -- about 3.6e-10 relative at that magnitude, tighter
+than CPLEX's own optimality tolerance, while every comparable check in this codebase is
+scale-relative (`_ok`, `_assert_q_invariant`). **The tolerance was not changed.** Loosening a
+validity check on the strength of one warning is how a real defect gets tuned away.
+
+---
+
+## D50 — The Q hypothesis is refuted, the monolith is back in the repository, and 4190.74 is a log-parsing artifact
+
+Date: 2026-08-13. Three results from one session, and only one of them was planned.
+
+### 1. The window trip cap's effect does not grow with the fleet
+
+D49's reading rule said the next question was Q. It was measured, at the Fase 1 point
+(slot 15, `trip_slots` 2, 4 scenarios), one variable per pair:
+
+| Q | LP root off | LP root on | delta | wall off | wall on |
+|---:|---:|---:|---:|---:|---:|
+| 3 | 794.624549571966 | 846.936259826576 | **+6.58%** | 508 s | 465 s |
+| 4 | 330.003661932171 | 332.277638592403 | **+0.69%** | 411 s | 453 s |
+| 5 | 313.612329376050 | 318.058777573444 | **+1.42%** | 454 s | 1019 s |
+
+The prediction recorded in those config headers before the run was "+8% or more at Q=4 and
++9% or more at Q=5", growing with Q. The effect **falls** from Q=3 to Q=4 and is not
+monotone. By the criterion those headers set in advance, **the Q hypothesis is dead and
+D49's reading rule was wrong.** At Q=5 the caps also cost 2.2x the wall time for +1.42%,
+which is spec 2.9's M1 trade-off appearing for real.
+
+That is the third consecutive refuted prediction on this mechanism (D49 twice, here once).
+Recording the count because the pattern, not the individual miss, is the useful signal:
+every one of the three was an argument from structure that a measurement overturned.
+
+**What the three points do track is the size of the recourse** -- 794, 330, 314. The cost
+collapses once the fleet is adequate, and the cap plausibly bites only while departure
+capacity is the binding resource. That is a hypothesis on three points and is labelled as
+one. The measurement that separates it from a pure `trip_slots` effect is Q=2 at slot 15,
+where the fleet is tightest and `trip_slots` stays at 2; the existing Q=2 point is at
+slot 30 and therefore confounded. Configs: `configs/phase1/dd_q2s15_caps_{off,on}.yaml`,
+prediction recorded in their headers.
+
+**Measured, and the tightness hypothesis is refuted too.** Those headers set `>= +6.6%`
+as support and `< +3%` as refutation. The result is **+1.52%** (3751.61 -> 3808.66, LP
+roots at phase self-termination, 92 and 91 iterations). Q=2 at slot 15 is the tightest
+fleet in the whole set and it does not beat Q=3. The full curve:
+
+| Q | slot | trip_slots | LP root off | LP root on | delta |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 30 | 1 | 2769.52 | 2781.83 | +0.44% |
+| 2 | 15 | 2 | 3751.61 | 3808.66 | +1.52% |
+| 3 | 15 | 2 | 794.62 | 846.94 | **+6.58%** |
+| 4 | 15 | 2 | 330.00 | 332.28 | +0.69% |
+| 5 | 15 | 2 | 313.61 | 318.06 | +1.42% |
+
+**The honest reading: Q=3 is an outlier and nothing measured explains it.** Every other
+point sits between +0.44% and +1.52%. Two mechanisms were proposed and both are dead --
+fleet size, then fleet tightness -- which is four refuted predictions on this one
+mechanism across D49 and D50. The useful move is to stop proposing a third and record the
+curve as measured.
+
+**Consequence for stage 1.** At ~1% of LP root for 1x to 2.2x the master time, the window
+trip caps are not the lever D46 named. They are valid, cheap to derive and correctly
+implemented; they are also not worth turning on by default, and `master.window_trip_caps`
+stays off. Whatever is special about Q=3 is a separate question from whether the caps pay,
+and the answer to the second is no.
+
+**Method note, recorded because it cost about an hour of machine time.** These runs were
+budgeted by `max_iterations` (right, per D26, for comparing two arms) with no wall-clock
+bound. But the LP phase -- the only part read -- self-terminates at "no cut generated"
+well before the iteration cap: at 92 of 150 here, versus consuming all 150 at Q=3. So each
+run spent roughly two thirds of its wall time in a MIP tail whose numbers are discarded.
+The Q=2 control took 4m23s to produce its LP root and then ran 26 more minutes. Budget
+this class of experiment with `total_time_limit_s` as well, or add a flag that ends the
+loop when the LP phase exits.
+
+### 2. The monolithic MILP is in the repository again, and reproduces 4183.24
+
+`src/mobauto2_milp/` (11 source files) plus `configs/milp/baseline_d9_monolith.yaml`.
+Measured: `status=OPTIMAL best_lb=4183.24 best_ub=4183.24 gap=0.000%` in 6.7 s. The
+reference that non-negotiable 8 depends on is regenerable for the first time.
+
+**What "independent" does and does not mean, now that the code can be read.** The monolith
+attaches the exact recourse LP and pins `theta` to it by *equality*, so there is no cut, no
+`theta` approximation, and no D30-class defect can reach it. That is independence from the
+**decomposition**. It is *not* independence from the **formulation**: `mobauto2_milp/model.py`
+is a second copy of the first-stage model that `mobauto2_benders/problem/master_impl.py`
+also implements, kept in sync by hand. A defect present in both copies is invisible to this
+check. Non-negotiable 8 currently claims more than it delivers and should be reworded.
+
+Constraint sets match. One difference, verified rather than assumed: `atL`, `atM` and
+`inTrip` are continuous `[0,1]` in the monolith and `Binary` in the master. They are pinned
+by equalities driven by binary `y` from a fixed initial state, so they are implied integral
+-- measured at a maximum distance from an integer of **1.3e-15**. Safe, and it makes the MIP
+easier. The four demand files are byte-identical to the repository's modulo CRLF, so the
+instance is the same one.
+
+### 3. 4190.74 is a CPLEX log-parsing artifact, and the parser is still live in both packages
+
+The monolith run printed the solver API and the log parser side by side on the same solve:
+
+    MP raw solver:    incumbent=4183.24   best_bound=4183.24
+    MP parsed bounds: best_integer=4190.74  best_bound=4004.31
+
+**Mechanism.** CPLEX writes the literal word `integral` in the Objective column of every
+line announcing a new incumbent. `parse_cplex_log_text`'s node-table regex requires a
+*number* in that column, so it matches none of them, and it does not parse the terminal
+`MIP - Integer optimal solution` line either. It therefore reports the state as of the last
+*periodic* progress line. In this log:
+
+    SKIPPED: *    31    21   integral  0   4190.7400 ...
+    SKIPPED: *   935   237   integral  0   4187.7400 ...
+    SKIPPED: *  1752     1   integral  0   4183.2400 ...   <- the optimum
+    MATCHED:     778   231  4044.4823 20   4190.7400 ...   <- what it returns
+
+So the parser returns the incumbent from node 778 and misses every improvement after it.
+**On this instance that number is 4190.74** -- the value D30 had to withdraw as the
+reference optimum, and whose looseness D30 records as the reason the validity check "could
+not detect a defect that inflated the bound by less than 7.5". This is a plausible origin
+for it having been written down as the optimum at all.
+
+**Severity: real defect, conservative direction.** In the Benders loop the parsed
+`best_bound` feeds `best_lb` when the solver API supplies none. A branch-and-bound best
+bound is monotone non-decreasing, so any earlier value is `<=` the final one, and the code
+takes `max(best_lb, parsed)`. A stale parse therefore **under-reports** the lower bound and
+cannot manufacture an invalid one. It widens reported gaps and can put a stale number in a
+manifest. The file is byte-identical in both packages. **Not fixed here** -- it sits in the
+bound path.
+
+### 4. `p` already means different things at different resolutions
+
+Found while scoping the minute-level reference. The waiting term is in **slots** and `p` is
+in the same unit (D7/D8, deliberate and internally consistent). The consequence is that the
+physical trade-off `p` encodes moves with `slot_resolution`:
+
+| config | slot | p | one unserved passenger is worth |
+|---|---:|---:|---:|
+| `baseline_d9.yaml` | 30 | 50 | 1500 passenger-minutes |
+| `tests/fixtures/soundness.yaml` | 30 | 50 | 1500 passenger-minutes |
+| `configs/phase1/lp_only_150.yaml` | 15 | 50 | **750** passenger-minutes |
+
+The Fase 1 test point therefore treats an unserved passenger as **half** as bad as the
+baseline instance does. Every individual result stays valid -- each run is internally
+consistent -- but **no objective from slot 15 is comparable to one from slot 30**, and the
+multi-resolution programme (research idea RQ3) cannot compare recourse costs across
+resolutions until this is fixed.
+
+`Wmax` is already handled correctly: `Wmax_minutes` is a config key converted to slots at
+load. `p` is the odd one out. The fix is to match it -- take `p_minutes` in config and
+derive `p_slots = p_minutes / slot_resolution`, giving 50 at slot 30, 100 at slot 15 and
+1500 at slot 1 for the same 1500 passenger-minute policy. **Not done here**: it would change
+every slot-15 number in the repository, so it is a deliberate measured change, not a
+silent one.
+
+---
+
+## D51 — Minute-level valuation changes the schedule and serves six more passengers, and the prediction that said it would not was mine again
+
+Date: 2026-08-14. Steps 1-3 of the multi-resolution programme, plus two defects found on
+the way. `minute_pricer.py`, `scripts/price_at_minutes.py`,
+`scripts/minute_vs_slot_schedule.py`.
+
+### 1. The objective is 93% a headcount of passengers nobody reached
+
+`baseline_d9` decomposes exactly:
+
+    4183.24  =   283.00  waiting (283 slots)               6.8%
+             +  3900.00  78 unserved passengers x 50      93.2%
+             +     0.24  start cost (0.01 x 24 departures)
+
+The model is very nearly "serve as many as you can", with waiting as a tiebreak. Worth
+stating because it governs how every other number here reads: at `p = 50` slot units --
+1500 passenger-minutes, 25 hours -- waiting cannot compete with abandonment.
+
+And the 78 are not a capacity shortage. 24 departures x 15 seats = **360 seats for 300
+passengers**. They are unserved because no seat is inside their 60-minute window.
+
+### 2. `Wmax` granted more waiting than the config asked for
+
+`Wmax_slots = ceil(Wmax_minutes / slot_resolution)`, in **three** places
+(`app.py`, `subproblem_impl.py`, `monolith.py`). `ceil` rounds the cap UP: at 30-minute
+slots `Wmax_minutes: 45` became 2 slots, and a passenger could be made to wait 60 minutes
+against a stated 45. A maximum wait is a service promise; rounding it up is the one
+direction that must not happen silently.
+
+Now `floor`, via one helper per package, and a cap shorter than one slot raises instead of
+being quietly rounded to one. **No number in this repository changes**: at
+`Wmax_minutes 60` with slots of 30 or 15 the quotient is exact, so ceil and floor agree,
+and `baseline_d9` still gives 4183.24. Only non-multiples move (45/30: 2 -> 1).
+
+The other half of the artifact is not fixable in the conversion. A departure placed
+mid-slot -- the research note's own midpoint convention -- adds half a slot, so two slots
+is 75 real minutes against a stated 60. That is a property of the slot ABSTRACTION. It is
+why the minute pricer enforces the cap in real minutes, and why it finds *more* unserved
+under midpoint (79) than the slot model claims (78): it refuses assignments the slot
+model allowed.
+
+### 3. The slot model reports the waiting time nearly double
+
+Pricing the monolith's proven-optimal schedule against the demand's real arrival minutes
+-- same schedule, no re-optimisation, only a truer valuation:
+
+| valuation | waiting | avg per served pax | unserved |
+|---|---:|---:|---:|
+| slot model | 8490 pax-min | **38.24 min** | 78 |
+| minute, departures at slot start | 4560 pax-min | **20.36 min** | 76 |
+| minute, departures at slot midpoint | 5120 pax-min | **23.17 min** | 79 |
+
+The slot model overstates waiting by **66-86%**. That is the number a paper would quote,
+and it is wrong by roughly a factor of two.
+
+**A correction to how this was first reported.** The initial write-up led with the effect
+on the TOTAL objective -- 1.5% -- which is close to meaningless: 93% of the total is the
+unmet-demand headcount, which minute pricing barely moves, so comparing totals compares a
+number that is mostly a term the exercise does not change. The waiting term alone is the
+measurement. The user caught this; the first framing was wrong.
+
+### 4. Step 3: minute valuation changes the schedule, and the change is worth 7.2%
+
+Same instance, solved monolithically twice to proven optimality. A is the current model
+(slot master, slot recourse). B is the architecture the research idea proposes (slot
+master, MINUTE recourse), with `y` entering the recourse only through the capacity
+right-hand side, so E2 holds and the construction is the one a minute-level Benders
+subproblem would use. B's recourse is scaled by `1/slot_resolution` so both objectives are
+in the same units and the first-stage terms keep the same relative weight.
+
+**The schedules are not the same.** OUT differs in 2 of 12 departures, RET in 4 of 12.
+
+Both priced at minute fidelity, which is the only fair comparison -- A optimised a
+valuation now known to be wrong, so it must be judged by what it really costs:
+
+| schedule | true cost | waiting | avg wait | unserved |
+|---|---:|---:|---:|---:|
+| A, slot-optimised | 123 620 pax-min | 5120 | 23.17 min | **79** |
+| B, minute-optimised | **114 682 pax-min** | 5182 | 22.83 min | **73** |
+
+**B is better by 8938 passenger-minutes, 7.2%** -- and the mechanism is not shorter waits.
+B's waiting is slightly WORSE (5182 vs 5120). The entire gain is **six more passengers
+served**, and 6 x 1500 = 9000 accounts for all of it. The slot model mis-estimates who is
+reachable inside a real 60-minute window and therefore abandons six passengers it could
+have carried.
+
+**The prediction this refutes was mine, and it was recorded one message earlier:** "since
+93% of the objective is unmet-demand headcount and minute pricing barely moves it, a
+minute-level subproblem is unlikely to steer the master anywhere new at this penalty. The
+lever is `p`, not resolution." Both halves wrong. It steers the master, and what it buys
+is precisely the headcount that was argued to be insensitive. That is the fifth refuted
+prediction on this project in two days, and the fourth from reasoning about a mechanism
+instead of measuring it.
+
+**Caveat, stated rather than buried.** B optimises exactly the metric it is scored on, and
+"the truth" here is the midpoint placement convention. Under the `start` convention the
+comparison has not been run. The 7.2% is therefore conditional on a modelling assumption
+that this project has already seen move an answer by 4% of the total.
+
+### 5. Where waiting starts to matter, at a fixed schedule
+
+Same schedule priced at a range of penalties. Only the weighting changes:
+
+| `p_minutes` | `p` (slots, 30 min) | waiting share of objective |
+|---:|---:|---:|
+| 1500 (today) | 50 | 4.1% |
+| 300 | 10 | 17.8% |
+| 150 | 5 | 30.2% |
+| **60** | **2** | **46.6%** |
+| 15 | 0.5 | 18.2% |
+
+Waiting peaks near `p_minutes = 60` and collapses below it -- at a low penalty the model
+abandons passengers rather than making them wait, so the waiting term empties out
+(5120 -> 60 pax-min at `p_minutes = 5`). The band where waiting genuinely trades against
+service is roughly `p_minutes` 60-300, i.e. `p` between 2 and 10 at 30-minute slots.
+Today's 50 is five to twenty-five times above it.
+
+This does NOT say the penalty is wrong -- that is a policy question, and 25 hours per
+abandoned passenger may be exactly what is intended. It says that at the current setting
+the objective is a service-coverage objective with a waiting-shaped tiebreak, and any
+claim about waiting time should be read that way.
+
+### What this changes
+
+The multi-resolution premise survives its first real test, on the evidence rather than on
+the argument: a slot master with a minute-level recourse picks a different and materially
+better schedule, and reports a waiting time that is not off by a factor of two. That is
+step 3 answered in the affirmative. It says nothing yet about whether a *decomposed*
+minute subproblem converges usefully, which is the next question and a different one.
+
+---
+
+## D52 — The decomposed minute recourse converges at the same rate as the slot one, and costs under 1% per iteration
+
+Date: 2026-08-14. Answers the question D51 left open: step 3 was settled monolithically,
+which says nothing about whether the same recourse works *through* the decomposition,
+where it is only ever seen as a cut. Configs:
+`configs/phase1/d9_recourse_{slot,minute}.yaml`.
+
+**Why it was cheap to answer.** A minute-level recourse still has its capacity rows
+indexed by DEPARTURE SLOT -- one per `(direction, tau)`, right-hand side
+`C_d[tau] = S*Y_d[tau]` -- so it returns exactly one dual per slot, the same object
+`solve_subproblem` already returns. The cut, `aggregate_cuts_by_tau`,
+`_assert_q_invariant`, the validity classification and the master are all untouched. Only
+the LP behind the dual moves to minutes. The objective is expressed in slot-equivalent
+units (waiting divided by `slot_resolution`, penalty in `p_slots`) so `dm = S*pi` lands in
+the units theta and the first-stage terms already use; without that the recourse would
+outweigh `start_cost_epsilon` and `concurrency_penalty` by a factor of `slot_resolution`.
+
+**E2 holds by construction** and is asserted: the arc set is a function of
+`(T, slot_resolution, Wmax_minutes, departure_policy)` and the demand, never of the
+schedule. Minute mode with no arrival minutes raises rather than falling back to the slot
+model, which would report a multi-resolution run that never happened.
+
+**Measured**, `baseline_d9`, plain dual slopes on both arms (Magnanti-Wong is off because
+`solve_mw_dual` mirrors the SLOT primal and would be selecting duals for an LP that is no
+longer the one being solved), 240 s each:
+
+| iteration | slot LB | minute LB |
+|---:|---:|---:|
+| 3 | 469.3 | 84.2 |
+| 8 | 2090.5 | 2127.3 |
+| 12 | 2781.9 | 2467.7 |
+| 14 | 2887.1 | 2538.2 |
+
+Each arm has a different optimum -- 4183.24 for slot, 3822.97 for minute -- so the
+comparable figure is progress toward its own target. At iteration 14 the slot arm is at
+**69.0%** of 4183.24 and the minute arm at **66.4%** of 3822.97. **Convergence per
+iteration is indistinguishable.**
+
+**Subproblem cost: 0.117 s against 0.020 s, roughly 6x.** In absolute terms it is
+irrelevant -- iterations here run 12-17 s, so the minute LP is under 1% of one. The
+minute arm completed 14 iterations against 20 in the same wall clock, and that gap is
+master time, not subproblem time.
+
+**Validity.** Both arms report zero `CHECK FAIL`, `SP WARN` and `CHECK ERROR`, and each
+lower bound sits under its own optimum: 2887.08 <= 4183.24 and 2538.23 <= 3822.97.
+
+**What is NOT claimed.** Neither arm converged inside 240 s, so this is a comparison of
+convergence *rates*, not a demonstration that either terminates. Both print
+`NOT REPRODUCIBLE` (D26). That neither converges is a property of the master, already
+established by D45/D46/D47, and is not evidence about the minute recourse. A converged
+comparison needs the master problem solved, which is a different work item.
+
+**The cross-check that makes the number trustworthy.** `solve_minute_recourse` (the
+decomposition path) and `price_schedule_at_minutes` (the reporting path) are independent
+implementations of the same quantity, written for different purposes. A test asserts they
+agree on the same schedule, up to the `1/slot_resolution` unit factor, along with the
+non-positivity of the capacity duals and monotonicity of the recourse in capacity -- P3 at
+minute resolution, which is the property whose failure voided six months of bounds (D30).
+
+**Reading.** Multi-resolution Benders is not blocked by the decomposition. The recourse
+can move to minutes for under 1% of iteration cost, with unchanged cut machinery and
+unchanged convergence per iteration, and D51 already showed the minute objective is worth
+7.2% and six passengers on this instance. The obstacle to a usable method remains what
+D45-D47 measured: the master.
+
+---
+
+## D53 — The multi-resolution gain is real but the placement convention decides its size, the penalty was 27x the operator's own policy, and the D47 baseline does not reproduce
+
+Date: 2026-08-14. Three corrections and one sweep. Partially retracts D51's headline.
+
+### 1. `p` was 27x the operator's stated policy, and it changes what the whole result means
+
+The operator's indifference statement: delaying a shuttle already carrying 14 passengers
+by 4 minutes costs `4 x 14 = 56` passenger-minutes and is worth one extra passenger
+carried. So one unserved passenger is worth about **56 passenger-minutes**.
+
+Every config in this repository states `p: 50` in SLOT units, which at 30-minute slots is
+**1500 passenger-minutes** -- 27x that policy. At 1500 the model will delay 14 passengers
+by 107 minutes (1500/14) to pick up one more. This is exactly the conflation that
+`p_minutes` was introduced for in D50, and it survived one round of review because `50`
+and `56` look like the same number.
+
+**Consequence for D51/D52: every multi-resolution measurement so far was taken in the
+regime where waiting barely matters** -- at `p_minutes = 1500` waiting is 4.1% of the
+objective. The operator's regime is where waiting is roughly half of it.
+
+`configs/baseline_d9_p56.yaml` and `configs/milp/baseline_d9_p56_monolith.yaml` ship the
+policy regime. The originals are NOT edited: 4183.24, the soundness suite and every result
+from D30 onward are computed against `p: 50`, and changing it in place would silently
+invalidate all of them. Both regimes ship; every reported number must say which it used.
+The policy-regime reference optimum is **399.9067**, proven optimal in 1 s, serving
+185/300.
+
+### 2. The 7.2% headline was placement-dependent, and under one convention it is zero
+
+D51 reported that a minute-level recourse picks a better schedule worth 7.2%. That was
+measured under the `midpoint` convention only. Under `start`:
+
+| placement | `p_minutes` | A slot-opt | B minute-opt | gain | schedules |
+|---|---:|---:|---:|---:|---|
+| midpoint | 1500 | 123 620 | 114 682 | 7.2% | differ |
+| **start** | **1500** | 118 560 | 118 560 | **0.00%** | **identical** |
+| midpoint | 56 | 9 326 | 8 794 | 5.7% | differ |
+| start | 56 | 8 596 | 8 388 | 2.4% | differ |
+
+**At the current penalty under `start`, minute-level valuation buys nothing at all** -- the
+two first stages choose character-identical schedules. The reason is mechanical: under
+`start` the slot model's `(tau - t)` accounting is very nearly exact in minutes, so there
+is nothing for a finer valuation to correct. Under `midpoint` every departure shifts by
+half a slot and the reachability windows genuinely move.
+
+D51's headline stands only with the convention attached. Stated without it, it was wrong.
+
+### 3. The sweep: the gain is real, and it is large in the policy regime
+
+Five demand shapes (`scripts/make_instances.py`), Q=2, 30-minute slots,
+`p_minutes = 56`, both conventions, every solve proven optimal:
+
+| shape | gain (start) | gain (midpoint) | extra pax served |
+|---|---:|---:|---:|
+| flat | 1.36% | 12.43% | 9-11 |
+| commuter | 3.45% | 10.48% | 4-14 |
+| bimodal | 1.32% | 8.19% | 4-14 |
+| burst | 0.00% | **48.60%** | 0 |
+| spiky | 8.17% | 30.90% | 11-19 |
+
+The minute-optimised schedule is never worse and carries up to 19 more passengers. In the
+policy regime the effect is an order of magnitude larger than the 7.2% first reported.
+
+**The advance prediction was that the gain tracks how much demand structure lives below
+one slot -- least on `flat`, most on `burst` and `spiky`.** Under `midpoint` that holds:
+`burst` and `spiky` are far ahead at 48.6% and 30.9% against 8-12% for the rest. Under
+`start` it fails on `burst`, which gives exactly 0.00%.
+
+**And that failure is an artifact of the generator, not a property of burst demand.**
+`_burst` places its windows at minutes 60, 180, 420 and 560, and the first three are exact
+multiples of 30. Under `start` the departures land on the bursts, so slot reasoning is
+accidentally correct. The instance set should be regenerated with deliberately
+slot-misaligned windows before this row is cited; as it stands it measures the generator's
+arithmetic.
+
+### 4. The D47 baseline does not reproduce, and is inconsistent with a bound
+
+D47 states the monolith produces the Q=3 optimum **1569.44** exactly, in **39 s**, and
+reads the entire Run 1 curve against it ("~79% of the monolith's optimum").
+
+Measured on that instance -- Q=3, slot 15, 4 scenarios -- with all cores:
+
+    180 s -> status FEASIBLE, LB 1579.6965, UB 1674.11, gap 5.64%
+
+**The lower bound 1579.70 exceeds the claimed optimum 1569.44.** A branch-and-bound best
+bound is valid, so the optimum of this instance is at least 1579.70 and 1569.44 cannot be
+it. Nor does 39 s reproduce: single-threaded it was still FEASIBLE at 300 s
+(LB 1439.11 / UB 2025.11).
+
+Until this is resolved, **every "% of the monolith's optimum" statement in D46 and D47 is
+unsupported**, including D47's recommendation against the 12-hour session. The conclusion
+may well survive -- the gap is large either way -- but the number it rests on does not.
+
+There is also a standards question to settle explicitly rather than by accident: D26
+requires single-threaded runs for reproducibility, and a 39 s baseline was almost certainly
+multi-threaded. A baseline and the method it judges should not be held to different
+standards.
+
+### What this changes about the contribution
+
+The multi-resolution result survives and is stronger than first reported, in the regime the
+operator actually wants. But two of its three headline numbers needed correcting within a
+day of being recorded, both because a modelling assumption was left implicit -- the
+penalty's units, then the placement convention. Any write-up must state both explicitly
+and report the range across conventions rather than a single figure.
+
+---
+
+## D54 — The departure-placement convention is a modelling decision, not a detail, and the D47 baseline optimum was wrong by 5.4%
+
+Date: 2026-08-14. Closes the convention question D53 left open, and replaces the Q=3
+baseline every Benders result in this repository is measured against.
+
+### 1. `end` is the convention the aggregation implies, and it does not restore a bound
+
+The operator's objection to `midpoint`: demand is collected over [07:00, 07:30) and the
+bus is assumed to take them at 07:30, so the departure belongs at the END of its slot. A
+bus leaving at 07:30 can carry everyone who arrived in that window; one leaving at 07:00
+carries almost none of them.
+
+Worked through, the three conventions differ in a way that looks decisive. A passenger
+arriving at minute `m` in slot `t`, served from slot `tau`, is charged `(tau-t)*delta` by
+the slot model, while the true wait is `D(tau) - m` with `m` in `[t*delta, (t+1)*delta)`:
+
+| convention | `D(tau)` | true wait vs slot charge |
+|---|---|---|
+| `start` | `tau*delta` | true <= charge, slot OVERSTATES |
+| `midpoint` | `tau*delta + delta/2` | straddles |
+| `end` | `(tau+1)*delta` | true >= charge, slot UNDERSTATES |
+
+That suggests `end` is the only convention under which the slot recourse lower-bounds the
+minute recourse -- the direction Benders needs.
+
+**Measured, and the aggregate does not follow the per-arc inequality.** Same schedule,
+`baseline_d9` in the p56 regime:
+
+    slot model claims          11 990 pax-min
+    minute truth (start)        8 596     slot overstates by 3 394
+    minute truth (midpoint)     9 326     slot overstates by 2 664
+    minute truth (end)          9 806     slot overstates by 2 184
+
+The slot model overstates under **all three**, `end` included. The per-arc inequality is
+correct and does not lift, because the minute model re-optimises the ASSIGNMENT and faces
+a different REACHABLE SET -- a real 60-minute cap instead of a two-slot window. Under `end`
+it abandons more passengers (130 vs 115) but waits far less (2526 vs 5550 pax-min) and is
+cheaper overall. Reasoning about one arc said nothing about the optimum over all of them.
+
+**The consequence for bound claims, which matters more than the convention.** Because the
+slot model overstates the cost of any given schedule, its optimum is an UPPER bound on the
+minute-level optimum, not a lower one. **A slot-level Benders lower bound therefore bounds
+the slot problem only and says nothing rigorous about the minute-level problem.** Any
+paper reporting a slot-Benders LB against a minute-level notion of optimality would be
+making a claim its own construction does not support.
+
+### 2. The gain decomposes into two distinct errors
+
+On `baseline_d9`, p56, midpoint:
+
+| quantity | pax-min |
+|---|---:|
+| what the slot model CLAIMS its schedule costs | 11 990 |
+| what that schedule REALLY costs | 9 326 |
+| what the best achievable schedule costs | 8 794 |
+
+    valuation error  +28.5%   the model misprices its own schedule
+    decision error    +6.0%   the schedule it picks is worse than achievable
+
+These are independent and should be reported separately. The valuation error is what a
+reader of the model's output is misled by; the decision error is what the operator
+actually loses.
+
+### 3. The sweep across five demand shapes and three conventions
+
+Q=2, 30-minute slots, `p_minutes = 56`, every solve proven optimal:
+
+| shape | start | midpoint | end | extra pax served (end) |
+|---|---:|---:|---:|---:|
+| flat | 1.36% | 12.43% | 12.53% | 15 |
+| commuter | 3.45% | 10.48% | 6.26% | 12 |
+| bimodal | 1.32% | 8.19% | 14.02% | 32 |
+| burst | 0.00% | 48.60% | 42.43% | 52 |
+| spiky | 8.17% | 30.90% | 27.74% | 41 |
+
+**`midpoint` and `end` agree; `start` is the outlier.** Under either of the two
+operationally sensible conventions the minute-optimised schedule is 6-49% cheaper and
+carries 12-52 more passengers. `start` assumes the bus departs at the instant its
+collection window opens, before the passengers it is collecting have arrived, and is not
+a defensible operating assumption.
+
+D53 recorded this as "the result depends on an arbitrary choice". That reading is now
+withdrawn: it depends on a choice, and one of the three options is physically implausible.
+The `burst` 0.00% row under `start` remains a generator artifact (windows at minutes 60,
+180, 420 are exact multiples of 30) and should not be cited until the shapes are
+regenerated misaligned.
+
+### 4. The Q=3 baseline: the optimum is 1658.86, not 1569.44, and it takes 947 s
+
+D47 states the monolith produces the Q=3 optimum **1569.44** exactly in **39 s** and reads
+the whole Run 1 curve against it. Measured, all cores, `term=optimal` with both bounds
+agreeing to seven figures:
+
+    LB 1658.8588281   UB 1658.8600   947 s
+
+**1569.44 is 5.4% BELOW a proven optimum**, so it was never this instance's optimum. And
+the monolith needs 947 s on all cores, not 39 s single-threaded.
+
+Corrected readings: the 1520 s Benders result of 1148.65 is **69.2%** of the true optimum,
+not 79%; the 12-hour projection of ~1245 becomes **75%**, not 79%. D47's qualitative
+conclusion survives -- Benders remains far behind -- but it is further behind than
+recorded, against a baseline 24x slower than claimed. Both directions must be restated
+wherever those numbers appear.
+
+### 5. A gap field that means different things on different runs
+
+The 947 s run printed `gap=0.117%` while its own bounds give `(UB-LB)/UB = 0.00007%`. The
+printed figure is exactly the ABSOLUTE difference (1658.86 - 1658.8588281 = 0.0011719),
+yet the earlier 180 s run's `5.640%` was correctly RELATIVE. The same field therefore
+carries different semantics on different runs.
+
+It does not affect the optimum recorded above, which is pinned by `term=optimal` and the
+agreeing bounds. **No gap from this reporter should be quoted until it is understood.**
+Not fixed here: it sits in the reporting path of the reference instrument, and this round
+has already shown what happens when a number in that path is trusted without checking
+(4190.74, D50). Same family, same discipline.
+
+---
+
+## D55 — Aggregation error survives a 10-minute grid, and scenario averaging cuts it by six
+
+Date: 2026-08-14. Answers falsifiers 2 and 3 of `RESEARCH_NOTE_v2.md` §9 — the two that
+could have collapsed the multi-resolution result — and closes §10 items 1–3. Scripts:
+`make_instances.py`, `sweep_multiresolution.py`, `multiscenario_check.py`.
+
+### 0. The generator artifact from D54 is fixed first
+
+`burst` windows sat at minutes 60/180/420, exact multiples of 30, so under the `start`
+convention every departure landed on a burst and slot reasoning was accidentally correct.
+Windows now sit at minutes congruent to 7 modulo 30, 15 **and** 10, with spike spacing 47
+(coprime to all three). Zero arrivals fall on a 30-minute boundary. An instance set for a
+resolution study must not be in phase with any resolution it will be studied at.
+
+### 1. Falsifier 2 — REFUTED. The effect is not an artifact of 30-minute slots
+
+Gain from minute-level valuation, `midpoint`, Q=2, `p_minutes = 56`, all solves proven
+optimal:
+
+| shape | slot 30 | slot 15 | slot 10 |
+|---|---:|---:|---:|
+| flat | 12.43% | 5.52% | 11.08% |
+| commuter | 10.48% | 2.45% | 3.07% |
+| bimodal | 8.19% | 4.26% | 6.07% |
+| burst | 50.09% | 19.62% | 20.74% |
+| spiky | 25.23% | 18.52% | 22.39% |
+
+Under `end`, same order: 12.53/16.60/16.23, 6.26/10.07/7.84, 14.02/7.43/10.22,
+46.22/44.62/37.62, 19.06/41.33/36.78.
+
+At a 10-minute grid — finer than most operational studies use — the correction is still
+worth **3–22%** under `midpoint` and **8–38%** under `end`. The finding is about
+aggregation, not about 30 minutes specifically.
+
+**A correction to a reading made from partial data.** With only the 30 and 15 columns the
+trend looked like a clean halving, and that was written down as "aggregation error shrinks
+with finer slots". It is **not monotone**: 15 is a dip and 10 comes back up on four of the
+five shapes. Two points were not enough to name a trend, and naming one was premature.
+
+**What refining the master does buy** is large in absolute terms. On `spiky` the
+slot-optimised cost falls 9906 → 6399 → 5539 as the grid refines. A finer first stage
+genuinely improves the schedule — it just does not close the valuation gap. The two are
+independent levers, which is the point.
+
+**Why the mechanism survives, stated so it can be attacked.** A 60-minute wait cap spans
+six 10-minute slots, and the placement offset is still 5 minutes (`midpoint`) or 10 (`end`)
+against realised waits of 15–25 minutes. The grid got finer; the quantities it distorts did
+not shrink proportionally.
+
+**Instrument note.** Under `end` the gain does not fall monotonically with resolution
+because `end`'s offset **is** `delta` — refining the grid refines the offset at the same
+time, so the two effects cannot be separated. `midpoint` is the cleaner instrument for a
+resolution study; `end` is the better operational assumption. They answer different
+questions and both are reported.
+
+### 2. Falsifier 3 — LARGELY CONFIRMED. Scenario averaging cuts the gain by about six
+
+One first stage serving four scenarios whose structure sits at different minutes
+(commuter, bimodal, burst, spiky), slot 30, `midpoint`:
+
+| scenario | A slot-opt | B minute-opt | gain |
+|---|---:|---:|---:|
+| commuter | 10 147 | 10 069 | 0.77% |
+| bimodal | 9 572 | 10 183 | **−6.38%** |
+| burst | 9 259 | 8 484 | 8.37% |
+| spiky | 9 435 | 8 201 | 13.08% |
+| **averaged** | **9 603** | **9 234** | **3.84%** |
+
+Against 8–50% when a schedule is tailored to a single scenario, averaging brings it to
+**3.84%** — roughly a sixfold attenuation. On `bimodal` the minute-optimised schedule is
+actively **worse**, which is what a compromise schedule does to individual members of the
+set it compromises over.
+
+The effect is not eliminated: 3.84% is positive and comes from proven optima on both sides.
+But **the honest figure for the stochastic setting this project actually targets is ~4%,
+not double digits.** Every Fase 1 config is four-scenario. Single-scenario gains must not
+be quoted as if they were the operational result.
+
+### 3. Status of the falsifier list after this
+
+- **1** (vanishes on uniform demand): not vanished — `flat` gives 5.5–12.4%, the lowest
+  band but nonzero.
+- **2** (artifact of 30-minute slots): **refuted**, §1.
+- **3** (multi-scenario averaging): **largely holds**, §2. The result must be restated at
+  ~4% for multi-scenario.
+- **4** (conventions disagree on a good instance set): `midpoint` and `end` agree in sign
+  and rough magnitude across five de-aligned shapes and three resolutions. `start` remains
+  the outlier and remains the physically implausible one.
+
+### 4. What is still not measured
+
+RQ5 as the operator reframed it — **is decomposed minute-level Benders faster than the
+minute-level MONOLITH?** — is the comparison that matters now, and it has not been run.
+D52 compared the decomposition against a *slot* recourse; D54 corrected the *slot*-monolith
+baseline. Neither is the right baseline for a minute-level method, and no timing against the
+right one exists. **Nothing in this repository supports a speed claim in either direction.**
+
+### 5. Implementation note
+
+`attach_minute_recourse` now takes an optional `scenarios` list and treats a single scenario
+as the one-element case, rather than gaining a second multi-scenario copy. Capacity rows are
+per `(scenario, slot)` against the same `Yout`/`Yret`, so the shared first stage is what
+makes it one recourse problem instead of N separate ones, and E2 still holds per scenario.
+Written in place deliberately: a duplicated construction is exactly how the two `cplex_log`
+parsers (D50) and the three `Wmax` conversions (D53) drifted apart.
