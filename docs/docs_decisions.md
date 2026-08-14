@@ -2649,3 +2649,74 @@ monolith stops closing in reasonable time, and whether one exists inside the siz
 project cares about is unmeasured. If it does not, the correct conclusion is that
 decomposition is the wrong tool here and the contribution stays the multi-resolution
 evaluation result.
+
+---
+
+## D59 — The monolith stops closing at Q=5, so a target regime exists
+
+Date: 2026-08-14. Answers the question D58 §5 named as deciding the project: is there an
+operating point where solving the model directly stops being good enough? Configs:
+`configs/milp/d58_q4_monolith.yaml`, `d58_q5_monolith.yaml`. Script:
+`stage3_column_generation.py --monolith-only`.
+
+### 1. The scaling
+
+T=44, 15-minute slots, four scenarios, `p_minutes = 56`, `midpoint`, all cores, minute
+recourse pinned by equality. Only `Q` changes.
+
+| Q | objective | bound | status | wall |
+|---:|---:|---:|---|---:|
+| 3 | 431.5433 | 431.5433 | optimal | 181.0 s |
+| 4 | 302.0467 | 302.0464 | optimal | 314.8 s |
+| **5** | 231.2500 | **226.0703** | **hit the 1200 s cap** | 1208.7 s |
+
+**At Q=5 the monolith does not close.** It stops on the clock at a 2.24% relative gap, so
+231.25 is an incumbent and 226.07 is what the solve actually established. Neither is an
+optimum and neither may be quoted as one.
+
+Times go 181 → 315 → >1200: a 1.7x step from Q=3 to Q=4 and more than 3.8x from Q=4 to
+Q=5, with the last one unfinished. The degradation is sharp, not gradual.
+
+### 2. Why this matters more than the numbers
+
+D58 left the project with a hard problem: at Q=2 the monolith takes 0.8 s and at Q=3 it
+takes 181 s, so branch-and-price had nothing to beat, and column generation's 110 s root
+already consumed 61% of the Q=3 budget. The honest reading was that decomposition might
+simply be the wrong tool here.
+
+**Q=5 is the regime where that reading stops applying.** A method that produces a strong
+bound in a few minutes has something to beat once the direct solve cannot finish.
+
+### 3. The measurement this sets up, stated before it is run
+
+At Q=5 the monolith's own lower bound after 1200 s is **226.0703**. The comparison is
+therefore sharp and falsifiable:
+
+> Does the Dantzig-Wolfe root exceed 226.07, and in how long?
+
+If it does, the reformulation produces in minutes a bound CPLEX could not reach in twenty,
+on the same model, and stage 3 has its first result that survives D56's standard. If it
+does not, the DW root is weaker than what a commercial solver's own relaxation and cuts
+reach unaided, and stage 3 should be closed the way stage 2 was.
+
+Predicted before running, so it can be wrong: the compact root at Q=5 will be far below
+226.07 (both roots weakened sharply from Q=2 to Q=3 — 73.7% → 57.7% and 79.5% → 65.3%),
+and the DW root will improve on it by a similar 13% without reaching 226.07. That would
+make the answer "better relaxation, still not competitive".
+
+### 4. A caveat about the instance family
+
+`Q` grows while `T`, the demand and the horizon stay fixed, so the fleet gets slacker per
+vehicle even as symmetry and per-vehicle integrality get worse. The objective falling
+(431.54 → 302.05 → 231.25) is that slack: more vehicles serve more demand and the unmet
+penalty shrinks. So this measures difficulty in `Q` for a fixed demand, which is the axis
+the reformulation acts on, but it is not the only axis an operator would grow. Horizon and
+demand volume are untested.
+
+### 5. An instrument defect fixed on the way in
+
+`monolith()` accepted a time limit, wrote it into `mp`, and never passed it to the solver:
+the function deliberately bypasses `MobautoMilpModel.solve()`, which is the only thing that
+reads `mp`. The cap was accepted, stored, and inert. Q=3 finished in 181 s and hid it. It
+now goes to `opt.options["timelimit"]`, which is why the Q=5 row above stops at 1208.7 s
+and reports itself as truncated instead of running until something else stopped it.

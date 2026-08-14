@@ -280,6 +280,11 @@ def monolith(config: str, p_minutes: float, policy: str, time_limit_s: float,
     )
     opt = pyo.SolverFactory("cplex_direct")
     opt.options["mip_tolerances_mipgap"] = 1e-6
+    # The cap has to reach the SOLVER. Putting it in `mp` only reaches
+    # `MobautoMilpModel.solve()`, which this function deliberately does not call -- so
+    # for one run the limit was accepted, stored, and silently inert, and a Q=4 solve
+    # would have run until something else stopped it.
+    opt.options["timelimit"] = float(time_limit_s)
     t0 = time.perf_counter()
     res = opt.solve(pm.m, tee=False)
     secs = time.perf_counter() - t0
