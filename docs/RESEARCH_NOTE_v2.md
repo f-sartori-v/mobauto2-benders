@@ -102,6 +102,29 @@ returns exactly one dual per slot — the same object the slot subproblem return
 Convergence per iteration is indistinguishable. The subproblem is ~6× slower in relative
 terms and **under 1% of an iteration** in absolute terms.
 
+### 2.4 It does not survive the comparison with a monolith (D56)
+
+The same model — slot first stage, minute recourse — solved two ways, both
+single-threaded, Q=2, T=22, `p_minutes = 56`:
+
+| | objective | status | wall |
+|---|---:|---|---:|
+| minute **monolith** | 293.37 | proven optimal | **0.8 s** |
+| minute **Benders** | LB 219.74 / UB 299.37 | 27% gap, 34 iterations | 301.4 s |
+
+**390× slower on the smallest instance in the project, and it does not close.**
+
+The decisive detail is *which* bound fails. The decomposition's upper bound is 299.37
+against a true optimum of 293.37 — it finds a schedule within **2%** almost immediately
+and cannot prove it. The lower bound is what is stuck, at 74.9%. This is D40's finding
+from a second direction: the bound lives at the fractional LP root, and adding cuts does
+not move it.
+
+Two consequences. As a **heuristic** the decomposition is fast and good; as a **proof
+system** on this instance it is not competitive with just solving the model. And any
+future work aimed at the bound must attack the **relaxation** — another family of cuts
+into the same master is attacking the wrong object.
+
 ---
 
 ## 3. Departure placement is a first-class modelling decision (corrects v1 §4)
@@ -206,7 +229,7 @@ side only; every master row is separable by vehicle; the fleet is homogeneous. S
 |---|---|
 | RQ3 — does minute-level evaluation improve recourse accuracy? | **Answered, strongly.** §2.1 |
 | RQ4 — can minute duals be projected without weakening convergence? | **Answered, yes** — and no projection is needed. §5, §2.3 |
-| RQ5 — do the projected cuts converge *faster*? | **No.** Same rate, not faster. §2.3 |
+| RQ5 — do the projected cuts converge *faster*? | **No, and against the right baseline it is not close.** The minute monolith proves optimality in 0.8 s; the decomposition is at a 27% gap after 301 s — 390× (D56). §2.4 |
 | RQ7 — sensitivity to travel-time treatment | **Partly.** Placement is this question in miniature and moves the answer 0%→49%. §3 |
 | RQ1, RQ2, RQ6, RQ8 | **Untouched.** All four concern the CP layer, which does not exist |
 
@@ -254,11 +277,11 @@ Revised criteria:
    agree in sign and rough magnitude across five de-aligned shapes and three resolutions.
    `start` remains the outlier and remains physically implausible.
 
-**Still open, and now the question that matters most:** is decomposed minute-level Benders
-faster than the minute-level **monolith**? §2.3 compared the decomposition against a *slot*
-recourse, and §8 against the *slot* monolith. Neither is the right baseline for a
-minute-level method, and no timing against the right one exists. Nothing here supports a
-speed claim in either direction.
+**Answered, and it went against the decomposition (D56).** Measured against the right
+baseline — the minute-level **monolith**, the same model solved without a decomposition in
+between — the monolith proves optimality in **0.8 s** while the decomposition sits at a
+**27% gap after 301 s**. See §2.4. Nothing in this note claims speed, and now nothing
+could.
 
 ---
 

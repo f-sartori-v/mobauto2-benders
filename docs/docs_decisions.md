@@ -2274,3 +2274,342 @@ per `(scenario, slot)` against the same `Yout`/`Yret`, so the shared first stage
 makes it one recourse problem instead of N separate ones, and E2 still holds per scenario.
 Written in place deliberately: a duplicated construction is exactly how the two `cplex_log`
 parsers (D50) and the three `Wmax` conversions (D53) drifted apart.
+
+---
+
+## D56 — The minute monolith beats the decomposition 390x, the schedules are fine and the bound is not, and stage 2 is dominated
+
+Date: 2026-08-14. Answers RQ5 as the operator reframed it, and closes stage 2 of
+`DESIGN_DD_v1.md` before it was integrated. Scripts: `rq5_minute_vs_monolith.py`,
+`stage2_downset_probe.py`. Config: `configs/phase1/rq5_benders_minute_p56.yaml`.
+
+### 1. RQ5 — is decomposed minute-level Benders faster than the minute-level MONOLITH?
+
+**No.** `baseline_d9`, Q=2, T=22, 30-minute slots, `p_minutes = 56`, `midpoint`, both arms
+single-threaded, both solving the SAME model — slot first stage, minute recourse, `y` in
+the capacity right-hand side only.
+
+| arm | objective | status | wall |
+|---|---:|---|---:|
+| M monolith | **293.37** | proven optimal | **0.8 s** |
+| B Benders | LB 219.74 / UB 299.37 | 27% gap, 34 iterations | 301.4 s |
+
+B reached **74.9%** of M's objective as a lower bound in **390.6x** M's wall time, on the
+smallest instance in the project. Every previous speed comparison here used a baseline
+that was not this model: D52 compared against a *slot* recourse, D54 against the *slot*
+monolith — whose optimum is an upper bound on this one (note v2 section 3). This is the
+first measurement in the repository entitled to say anything about the speed of a
+minute-level method, and it says the decomposition loses badly.
+
+**The instrument was checked against an independent expectation first.** Arm M returned
+3822.97 at `p_minutes = 1500`, matching the figure D51 recorded before this script
+existed, to the digit. Arm M is the instrument D51 measured, not a new one that happens
+to run. The two arms' instance parameters are also compared before anything is solved —
+they come from two hand-synced packages, and a speed comparison between two different
+instances measures nothing.
+
+### 2. The important part is WHICH number is bad
+
+B's upper bound is 299.37 against a true optimum of 293.37. **The decomposition finds a
+schedule within 2% of optimal and cannot prove it.** The lower bound is what is stuck.
+
+This is D40's finding arriving from a second direction: the bound in this problem lives
+at the fractional LP root, and cuts do not move it. It reframes what stages 2 and 3 are
+for. Neither is about finding better schedules — the decomposition already finds those.
+Both are about the bound, and only an attack on the *relaxation* can work.
+
+It also means "Benders is 390x slower" understates what is usable and overstates what is
+broken. As a heuristic the decomposition is quick and good. As a proof system on this
+instance it is not competitive with simply solving the model.
+
+### 3. Stage 2 — the down-set cut is valid, and DOMINATED. Do not build it
+
+`DESIGN_DD_v1.md` section 3.2 proposed exploiting P3 — for integer `Y <= Yhat`,
+`Q(Y) >= Q(Yhat)` — as a cut valid over an entire down-set of the lattice, the
+logic-based Benders shape of Hooker section 6.2.
+
+**Two corrections to the design, and then it dies anyway.**
+
+First, the encoding is cheaper than the design assumed. It does not need "an auxiliary
+binary per `(d,tau)`, 88 of them at T=44". With `v_d[tau] >= Y_d[tau] - Yhat_d[tau]`,
+`v >= 0` continuous and `M = Q(Yhat)`:
+
+    theta >= Q(Yhat) - M * sum_{d,tau} v_d[tau]
+
+is valid at every integer `Y`. Inside the down-set every `v` can be 0; outside, some
+component exceeds by at least 1 by integrality, so `sum v >= 1` and the right-hand side
+falls to `<= 0 <= theta`. Continuous auxiliaries, no big-M tuning.
+
+Second, and fatally: **the classical Benders cut at the same anchor dominates it
+everywhere.** Capacity rows are `<=` in a minimisation, so their duals satisfy
+`pi <= 0` (measured: 44 duals, max exactly 0.0, min -1.333). For any `Y` in the down-set,
+`Y - Yhat <= 0` componentwise, so every term of
+
+    benders(Y) = Q(Yhat) + sum_{d,tau} S * pi_d[tau] * (Y_d[tau] - Yhat_d[tau])
+
+is a product of two non-positive numbers and is `>= 0`. Hence
+`benders(Y) >= Q(Yhat) = downset(Y)` on the whole down-set, and outside it the down-set
+cut collapses to `<= 0` and is trivially weaker. There is no region where it helps.
+
+Measured before the proof was written down, on 3 anchors x 80 sampled integer points:
+P3 holds with minimum slack **+43.10**, the encoded cut is valid with the same minimum
+slack, and it beat the Benders cut at **0 of 240** points. The proof explains why that
+0 is not a sampling artifact and will not become nonzero with more samples.
+
+**Stage 2 is closed as dominated, not as untested.** The design staged it behind stage 1
+on the grounds that a big-M encoding was a plausible way to make the master worse while
+looking stronger on paper. That instinct was right and the reason was wrong: it never
+looks stronger, on paper or otherwise.
+
+**What this does not kill.** P3 itself is true and cheap. It is dominated *as a cut at
+the same anchor*. A use of P3 that is not a hyperplane at an anchor — dominance pruning
+in a search, or bounding inside a pricing DP — is untouched by this argument.
+
+### 4. A reporting defect the run surfaced
+
+The Benders summary printed a per-shuttle passenger table of all zeros next to
+`Pax served: 202/300`, and warned that "the table and the totals describe different
+solutions". The guard is correct and fired correctly: the per-shuttle table is built from
+the slot subproblem's `x`, which does not exist on the minute path. Recorded, not fixed —
+it is a reporting path, not a bound path, and it announced itself rather than printing a
+plausible wrong table.
+
+### 5. What this leaves
+
+Stage 3 — Dantzig-Wolfe over per-vehicle trajectories — is now the only staged item whose
+mechanism matches the diagnosis. Its LP relaxation optimises over
+`conv(integer per-vehicle points)` rather than over the per-vehicle LP relaxation, which
+is an attack on the relaxation itself rather than another cut into a master whose root
+does not move. Its refutation criterion is already written and unchanged: the reformulated
+LP root must exceed 794.62 by more than measurement noise, or pricing must cost less than
+the master time it saves.
+
+**And `J` is enumerable at the small instance, which removes three unproven things at
+once.** `scripts/stage3_size_enumeration.py` counts the per-vehicle patterns admitted by
+the location dynamics and horizon fixings exactly — full location state in the recursion,
+no dominance argument, and the battery block can only remove patterns, so the count is a
+true upper bound:
+
+| operating point | patterns per vehicle |
+|---|---:|
+| **T=22, 30-min slots (this instance)** | **524 288** |
+| T=44, 15-min slots (the Q=3 point) | 216 747 219 |
+| T=44, 30-min slots | 2 199 023 255 552 |
+
+At `trip_slots = 1` a pattern is any even-size subset of the 20 eligible slots, so the
+count is exactly `2^19`; the trip-count histogram is `C(20, 2k)` term by term, symmetric,
+which is the check that the recursion is counting what it claims to.
+
+**Corrected 2026-08-14, same day.** These first read 262 144 / 133 957 148, from a walk
+that tested the terminal condition before processing an arrival and so dropped every
+pattern whose last trip lands exactly at `T-1` -- which the master permits, since it fixes
+`atL[T-1] = 1` and `C2a_locL` is satisfied by that arrival. See D57 section 3; the
+histogram was `C(19, 2k)` and looked just as convincing.
+
+So at the small instance the Dantzig-Wolfe master can be built **exactly** — every column
+present, no column generation, no pricing problem, and no dependence on the battery
+dominance rule the design flags as unproven. The question stage 3 exists to ask is whether
+the reformulated LP root beats the compact one, and that is now answerable with one LP
+rather than with a pricing DP built on an unverified argument. At the Q=3 point
+enumeration is closed and column generation would be required — which is the right place
+for the dominance rule to have to be proved, and only if the small-instance root moves
+first.
+
+---
+
+## D57 — Dantzig-Wolfe lifts the LP root 8%, its root beats 301 s of Benders, and column generation caught the enumeration lying
+
+Date: 2026-08-14. Stage 3 of `DESIGN_DD_v1.md`, measured two independent ways at the
+small instance — full enumeration and column generation — which agree to four decimals
+after a defect in the first was found by the second. Scripts: `stage3_size_enumeration.py`,
+`stage3_dw_root.py`, `stage3_column_generation.py`. Follows D56, which established that
+the decomposition's schedules are fine and only its bound fails.
+
+### 1. The measurement
+
+`baseline_d9`, Q=2, T=22, 30-minute slots, `p_minutes = 56`, `midpoint`. Both arms pin
+`theta` to the exact minute recourse, so both are relaxations of the SAME mixed-integer
+problem — the one D56 solved to 293.37 — and the only difference is how the first stage
+is described. **No Benders cuts are involved in either arm**; comparing roots that carry
+different cut sets would measure the cuts.
+
+| | LP root | of the optimum |
+|---|---:|---:|
+| A compact (the master's own formulation, binaries relaxed) | 216.3516 | 73.7% |
+| B Dantzig-Wolfe (159 768 enumerated columns) | **233.1067** | **79.5%** |
+
+**Lift +16.76, which is 21.8% of the gap the compact formulation leaves.**
+
+Column generation reaches the same 233.1067 from **37 generated columns**, against the
+159 768 the enumeration holds. Two constructions with nothing in common but the model.
+
+The design's claim was that the reformulated LP optimises over
+`conv(integer per-vehicle points)` rather than over the per-vehicle LP relaxation, and
+that the difference is where the bound lives. Measured, it is.
+
+### 2. The comparison that makes it worth something
+
+D56 ran the decomposition for 301.4 s and reached a lower bound of **219.74**.
+
+**The Dantzig-Wolfe LP root is 233.11 — by column generation in 4.9 s, from 37 columns.**
+The reformulation's *starting point* is above the decomposition's *finishing point* after
+sixty times the wall clock. This is the first construction in this project that moves the
+bound rather than confirming it will not move.
+
+State it carefully, because there is an unfair reading of it. This is a root against a
+converged-ish bound, not branch-and-price against Benders; a full comparison needs the
+tree on both sides. What is fair to say is that branch-and-price would *begin* above where
+Benders *ended*, and that D40's diagnosis — the bound lives at the fractional LP root — is
+exactly what this exploits.
+
+### 3. Why the numbers can be trusted
+
+**Two independent constructions agree.** Enumeration over 159 768 columns and column
+generation from 37 give 233.1067 and 233.1067. They share the model and nothing else: one
+lists every pattern with a hand-written walk and filters it, the other never enumerates and
+prices by solving the master at Q=1.
+
+**The integer pool check passes, and is not sufficient — this is the lesson of section 3.**
+Forcing `lambda` integer gives **293.3733** against the monolith's proven 293.37. That
+proves the optimum is IN the pool. It does not prove the pool is COMPLETE, and for one
+afternoon it passed cleanly over a pool that was missing a third of its columns.
+
+**The control is the stronger one.** Arm A carries `use_fifo_symmetry` and
+`symmetry_breaking`, both on, which is what the master actually is. Those rows tend to
+raise an LP root by cutting fractional symmetric solutions. The DW formulation does not
+need them — the vehicle index is gone, so symmetry does not exist to be broken — so the
++16.76 is measured against a control that is helped, not hobbled.
+
+**The enumeration is exact where it is exact, and bounded where it is not.** Location
+dynamics and horizon fixings are counted with the full location state in the recursion
+(524 288 patterns, matching `sum_k C(20, 2k) = 2^19` term by term). The battery filter
+then removes about two thirds: **159 768 survive, 30.5%**.
+
+### 3b. The defect, because how it was caught is the transferable part
+
+The first version of this entry reported a root of **242.4891** from **87 863** columns,
+and a lift of +26.14 — 33.9% of the gap. Every supporting check passed. The number was
+wrong.
+
+The enumerating walk tested the terminal condition *before* processing an arrival, so it
+dropped every pattern whose last trip lands exactly at `T-1`. The master permits those: it
+fixes `atL[T-1] = 1`, and `C2a_locL` is satisfied by precisely that arrival. A third of the
+columns were missing.
+
+**A pool missing columns produces a HIGHER root.** The defect made the result look better,
+which is the direction no one checks. And the evidence around it was persuasive: the
+trip-count histogram matched `C(19, 2k)` term by term and summed to a clean `2^18`, and the
+integer pool check reproduced the monolith optimum exactly. Both are consistent with a pool
+that is a well-behaved *subset*.
+
+What caught it was column generation converging to **233.1067**, BELOW the "known" root.
+That is impossible: a restricted master over a subset of columns can only be higher. The
+cross-check was written to validate the CG loop against the enumeration; it falsified the
+enumeration instead.
+
+**The rule this yields.** A completeness claim about a set needs a check that fails when
+the set is too SMALL. Neither a self-consistent count nor "the known optimum is in there"
+is such a check — only a second construction that would produce a different number.
+
+**The battery filter uses greedy max-charge, and greedy is exact FOR FEASIBILITY.**
+Raising `c[t]` raises `b[t+1]`, which only helps C5 and `b >= 0`, and it appears with a
+POSITIVE sign in the `charge_before_idle` bound on `c[t+1]`, so it relaxes the next slot
+as well. The only thing it consumes is headroom `Emax - b`, which caps later charging
+rather than violating anything. **This settles feasibility only.** It is not the
+optimisation dominance rule a pricing DP needs, which is a claim about continuations and
+remains unproven — D48 and the design flag it, and nothing here discharges it.
+
+### 4. A guard fired correctly on the way
+
+`MobautoMilpModel.solve()` refused to return the relaxed solution: *"Non-binary master
+solution; refusing SP evaluation"*. That is right for its own job — a fractional schedule
+must never reach the subproblem dressed as a schedule — and exactly wrong for this
+measurement, where a fractional answer is the point. Arm A is therefore solved through
+pyomo directly. The guard was not weakened, and the reason for going around it is written
+at the call site.
+
+### 5. What this does and does not license
+
+**Licensed.** Stage 3 is alive and is the only staged item that is. The mechanism is
+confirmed at the small instance against an independently validated pool.
+
+**Not licensed.** Enumeration is closed at the Q=3 test point — 216 747 219 patterns
+(D56 §5) — so anything beyond this instance needs column generation, which needs the
+pricing DP, which needs the dominance rule proved by enumeration against the MILP at
+Q=1/T<=12 exactly as the design says. That proof is now on the critical path rather than
+hypothetical, and it is the next thing to do.
+
+**Still open.** Whether 82.7% is enough. The reformulation closes a third of the gap and
+leaves two thirds. Branch-and-price on this root may or may not beat solving the monolith
+directly — and on this instance the monolith takes 0.8 s, so the bar is high. The honest
+framing is that stage 3 improves the *decomposition*, and the decomposition still has to
+justify itself against not decomposing at all.
+
+---
+
+## D58 — Column generation works where enumeration cannot, and the lift GROWS with fleet size
+
+Date: 2026-08-14. Stage 3 carried to the operating point that matters. Script:
+`scripts/stage3_column_generation.py`. Follows D57, whose small-instance root this loop
+reproduces exactly and whose enumeration defect it found.
+
+### 1. The measurement
+
+Q=3, T=44, 15-minute slots, **four scenarios**, `p_minutes = 56`, `midpoint`. Both arms
+pin `theta` to the same exact multi-scenario minute recourse, so the only difference is
+how the first stage is described.
+
+| | LP root | wall |
+|---|---:|---:|
+| A compact (master's formulation, binaries relaxed) | 248.9795 | 0.6 s |
+| B Dantzig-Wolfe by column generation | **281.6850** | 109.8 s |
+
+**Lift +32.71, which is +13.1% on the root.** Converged on reduced cost — 89 columns, no
+time limit, no stall, well inside the 420 s cap.
+
+### 2. The direction is the point
+
+| instance | compact | DW | lift | relative |
+|---|---:|---:|---:|---:|
+| Q=2, T=22, 30-min, 1 scenario | 216.3516 | 233.1067 | +16.76 | +7.7% |
+| **Q=3, T=44, 15-min, 4 scenarios** | 248.9795 | 281.6850 | +32.71 | **+13.1%** |
+
+**The lift nearly doubles in relative terms as the fleet grows.** That is the property this
+project has been unable to find. D33's recourse anchor went inert at Q=3; D46 closed by
+naming the missing lever as one that "does not go slack as Q grows". This is that
+behaviour, and the mechanism explains it: the reformulation removes the vehicle index
+entirely, so the thing it fixes — per-vehicle integrality and the symmetry the master can
+only break weakly (spec 2.8) — is exactly what gets worse with more vehicles.
+
+### 3. Column generation earns its place
+
+Enumeration at this point would need **216 747 219** patterns. Column generation reached
+the proven root with **89**. The pricing problem is `MobautoMilpModel` with one vehicle, so
+its feasible set is the master's by construction, and **no battery dominance rule is
+involved** — the obstacle the design placed in front of stage 3 turns out to be avoidable
+rather than solvable.
+
+The loop prices **all four scenarios**, not scenario 0. D55 measured single-scenario
+effects at several times the four-scenario figure, so pricing one and reporting it as the
+root for this config would be a different problem's answer.
+
+### 4. What is NOT claimed
+
+**No percentage of the optimum, because the optimum at this regime is not known.** D54's
+1658.86 is at `p = 750` passenger-minutes, not the policy regime, and is not a valid
+denominator here. Establishing it costs a monolith solve of the order of 947 s. Both arms
+are internally consistent at `p_minutes = 56`, so the **lift** is sound and the **ratio to
+the optimum is not available**.
+
+**This is still a root, not a solved problem.** Branch-and-price needs branching rules on
+`lambda` that do not destroy the pricing problem's structure, and none is written. What is
+established is that the relaxation this project has been unable to strengthen for months
+strengthens by 13% under reformulation, and that the machinery to exploit it runs in under
+two minutes at the point where the monolith takes ~947 s.
+
+### 5. Where this leaves the project
+
+Stage 3 is the live line of work. The order of operations from here is branching, then a
+real end-to-end comparison against the monolith at Q=3 — and D56 remains the standard that
+comparison has to meet: the monolith is the baseline, not the slot model and not an
+earlier version of the decomposition.

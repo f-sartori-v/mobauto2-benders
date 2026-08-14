@@ -313,7 +313,28 @@ cut set. That is a direct, reproducible measurement — the LP phase never stops
 (D26 does not apply), so it is one of the few numbers in this repository that reproduces to
 the digit.
 
-### Stage 2 — The down-set recourse cut
+### Stage 2 — The down-set recourse cut — **CLOSED AS DOMINATED (D56)**
+
+*Do not build this.* Measured and proved dead before integration, which is what the
+staging below was for. Two things were wrong with the text that follows.
+
+The encoding does **not** need a binary per `(d,τ)`. Continuous `v_d[τ] ≥ Y_d[τ] − Ŷ_d[τ]`,
+`v ≥ 0`, with `M = Q(Ŷ)`, gives a cut valid at every integer `Y`.
+
+And it does not matter, because **the classical Benders cut at the same anchor dominates
+it everywhere.** Capacity rows are `≤` in a minimisation, so `π ≤ 0` (measured: 44 duals,
+max exactly 0.0). On the down-set `Y − Ŷ ≤ 0`, so every term of
+`Σ S·π_d[τ]·(Y_d[τ] − Ŷ_d[τ])` is non-negative and the Benders cut sits at or above
+`Q(Ŷ)` — which is all the down-set cut ever gives. Outside the down-set the down-set cut
+collapses to `≤ 0`. There is no region where it helps. Confirmed at 0 of 240 sampled
+points by `scripts/stage2_downset_probe.py`, before the proof was written down.
+
+**P3 itself survives** — minimum measured slack `+43.10`, exactly as claimed. It is
+dominated *as a hyperplane at an anchor*. Using it as dominance pruning in a search, or
+as a bound inside a pricing DP, is untouched by this argument.
+
+The original text is kept below because the reasoning it contains is the reasoning that
+had to be checked.
 
 *Cost:* moderate; needs a linearisation study before any integration.
 
@@ -327,7 +348,22 @@ what M1 did in spec §2.9.
 *Note the interaction with stage 1:* both act on the LP root. Measure them separately
 before measuring them together, or neither number means anything.
 
-### Stage 3 — Dantzig-Wolfe over per-vehicle trajectories
+### Stage 3 — Dantzig-Wolfe over per-vehicle trajectories — **ROOT MEASURED, IT MOVES (D57)**
+
+At Q=2/T=22 the whole pool enumerates (159 768 columns after the battery filter), so the
+reformulation was built **exactly** — no pricing, no dominance rule — and the root went
+**216.35 → 233.11** against a proven optimum of 293.37: 22% of the gap the compact
+formulation leaves. Column generation reaches the same 233.1067 from 37 columns, which is
+the check that matters — an earlier enumeration was missing a third of its columns and
+reported a *higher* root, and only the second construction exposed it (D57 §3b).
+
+The paragraph below saying `J` cannot be enumerated is true at the Q=3 test point
+(216 747 219 patterns) and false at the small one. Sizing it first is what made the root
+measurable without owing three proofs.
+
+**The dominance rule below is now on the critical path**, not hypothetical: column
+generation is required for anything past this instance, and the rule has to be verified by
+enumeration against the MILP at Q=1/T≤12 exactly as written.
 
 *Cost:* high. This is the reformulation, not a cut.
 
