@@ -2547,7 +2547,7 @@ justify itself against not decomposing at all.
 
 ---
 
-## D58 — Column generation works where enumeration cannot, and the lift GROWS with fleet size
+## D58 — Column generation works where enumeration cannot, and the lift does NOT grow with fleet size once the optimum is known
 
 Date: 2026-08-14. Stage 3 carried to the operating point that matters. Script:
 `scripts/stage3_column_generation.py`. Follows D57, whose small-instance root this loop
@@ -2567,19 +2567,50 @@ how the first stage is described.
 **Lift +32.71, which is +13.1% on the root.** Converged on reduced cost — 89 columns, no
 time limit, no stall, well inside the 420 s cap.
 
-### 2. The direction is the point
+### 2. The direction, once the denominator exists — and it is NOT what section 2 first said
 
-| instance | compact | DW | lift | relative |
-|---|---:|---:|---:|---:|
-| Q=2, T=22, 30-min, 1 scenario | 216.3516 | 233.1067 | +16.76 | +7.7% |
-| **Q=3, T=44, 15-min, 4 scenarios** | 248.9795 | 281.6850 | +32.71 | **+13.1%** |
+The Q=3 optimum in this regime is **431.5433, proven, 181.0 s** (section 2b). With it:
 
-**The lift nearly doubles in relative terms as the fleet grows.** That is the property this
-project has been unable to find. D33's recourse anchor went inert at Q=3; D46 closed by
-naming the missing lever as one that "does not go slack as Q grows". This is that
-behaviour, and the mechanism explains it: the reformulation removes the vehicle index
-entirely, so the thing it fixes — per-vehicle integrality and the symmetry the master can
-only break weakly (spec 2.8) — is exactly what gets worse with more vehicles.
+| instance | compact | DW | optimum | lift | lift on root | **share of gap closed** |
+|---|---:|---:|---:|---:|---:|---:|
+| Q=2, T=22, 30-min, 1 scen | 216.3516 | 233.1067 | 293.3700 | +16.76 | +7.7% | **21.8%** |
+| Q=3, T=44, 15-min, 4 scen | 248.9795 | 281.6850 | 431.5433 | +32.71 | +13.1% | **17.9%** |
+
+**Two normalisations, opposite directions, and the flattering one is the wrong one.**
+Measured against the root, the lift nearly doubles (7.7% → 13.1%). Measured against the
+gap that actually has to be closed, it *shrinks* (21.8% → 17.9%). For a bound feeding a
+branch-and-price tree, the share of the gap is what governs tree size, so that is the
+measure that decides anything.
+
+**This entry first claimed "the lift nearly doubles as the fleet grows" and offered it as
+the property D33 and D46 said was missing.** That claim was written before the optimum at
+this regime existed, from the only ratio available at the time. It does not survive the
+denominator. What is true is narrower: the lift is larger in absolute terms (+32.71 vs
++16.76) and a slightly smaller share of a much larger gap.
+
+The mechanism argument still holds as far as it goes — the reformulation deletes the
+vehicle index, and per-vehicle integrality plus weakly-broken symmetry do worsen with `Q`.
+It just does not follow that the *bound* improves proportionally, and the measurement says
+it does not.
+
+**Both roots are much weaker at Q=3**: 73.7% → 57.7% for compact, 79.5% → 65.3% for DW.
+The problem gets harder faster than the reformulation helps.
+
+### 2b. The bar, and it is lower than expected
+
+The monolith solves this instance to **proven optimality in 181.0 s** — not the ~947 s D54
+recorded, because that was `p = 750` with a slot recourse and is a different problem
+(D50, D53).
+
+**Column generation spent 109.8 s to produce a root worth 65.3%.** The root alone costs
+61% of the monolith's entire time-to-proven-optimality, before a single branching decision,
+before an incumbent, before a tree.
+
+That is the number that matters for whether stage 3 becomes a method. It does not kill
+branch-and-price — a tree seeded at 65.3% may still close faster than one seeded at 57.7%,
+and the pricing MILP is the obvious thing to make faster. But the honest position is that
+the decomposition now has to make up a 110 s head start against a 181 s target, and
+nothing measured says it can.
 
 ### 3. Column generation earns its place
 
@@ -2595,11 +2626,9 @@ root for this config would be a different problem's answer.
 
 ### 4. What is NOT claimed
 
-**No percentage of the optimum, because the optimum at this regime is not known.** D54's
-1658.86 is at `p = 750` passenger-minutes, not the policy regime, and is not a valid
-denominator here. Establishing it costs a monolith solve of the order of 947 s. Both arms
-are internally consistent at `p_minutes = 56`, so the **lift** is sound and the **ratio to
-the optimum is not available**.
+**The optimum is now known** — 431.5433, proven, 181.0 s, same model and regime as both
+roots (section 2b). D54's 1658.86 is at `p = 750` with a slot recourse and remains the
+wrong denominator for this instance.
 
 **This is still a root, not a solved problem.** Branch-and-price needs branching rules on
 `lambda` that do not destroy the pricing problem's structure, and none is written. What is
@@ -2609,7 +2638,14 @@ two minutes at the point where the monolith takes ~947 s.
 
 ### 5. Where this leaves the project
 
-Stage 3 is the live line of work. The order of operations from here is branching, then a
-real end-to-end comparison against the monolith at Q=3 — and D56 remains the standard that
-comparison has to meet: the monolith is the baseline, not the slot model and not an
-earlier version of the decomposition.
+Stage 3 is the live line of work and its case is weaker than section 2 first stated. The
+order of operations is: a third point on the lift curve (Q=4) before any trend is believed
+— two points is exactly what went wrong in D55 — then branching, then an end-to-end
+comparison against the monolith. D56 remains the standard: the monolith is the baseline.
+
+**The question that decides the project is now sharper.** At Q=2 the monolith takes 0.8 s
+and at Q=3 it takes 181 s. Nothing will beat those. The target is the regime where the
+monolith stops closing in reasonable time, and whether one exists inside the sizes this
+project cares about is unmeasured. If it does not, the correct conclusion is that
+decomposition is the wrong tool here and the contribution stays the multi-resolution
+evaluation result.
