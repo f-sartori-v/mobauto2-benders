@@ -2967,3 +2967,91 @@ exactly.
 machine is 3.14 without the CPLEX bindings, where `cplex_direct` is unavailable and **14
 tests skip -- the 14 that exercise the cut generator**. The suite prints `OK` and has checked
 none of it. The skip message already says so; heed it. Use `p310`.
+
+---
+
+## D62 — Phase 5 closes: the decomposition reaches the monolith's optimum, and getting there found an inconsistent pair of tolerances
+
+Date: 2026-08-17. The exactness gate the validation ladder was missing (handout section 86
+phase 5). Configs: `configs/phase5/*.yaml`, `configs/milp/phase5_tiny*.yaml`. Test:
+`tests/test_phase5_exactness.py`.
+
+### 1. What was missing, and why an inequality was not enough
+
+Every exactness check in this repository was an **inequality** --
+`LB <= (a known feasible objective)`, asserted against 4183.24. That catches a bound that is
+not a bound, which is the D30 class, and nothing else. It is satisfied by a decomposition
+that converges to the wrong place, by a master missing a constraint the monolith has, and by
+cuts so weak the run never closes. The handout asks for `|z*_Benders - z*_extensive| <= eps`
+and the repository never had it.
+
+### 2. The gate
+
+Two instances, four Benders arms, two monolith arms. Q=1, T=6 (180 min / 30 min slots),
+trip 1 slot, `p_minutes = 56`, single scenario. Everything closes in about two seconds.
+
+| cell | instance | monolith | Benders `dual` | Benders `mw` |
+|---|---|---:|---:|---:|
+| slack | `phase5_tiny.yaml`, 6 pax/direction vs S=15 | **12.02** | LB 12.019999999999989 / UB 12.02 | LB 12.019998999999995 / UB 12.02 |
+| tight | `phase5_tiny_tight.yaml`, 17 OUT in one slot vs S=15 | **36.086666666666667** | 36.086666666666666 both | LB 36.08666566666666 / UB 36.086666666666666 |
+
+All six proved optimality; no master solve stopped on the clock. Three iterations per arm.
+
+**Two cells on purpose.** On the slack cell capacity never binds, and the final cut comes out
+with `nnz = 0` -- measured. A nearly flat cut can still drive a trivial master to the right
+answer, so the slack cell alone would be a gate that passes while testing almost no cut
+geometry. The tight cell binds (23 of 30 served) and `pi` is strictly negative, so the slope
+vector is under test and not only the constant. The suite asserts the tight cell really binds
+by pricing it directly, rather than inferring it from the objective.
+
+**Two cut modes on purpose.** Formal formulation 16.6 says MW changes the *shape* of the cut
+away from the incumbent and not its exactness at the incumbent, so both modes must reach the
+same optimum. Asserting that is what turns 16.6 from a claim into a test. It also makes
+`use_dual_slopes` reachable somewhere in the suite (AUDIT_v4 3.5).
+
+### 3. What building it found: two tolerances that could not both be satisfied
+
+The MW arms **failed** on first run, on the pre-existing check
+`Cut tightness failed at incumbent`. Measured gap: exactly `-1e-06`.
+
+That is `face_tol = max(1e-6, 1e-9*|Q|)`, the slack `solve_mw_dual` deliberately allows on
+the optimal face -- deliberately, because a float equality against a separately computed
+primal optimum is infeasible for a few ulps of disagreement. The tightness check used
+`eps_cut * max(1, |Q|)`, which is `1e-8 * 22.4 = 2.24e-7` on this instance.
+
+**So the code admitted duals that a later check refused.** Nothing had ever noticed, because
+the intercept was IMPOSED as `Q(y) - sum(dm*y_inc)`, which made the tightness check an
+identity that could not fail (D61 section 3). Deriving the intercept from `alpha` exposed the
+inconsistency on the first instance that exercised it.
+
+The two jobs are now separated, in `_tightness_tolerance`:
+
+- `derive_cut_intercepts` checks the **constant** against the duals at `eps_dual`, which is
+  the tolerance that has to admit the face slack.
+- the tightness check verifies the **assembled** cut -- constant plus broadcast slopes -- so
+  its remaining job is catching a bad broadcast, and it inherits `eps_dual` so it cannot fire
+  on a constant already accepted upstream. Its message now says so, and names the broadcast
+  as the thing to look at.
+
+### 4. The 1e-6 is the honest cost of D61, and it is worth naming
+
+The MW lower bound now lands 1e-6 *below* the optimum on the slack cell. Before D61 it
+printed 12.02 exactly -- because the intercept was forced to `Q(y)`, so the bound was asserted
+rather than proven. **S2 costs 1e-6 of lower bound and buys the guarantee that the bound was
+earned.** A gate tolerance tighter than the face slack would fail the honest version and pass
+the dishonest one, which is why `EPS = 1e-5` and not `1e-8`.
+
+### 5. What this gate does and does not establish
+
+It establishes that the **decomposition** is exact with respect to the formulation: master,
+cuts, aggregation, bound bookkeeping and termination all agree with the extensive form at a
+size where both prove optimality, under two cut modes and two dual regimes.
+
+It does **not** establish that the formulation is right. `mobauto2_milp/model.py` is a second
+copy of the first stage that `master_impl.py` also implements, so a defect present in both
+copies is invisible here -- the same limit `baseline_d9_monolith.yaml` already states about
+4183.24. Nor does it say anything about Q>=2 symmetry, multi-scenario aggregation, or the
+minute recourse; it is Q=1, single-scenario, slot recourse by design, because the point is a
+size where the monolith proves optimality in under a second.
+
+196 tests pass under p310 in 50 s.

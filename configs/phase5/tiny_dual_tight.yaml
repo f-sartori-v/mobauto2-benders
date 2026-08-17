@@ -1,0 +1,113 @@
+schema:
+  name: mobauto2_benders_config
+  version: 2
+
+# Phase 5 exactness gate -- Benders arm, PLAIN DUAL cuts.
+#
+# Handout section 86 phase 5 requires |z*_Benders - z*_extensive| <= eps. Every other
+# exactness check here is an inequality (`LB <= a known feasible objective`), which
+# catches a bound that is not a bound and nothing else. It cannot catch a
+# decomposition that is valid but converges to the wrong place, nor a master missing a
+# constraint the monolith has. This config is the arm that closes that gap.
+#
+# Plain dual rather than Magnanti-Wong, deliberately: the baseline first. MW changes
+# the SHAPE of the cut away from the incumbent, not its exactness at the optimum
+# (formal formulation 16.6), so both arms must reach the same optimum. The companion
+# configs/phase5/tiny_mw.yaml asserts exactly that, and the pair is what turns 16.6
+# from a claim into a test.
+#
+# `use_dual_slopes: true` with `use_magnanti_wong: false` is the one combination that
+# reaches the plain-dual branch. AUDIT_v4 3.5 records that the SHIPPED configs set
+# both true, which makes the branch unreachable there; it is reachable by
+# configuration, and this file is where that is exercised.
+#
+# THE INSTANCE must match configs/phase5/tiny_monolith.yaml exactly or the equality
+# is not a test of anything. A test asserts field by field that they agree.
+
+run:
+  name: phase5_tiny_dual_tight
+  log_level: INFO
+  log_file: null
+  report_dir: null
+  seed: 42
+
+data:
+  demand_file: setups/phase5_tiny_tight.yaml
+  scenario_files:
+  scenario_weights: null
+  R_out: null
+  R_ret: null
+
+model:
+  time:
+    T_minutes: 180
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 1
+    initial_battery: [150.0]
+    initial_actions: [IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+master:
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  # OFF. The anchor is a valid inequality (D29) but this run must converge on the
+  # gap by cuts alone: the point is to prove the CUT machinery reaches the optimum,
+  # and an anchor that already implies most of the bound would hide a weak cut.
+  recourse_lower_bound: false
+  # Generous. A master solve that stops on the clock is machine-dependent (D26), and
+  # a gate that fails on some machines and passes on others is worse than no gate.
+  per_iteration_time_limit_s: 60
+  # Tight, because this run must CONVERGE rather than get close. At T=6/Q=1 the
+  # master is trivial, so 1e-6 costs nothing.
+  per_iteration_mipgap: 1.0e-6
+  cplex_options:
+    CPXPARAM_Preprocessing_Symmetry: 5
+    CPXPARAM_Threads: 1
+  solver_backend: cplex_direct
+  aggregate_cuts_by_tau: true
+  theta_per_scenario: false
+  # OFF. The default 0.001 deliberately drops small cut mass, which is accounted for
+  # in the re-anchoring check but would show up here as a gap that never closes.
+  cut_coeff_threshold: 0.0
+  write_lp_after_cut: false
+
+subproblem:
+  multi_cuts_by_scenario: false
+  use_magnanti_wong: false
+  use_dual_slopes: true
+  S: 15
+  Wmax_minutes: 60
+  # Stated in minutes so the policy is resolution-independent (D53). The operator's
+  # own figure. At slot_resolution 30 this resolves to p = 56/30 slot units.
+  p_minutes: 56.0
+  degenerate_cut_probe_top_k: 6
+  degenerate_cut_zero_tol: 1.0e-9
+
+solver:
+  # Room to converge. This run must stop on the TOLERANCE, not on the iteration cap:
+  # stopping on the cap would leave a gap and the equality would be untestable.
+  max_iterations: 200
+  tolerance: 1.0e-6
+  total_time_limit_s: 600
+  # Stall detection off: it would end the run early and the gate needs convergence.
+  stall_max_no_improve_iters: 0
+  stall_min_abs_improve: 1.0
+  stall_min_rel_improve: 0.002
+  master_solver: cplex
+  subproblem_solver: cplex_direct
+  solver_tee: false
+
+tolerances:
+  eps_bin: 1.0e-5
+  eps_feas: 1.0e-7
+  eps_cut: 1.0e-8
+  eps_hash: 1.0e-6

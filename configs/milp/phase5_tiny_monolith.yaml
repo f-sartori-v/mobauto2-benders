@@ -1,0 +1,80 @@
+# Phase 5 exactness gate -- MONOLITH arm.
+#
+# The extensive form of the same tiny instance the two Benders arms solve. The gate is
+# |z*_Benders - z*_monolith| <= eps, with BOTH sides proven optimal.
+#
+# WHAT THIS CATCHES THAT THE EXISTING CHECKS DO NOT. `LB <= 4183.24` is an inequality:
+# it catches a bound that is not a bound (the D30 class) and stops there. It is
+# satisfied by a decomposition that converges to the wrong place, by a master missing a
+# constraint the monolith has, and by cuts so weak the run never closes. An equality at
+# a size where both sides prove optimality catches all three.
+#
+# WHAT "INDEPENDENT" MEANS, unchanged from baseline_d9_monolith.yaml and worth
+# repeating because it limits what this gate proves: the monolith attaches the exact
+# recourse LP and pins theta to it by EQUALITY, so no cut and no theta approximation
+# can reach it -- genuine independence FROM THE DECOMPOSITION. It is NOT independence
+# from the formulation: mobauto2_milp/model.py is a second copy of the first stage that
+# mobauto2_benders/problem/master_impl.py also implements. A defect present in both
+# copies is invisible here. So this gate proves the DECOMPOSITION is exact with respect
+# to the formulation; it does not prove the formulation is right.
+#
+# THE INSTANCE must match configs/phase5/tiny_dual.yaml and tiny_mw.yaml exactly:
+# T_minutes 180 / slot_resolution 30 -> T=6, trip 30 min -> trip_slots 1,
+# delta_chg = 70/(60/30) = 35, Q=1, setups/phase5_tiny.yaml, S=15, Wmax 60 min,
+# p_minutes 56, start_cost_epsilon 0.01, concurrency_penalty 0.25. A test asserts the
+# agreement field by field rather than trusting these comments.
+
+schema:
+  name: mobauto2_milp_config
+  version: 3
+
+run:
+  name: phase5_tiny_monolith
+  log_level: INFO
+  seed: 42
+
+data:
+  scenario_files: [setups/phase5_tiny.yaml]
+
+model:
+  time:
+    T_minutes: 180
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 1
+    initial_battery: [150.0]
+    initial_actions: [IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+milp:
+  # At Q=1 there is no symmetry to break, so these are inert here rather than
+  # load-bearing. Left matching the Benders arms so the two models differ in the
+  # decomposition and in nothing else.
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  # Must terminate on the gap, not the clock: a clock-truncated MIP is
+  # machine-dependent (D26) and a reference produced that way is a different number on
+  # every machine. At this size it closes in well under a second.
+  solve_time_limit_s: 120
+  mipgap: 1.0e-9
+  solver_backend: cplex
+  cplex_options:
+    CPXPARAM_MIP_Strategy_Symmetry: 5
+    CPXPARAM_Threads: 1
+
+service:
+  S: 15
+  Wmax_minutes: 60
+  p_minutes: 56.0
+  fill_first_epsilon: 0.0
+
+solver:
+  solver_tee: false

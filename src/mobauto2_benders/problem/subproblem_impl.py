@@ -210,6 +210,38 @@ def derive_cut_intercepts(
     return a_out, a_ret, diagnostics
 
 
+def _tightness_tolerance(
+    eps_cut: float, target_val: float, dual_diag: Mapping[str, float]
+) -> float:
+    """Tolerance for "the assembled cut equals Q(y) at the incumbent" (20.1).
+
+    Must be at least as loose as the slack the cut generator is ALLOWED to have, or
+    the code rejects duals it just admitted. That inconsistency was live and hidden:
+
+      - `solve_mw_dual` states the optimal face as an inequality with
+        `face_tol = max(1e-6, 1e-9*|Q|)` of slack, deliberately, because a float
+        equality against a separately computed primal optimum is infeasible for a
+        few ulps of disagreement.
+      - this check used `eps_cut * max(1, |Q|)`, i.e. `1e-8 * 22.4 = 2.24e-7` on the
+        Phase 5 instance.
+
+    So MW could legitimately return a dual 1e-6 inside the face and the tightness
+    check would refuse the cut built from it. Nothing noticed, because the intercept
+    was IMPOSED as `Q(y) - sum(dm*y_inc)`, which made this check an identity that
+    could not fail (S2). Deriving the intercept from alpha exposed it immediately:
+    the Phase 5 MW arm aborted with a measured gap of exactly -1e-06 = face_tol.
+
+    The two jobs are now separated. `derive_cut_intercepts` checks the CONSTANT
+    against the duals at `eps_dual`, which is the tolerance that has to admit the
+    face slack. This function checks the ASSEMBLED cut -- constant plus broadcast
+    slopes -- so its remaining job is to catch a bad broadcast, and it inherits
+    `eps_dual` so it cannot fire on a constant already accepted upstream.
+    """
+    floor = float(eps_cut) * max(1.0, abs(float(target_val)))
+    eps_dual = float(dual_diag.get("intercept_eps_dual", 0.0) or 0.0)
+    return max(floor, eps_dual)
+
+
 def _cut_intercepts(
     mw: MWDual | None,
     *,
@@ -1503,11 +1535,17 @@ class ProblemSubproblem(Subproblem):
                     )
                 )
                 target_val = float(ub_val)
-                if abs(float(target_val) - float(theta_lb_s)) > eps_cut * max(
-                    1.0, abs(float(target_val))
-                ):
+                tight_tol = _tightness_tolerance(eps_cut, target_val, dual_diag)
+                if abs(float(target_val) - float(theta_lb_s)) > tight_tol:
                     raise RuntimeError(
-                        "Cut tightness failed at incumbent; aborting cut generation."
+                        f"cut tightness failed at the incumbent (scenario {scen_label}): "
+                        f"the assembled cut evaluates to {theta_lb_s:.12g} where the "
+                        f"subproblem optimum is {target_val:.12g} "
+                        f"(diff {target_val - theta_lb_s:.3g}, tol {tight_tol:.3g}). "
+                        "The intercept itself was already checked against the duals, so "
+                        "a failure here points at the slope broadcast rather than at the "
+                        "constant: a coefficient on the wrong (q,tau), a slope dropped, "
+                        "or a candidate key the expansion did not recognise."
                     )
                 cuts.append(
                     Cut(
@@ -2050,11 +2088,16 @@ class ProblemSubproblem(Subproblem):
                 )
             )
             target_val = float(ub_val)
-            if abs(float(target_val) - float(theta_lb)) > eps_cut * max(
-                1.0, abs(float(target_val))
-            ):
+            tight_tol = _tightness_tolerance(eps_cut, target_val, dual_diag)
+            if abs(float(target_val) - float(theta_lb)) > tight_tol:
                 raise RuntimeError(
-                    "Cut tightness failed at incumbent; aborting cut generation."
+                    "cut tightness failed at the incumbent: the assembled cut evaluates "
+                    f"to {theta_lb:.12g} where the subproblem optimum is "
+                    f"{target_val:.12g} (diff {target_val - theta_lb:.3g}, "
+                    f"tol {tight_tol:.3g}). The intercept itself was already checked "
+                    "against the duals, so a failure here points at the slope broadcast "
+                    "rather than at the constant: a coefficient on the wrong (q,tau), a "
+                    "slope dropped, or a candidate key the expansion did not recognise."
                 )
 
             # Emit cut metadata
