@@ -49,9 +49,14 @@ must be produced on the corrected model.
 6. Gapped runs never reported as optima without a marker. **Tested**
    (`test_gapped_run_is_not_reported_as_optimal`).
 7. Every reported number states which subproblem mode produced it. **Implemented** — each
-   dispatch branch labels itself (`mw`, `mw_fdiff_fallback`, `dual`,
+   dispatch branch labels itself (`mw`, `mw_dual_fallback`, `dual`,
    `finite_difference`), the multi-scenario aggregate reports one label or
    `mixed(a+b)`, and the manifest records it alongside `cut_valid_lower_bound`.
+   The mode→guarantee mapping is `CUT_MODE_VALID_LOWER_BOUND`, and a mode absent from
+   it raises: neither `True` nor `False` is a safe default for a generator whose
+   validity nobody has stated (S1). A test asserts the table and the dispatch labels
+   are the *same set*, so a removed mode cannot linger in the table and an added one
+   cannot ship untabled.
 8. **New.** A reported lower bound must be accompanied by evidence that the master is a
    relaxation. Two independent defects (`AUDIT_v4` C3, C4) each silently produced bounds
    that were not bounds. The standing check is
@@ -248,18 +253,77 @@ Three points that v3 got wrong or omitted:
 **Slopes and broadcast:**
 
 ```
-dm_out[τ] = S · Σ_k π_OUT[τ,k]          (<= 0)
+dm_out[τ] = S · π_OUT[τ]                (<= 0)
 coeff_yOUT[(q,τ)] = dm_out[τ]  for every q      # identical across q by construction
 ```
+
+The `Σ_k` is gone: there are no layers (§2.5), so there is one `π` per slot. The broadcast
+is `expand_slopes_to_candidate`, extracted because this block had been written out four
+times and a fix to one copy left the others generating the old cut.
+
+**Intercept — derived, not imposed (S2).**
+
+```
+a_d = Σ_t α_d[t] · R_d[t]                       # from the dual
+check:  | a_d − ( Q_d(y) − Σ_τ dm_d[τ]·y_inc_d[τ] ) |  ≤  ε_dual        else RAISE
+```
+
+It used to be `const = Q(y) − Σ dm·y_inc`, written directly. That is algebraically equal to
+`Σ α R` **only** when the selected dual sits exactly on the optimal face, and `OptFace` is
+deliberately an inequality with `face_tol` of slack (a float equality against a separately
+computed primal optimum is infeasible for a few ulps). Two consequences, and the second is
+the one that matters:
+
+1. The tightness diagnostic (formal formulation §20.1) **could not fail** — the code wrote
+   the identity it then verified. §20.1 and §20.3 were unmonitored.
+2. The imposed intercept could sit up to `face_tol` **above** the true dual cut. That is an
+   overestimate, and an overestimating cut is the only kind that can exclude the optimum.
+   D30 was that defect.
+
+`ε_dual = max(1e-5, 1e-7·|Q(y)|)`, which must exceed `face_tol = max(1e-6, 1e-9·|Q(y)|)`:
+a dual legitimately inside the face moves the derived intercept by up to that slack, so a
+tighter tolerance would fire on correct behaviour and be loosened until it fired on nothing.
+
+Both intercepts are recorded per iteration under `diagnostics["cut_intercept"]`
+(`intercept_out_from_alpha`, `intercept_out_imposed`, `intercept_gap_out`, and the RET
+twins), so a run can be audited after the fact rather than only at the moment the check
+passes.
+
+`finite_difference` has no duals to derive from and is already marked as carrying no
+guarantee, so there the intercept stays imposed and the check is **skipped rather than
+passed vacuously** — `intercept_source: imposed_no_dual`.
 
 #### Fallback paths
 
 | Mode | Valid lower bound | Notes |
 |---|---|---|
 | `mw` | **yes** | default |
-| `mw_fdiff_fallback` | **no** | MW returned no solution; sets `cut_lb_valid = False` and logs `[SP WARN]`. v3 wrongly stated this branch marked itself invalid — it did not, which is how C3 hid |
-| `dual` (`use_magnanti_wong: false, use_dual_slopes: true`) | **yes** | `dm_out[τ] = S·pi_out[τ]` from `solve_subproblem`. Not Pareto-optimal; the natural ablation baseline. **Currently unreachable** — see `AUDIT_v4` §3.5 |
-| `finite_difference` | **no** | diagnostic only; never for a reported result |
+| `mw_dual_fallback` | **yes** | **Replaces `mw_fdiff_fallback` (S1).** MW returned no solution, so the cut is built from the plain capacity duals already returned by `solve_subproblem`. Validity comes from dual feasibility, so the run keeps its bound; it is simply not Pareto-optimal. Logs `[SP WARN]` |
+| `dual` (`use_magnanti_wong: false, use_dual_slopes: true`) | **yes** | `dm_out[τ] = S·pi_out[τ]` from `solve_subproblem`. Not Pareto-optimal; the natural ablation baseline. Still not reachable *by configuration* — `AUDIT_v4` §3.5 — but the same generator is now reachable as the MW fallback |
+| `finite_difference` | **no** | diagnostic only; never for a reported result. The only remaining mode without a guarantee |
+
+**The mapping from mode to guarantee is one table**, `CUT_MODE_VALID_LOWER_BOUND` in
+`subproblem_impl.py`, and an unlisted mode raises rather than defaulting. It used to be a
+boolean set by hand in each dispatch branch, which is how the branch and the flag came to
+disagree (`AUDIT_v4` C5/N6).
+
+**Why `mw_fdiff_fallback` was wrong and not merely weak.** On failure the MW path
+*discarded a valid cut it was already holding* — `S·π` was sitting in the same `duals`
+dict — in favour of finite-difference slopes that carry no lower-bounding guarantee, and
+then set `cut_lb_valid = False`, which makes `solver.py` drop `best_lb` for the **whole
+run**. One MW hiccup voided the bound.
+
+**Measured while making the change:** the MW path was declining far more often than anyone
+had reason to think, and for a benign reason. The runtime weak-duality check evaluated
+`pyo.value(dual_obj_expr(md))`, and `pi_RET[0]` appears in no dual-feasibility row — no arc
+can reach `τ=0`, since arcs require `t+1 ≤ τ` — so whenever `C_ret[0] = 0` its coefficient
+is `0.0` in both that expression and the MW objective, the backend never sends the variable,
+and `pyo.value` raises on it. The guard therefore refused every MW solution on such an
+instance while reporting the mode as enabled: **C3's shape exactly, in the code written to
+prevent C3**. The check now computes the dual objective from the multipliers read back
+(unset ones contribute exactly `0.0`, which is arithmetic — their coefficient is zero by the
+same structural fact that left them unsent). The test suite went from emitting `[MW FAIL]`
+to emitting none.
 
 `cut_valid_lower_bound` propagates to `solver.py`, which drops `best_lb` when false. In
 multi-scenario runs validity is aggregated **conjunctively** — valid only if every

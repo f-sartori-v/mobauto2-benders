@@ -2860,3 +2860,110 @@ measured against the right baseline three times and lost three times: 390x slowe
 monolith (D56), dominated as a cut (D57), and beaten at the root by the solver's own cuts
 (here). The honest conclusion is that this problem, at these sizes, does not want to be
 decomposed.
+
+---
+
+## D61 — The Magnanti-Wong fallback threw away a valid cut, and the guard meant to protect the bound was silently disabling MW
+
+Date: 2026-08-17. Correctness work (S1, S2 of the correction plan), taken before the
+competitiveness push so that every gap measured afterwards is readable. No experiment here:
+these are defects with tests, not measurements.
+
+### 1. S1 — the fallback discarded a valid cut it was already holding
+
+When `solve_mw_dual` declined, the dispatch fell to `coeffs_by_fdiff` and set
+`cut_lb_valid = False`, which makes `solver.py` drop `best_lb` for the **whole run**.
+
+But the plain capacity duals were already computed and already sitting in the same `duals`
+dict. `dm_d[tau] = S * pi_d[tau]` is a valid lower-bounding cut -- validity comes from dual
+feasibility (handout 77), not from optimality -- it is simply not Pareto-optimal. So on
+failure the code replaced a valid cut with an invalid one and then voided the bound.
+
+`mw_fdiff_fallback` is gone. `mw_dual_fallback` replaces it and **carries a lower bound**.
+`finite_difference` remains the one generator with no guarantee, diagnostic-only.
+
+The mode-to-guarantee mapping is now one table, `CUT_MODE_VALID_LOWER_BOUND`, and an
+unlisted mode **raises**: neither `True` nor `False` answers "nobody decided". Previously the
+flag was set by hand in each dispatch branch, which is precisely how the branch and the flag
+came to disagree (C5/N6). A test asserts the table and the emitted labels are the same set in
+both directions, so a removed mode cannot linger and an added one cannot ship untabled.
+
+### 2. The measurement that fell out of it: MW was declining for a benign reason
+
+The runtime weak-duality check evaluated `pyo.value(dual_obj_expr(md))` after loading the
+dual solution. `pi_RET[0]` appears in **no** dual-feasibility row -- arcs require
+`t+1 <= tau`, so nothing reaches `tau = 0` -- hence whenever `C_ret[0] = 0` its coefficient
+is `0.0` in that expression *and* in the MW objective, the backend never sends the variable,
+and `pyo.value` raises on an uninitialized var.
+
+So the guard refused **every MW solution** on any instance with no RET capacity in slot 0,
+while the run reported its mode as `mw`. That is C3's exact shape, occurring inside the code
+written to prevent C3: a guard that fails closed in the wrong place stops the thing it
+guards from ever running, and says nothing.
+
+Visible in the suite before the fix:
+
+    [MW FAIL] the dual objective is unreadable after load: ValueError:
+              No value for uninitialized VarData object pi_RET[0]
+    [SP WARN] solve_mw_dual returned no solution; fell back to ...
+
+The check now computes the dual objective from the multipliers read back. Unset multipliers
+contribute exactly `0.0`, which is arithmetic rather than a guess: their coefficient is zero
+by the same structural fact that left them unsent. After the fix the suite emits **zero**
+`[MW FAIL]` and **zero** `[SP WARN]` lines across 184 tests.
+
+**What this does NOT establish.** How often MW was declining on the *production* configs, or
+what it cost the bound. The evidence above is the test suite, whose fixtures are small and
+mostly start from an idle schedule. Every `mw`-labelled number in `docs/` predates this fix,
+so any of them may have been produced by the fallback rather than by MW. They are not wrong
+-- the fallback path was still building cuts from a real dual -- but a comparison that
+*attributes* a result to Pareto selection needs re-running. In particular D42's dominance
+margins, and any claim resting on `test_mw_dominates_the_plain_dual_at_every_core_point`,
+should be re-measured before being quoted as evidence about MW.
+
+### 3. S2 — the intercept was imposed, so the tightness check could not fail
+
+The cut constant was written as `const = Q(y) - sum(dm * y_inc)`. That equals
+`sum_t alpha[t] * R[t]` **only** when the selected dual lies exactly on the optimal face, and
+`OptFace` is deliberately an inequality with `face_tol` of slack, because a float equality
+against a separately computed primal optimum is infeasible for a few ulps of disagreement.
+
+Two consequences:
+
+1. Formal formulation 20.1 -- the cut is tight at its generating incumbent -- **could not
+   fail**, because the code wrote the identity it then verified. 20.1 and 20.3 were
+   unmonitored. The code's own comment said as much and nothing acted on it.
+2. The imposed intercept could sit up to `face_tol` **above** the true dual cut: an
+   overestimate, which is the one direction that can exclude the optimum. Small, but D30 was
+   that defect and it went six months unseen.
+
+`solve_mw_dual` now returns `alpha` alongside the slopes, in one `MWDual` object so a caller
+cannot pair slopes from one solve with alpha from another and pass the check anyway. The
+intercept is `a_d = sum_t alpha_d[t] * R_d[t]`, and `derive_cut_intercepts` raises when it
+disagrees with the imposed form by more than `eps_dual = max(1e-5, 1e-7*|Q(y)|)`.
+
+`eps_dual` must exceed `face_tol = max(1e-6, 1e-9*|Q(y)|)`: a dual legitimately inside the
+face moves the derived intercept by up to that slack, so a tighter tolerance would fire on
+correct behaviour and then be loosened until it fired on nothing.
+
+**The cut is now very slightly weaker and strictly valid** -- `sum alpha R` is at most the
+imposed value -- which is the correct direction to err in.
+
+Both forms are recorded per iteration under `diagnostics["cut_intercept"]`, so a run can be
+audited afterwards rather than only at the moment the check passes.
+
+### 4. Tests
+
+15 new, no solver required (`tests/test_fast_cut_intercept.py`): the intercept equals
+`sum alpha R`; the cut is tight at the incumbent **as a consequence** rather than by
+construction; a perturbed alpha raises; the check is sharp, so it does not fire on 1e-7 of
+float noise; slopes are `S*pi` and non-positive; a missing dual reads as a structural zero;
+slopes broadcast identically across `q` (E1); and the mode table matches the dispatch labels
+exactly.
+
+184 tests pass under the CPLEX-bearing environment, in 52 s.
+
+**Note on the environment, because it nearly hid all of this.** The default `python` on this
+machine is 3.14 without the CPLEX bindings, where `cplex_direct` is unavailable and **14
+tests skip -- the 14 that exercise the cut generator**. The suite prints `OK` and has checked
+none of it. The skip message already says so; heed it. Use `p310`.
