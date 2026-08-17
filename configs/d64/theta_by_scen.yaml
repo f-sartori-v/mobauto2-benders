@@ -1,0 +1,223 @@
+# D64 theta-shape A/B, cell: by_scenario -- |Omega| = 4 proxies
+#
+# Basis: configs/phase1/lp_only_150.yaml -- Q=3, T=44 (660/15), 4 scenarios,
+# 150 LP iterations, anchor OFF, MW on. PURE LP: no branch and bound, so no master
+# solve stops on the clock and the run is REPRODUCIBLE (D26 does not apply). This is
+# the only basis in the repo on which a theta-shape comparison is a measurement
+# rather than one draw.
+#
+# Cut aggregation is NOT free to vary independently: one cut per scenario on a
+# shared theta bounds max_s Q_s while the reported UB is the weighted mean, which is
+# a bound that is not a bound (D15/D16), and config load refuses it. So multi_cuts
+# is pinned to the theta shape. Cells 1-2 and cells 3-4 are each a CLEAN one-variable
+# comparison; across those pairs two things move at once and the difference must be
+# read as 'aggregate vs disaggregate', not attributed to either alone.
+#
+# Anchor stays OFF in all four so the theta shape is what differs. Its own
+# re-measurement is the D64 anchor pair.
+
+# Run 2 of the Fase 1 fork (handout section 5.3): LP-only, 150 iterations.
+#
+# WHAT IT MEASURES. The Benders LB can sit at zero for two independent reasons:
+# (A) the cut set is too thin, or (B) the master's branch and bound has not had
+# time to lift its best bound off the root relaxation. Relaxing the master to an
+# LP removes (B) BY CONSTRUCTION -- there is no branch and bound in an LP, the
+# simplex optimum IS the bound, and nothing is truncated. So whatever this run
+# reports is a statement about the cut set alone.
+#
+#   z_LP(K) <= z_MIP(K) <= true optimum
+#
+# z_LP is the root relaxation the MIP's branch and bound starts from. If it is
+# still ~0 after 150 cuts, B&B starts from zero on every master solve and the
+# Fase 1 observation (best bound 0.35 after ~4000 nodes) is a CONSEQUENCE of the
+# thin cut set, not an independent failure. If it rises, the opposite.
+#
+# WHY stall exit is OFF (lp_phase_stall_iters: 0). The hypothesis under test is
+# that the LP objective stays flat. That is precisely what the stall detector
+# calls a stall, so leaving it on would end the run at the moment the hypothesis
+# starts being confirmed -- three iterations instead of 150. It must be 0 here.
+#
+# WHY the budget is by iterations (D26). max_iterations: 150 binds;
+# total_time_limit_s: 1800 is set generously so it does not. Equal iteration
+# counts are a reproducible basis for comparison; equal seconds are not.
+#
+# NOTE ON READING THE RESULT. theta is declared NonNegativeReals, so the LP bound
+# is floored at 0 by the variable's own domain. A result of ~0 means the bound is
+# sitting on that floor, not that the LP found something.
+#
+# This run claims NO upper bound: a fractional schedule cannot be exhibited, and
+# the loop says so on exit. Only the LB is readable here.
+#
+# Derived from lp_on.yaml, same test point: Q=3, T=44, 4 scenarios.
+
+schema:
+  name: mobauto2_benders_config
+  version: 2
+
+run:
+  # Optional run label for logs/outputs
+  name: theta_by_scen
+  # log_level controls verbosity: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_level: INFO
+  # Optional paths for log/report outputs
+  log_file: null
+  report_dir: null
+  # Optional random seed (set to null to disable)
+  seed: 41
+
+data:
+  # Demand source (preferred): file with requests or R_out/R_ret arrays
+  demand_file: setups/base.yaml
+  # Optional scenario files for multi-scenario runs
+  scenario_files: [setups/base.yaml, setups/base_plus100_out_noon.yaml, setups/base_ret_peak_adv.yaml, setups/base_vol20_pm60.yaml]
+  #scenario_files: #[setups/prob/base.yaml, setups/prob/base_plus100_out_noon.yaml, setups/prob/base_ret_peak_adv.yaml, setups/prob/base_vol20_pm60.yaml]
+  # Optional weights aligned with scenario_files
+  scenario_weights: null
+  # Optional inline demand arrays (single scenario)
+  R_out: null
+  R_ret: null
+
+model:
+  time:
+    # Total horizon length in minutes (T_minutes) or discrete slots (T)
+    T_minutes: 660
+    # Minutes per slot
+    slot_resolution: 15
+    # Trip duration in minutes (converted internally to slots)
+    trip_duration_minutes: 30
+  fleet:
+    # Number of shuttles
+    Q: 3
+    # Initial battery level per shuttle (length Q)
+    initial_battery: [150.0, 150.0, 150.0]
+    # Forced first action per shuttle at t=0: IDL, CHR, OUT, RET
+    initial_actions: [IDL, IDL, IDL]
+  energy:
+    # Battery capacity
+    Emax: 150
+    # Energy consumed when starting a trip
+    L: 30
+    # Max charge added per slot when charging; expressions allowed here only
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    # Small penalty on starting trips
+    # Departure regularisation (D4). At 0.01, 100 extra trips equal one unit of
+    # waiting-time reduction, so it only breaks ties between equal-waiting
+    # solutions and never competes with the primary objective.
+    start_cost_epsilon: 0.01
+    # Penalty per extra concurrent departure beyond one per slot per direction.
+    # Adds conc_pen * sum_t (eOut[t] + eRet[t]) to the master objective, where
+    # eOut[t] >= Yout[t] - 1 captures departures beyond the first in slot t.
+    # Operationally it spreads departures rather than bunching both shuttles into
+    # the same slot.
+    #
+    # This term is NOT part of the originally published formulation. It is small
+    # in magnitude -- about 1.75 of a ~4190 objective on the baseline instance,
+    # roughly 7 penalised slots -- but large enough to select between otherwise
+    # equal schedules, so state the value used on every reported table. It is a
+    # separate knob from start_cost_epsilon above and must not be conflated with
+    # it (D4).
+    concurrency_penalty: 0.25
+
+master:
+  # Optional FIFO symmetry-breaking across vehicles
+  use_fifo_symmetry: true
+  # Symmetry breaking: order vehicles by total departures
+  symmetry_breaking: true
+  # Use previous master solution as a MIP start
+  use_mip_start: true
+  # Ceiling on ONE master MIP solve, per Benders iteration (seconds).
+  # This is NOT the run budget -- that is solver.total_time_limit_s below.
+  # The Benders loop runs a gap-tied schedule that picks a per-iteration limit;
+  # this caps it. Test phase: 30. Simulation phase: 600.
+  per_iteration_time_limit_s: 30
+  # Ceiling on the master MIP gap, per Benders iteration.
+  # This is NOT the convergence criterion -- that is solver.tolerance below.
+  # The schedule tightens the gap on its own (down to 0.001) as the Benders gap
+  # closes; this is the loosest it is allowed to be. Leave at 0.05 for both phases.
+  per_iteration_mipgap: 0.05
+  # Optional CPLEX parameters
+  cplex_options:
+    CPXPARAM_Preprocessing_Symmetry: 5
+    CPXPARAM_Threads: 0
+  # Master solver backend (preferred: cplex_direct)
+  solver_backend: cplex_direct
+  # Stronger aggregated cuts by tau
+  aggregate_cuts_by_tau: true
+  # Use one theta per scenario (requires multi-cuts)
+  theta_per_scenario: true
+  theta_by_direction: false
+  # Drop tiny cut coefficients to improve numerics
+  cut_coeff_threshold: 0.001
+  # Debug: write LP after each new cut
+  write_lp_after_cut: false
+  # Anchor theta to installed capacity, per prefix of the horizon (D29).
+  # Demand up to slot j can only be served by departures up to j+W_slots, so
+  # theta >= p*(R_cum[j] - S*Y_cum[j+W]) per direction. Without it the master
+  # answers "cost 0.22, no vehicles" for the first five iterations; with it its
+  # bound starts at ~1569 instead of 0.
+  recourse_lower_bound: false
+  # LP phase (Fase 1, item 2). The first iterations solve the master without
+  # integrality: cuts from a fractional y are valid because the recourse value
+  # function is convex in y, but the fractional schedule is not exhibitable, so
+  # the loop claims no upper bound while this is on.
+  lp_phase: true
+  lp_phase_max_iters: 150
+  lp_phase_stall_iters: 0
+  lp_phase_min_rel_improve: 0.005
+
+subproblem:
+  # Multi-cuts vs averaged cut across scenarios
+  multi_cuts_by_scenario: true
+  # Magnanti–Wong selection for Pareto-optimal cuts
+  use_magnanti_wong: true
+  # Core-point mixing factor alpha in (0,1]
+  mw_core_alpha: 0.3
+  # Use dual slopes for cut generation
+  use_dual_slopes: true
+  # Capacity units contributed by one vehicle starting at time tau
+  S: 15
+  # Max waiting time in minutes or slots
+  Wmax_minutes: 60
+  # Penalty per unit of unserved demand
+  p: 50.0
+  # Restricted fallback probing when proxy cuts are degenerate
+  degenerate_cut_probe_top_k: 6
+  # Treat slopes with max abs value below this threshold as zero
+  degenerate_cut_zero_tol: 1.0e-9
+
+solver:
+  # Benders loop settings.
+  #
+  # Three limits decide when a run stops. They are easy to confuse:
+  #   solver.total_time_limit_s          -- wall clock for the WHOLE loop
+  #   solver.tolerance                   -- relative BD gap that counts as converged
+  #   master.per_iteration_time_limit_s  -- ceiling on ONE master solve (above)
+  #
+  max_iterations: 150
+  # Relative Benders gap (UB-LB)/|UB| at which the run is declared converged.
+  tolerance: 0.01
+  # Budget for the whole Benders loop, in seconds. This is the knob that decides
+  # what a run costs. Checked between iterations and also clamps the master's
+  # per-iteration limit, so it is a real ceiling.
+  # Test phase: 120. Simulation phase: 1800 or more.
+  total_time_limit_s: 1800
+  # Optional stall-based early stopping
+  stall_max_no_improve_iters: 0
+  stall_min_abs_improve: 1.0
+  stall_min_rel_improve: 0.002
+  # Backend solver names (Pyomo)
+  master_solver: cplex
+  subproblem_solver: cplex_direct
+  # Emit solver logs during MP solves
+  solver_tee: false
+
+tolerances:
+  # Binary projection tolerance
+  eps_bin: 1.0e-5
+  # Feasibility residual tolerance
+  eps_feas: 1.0e-7
+  # Cut violation/tightness tolerance
+  eps_cut: 1.0e-8
+  # Near-duplicate cut hash tolerance
+  eps_hash: 1.0e-6

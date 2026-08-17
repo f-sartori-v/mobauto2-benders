@@ -330,6 +330,89 @@ multi-scenario runs validity is aggregated **conjunctively** — valid only if e
 scenario's cut is valid, defaulting to false on an empty set. That semantics is correct
 and must not be "simplified".
 
+#### The core point — projected into the master region (S3, D63)
+
+`Ȳ` is the direction MW maximises in, so it has to be a direction the master can move in.
+It is now **projected**, not clamped to a box:
+
+```
+Ȳ_d[τ] = 0                                              wherever the master fixes y_d[·,τ]=0
+Σ_{τ' ∈ [τ, τ+h_trip−1]} (Ȳ_out[τ'] + Ȳ_ret[τ'])  ≤ Q    ∀τ
+Ȳ_d[τ] ≥ floor > 0                                      on every remaining slot
+```
+
+`signature.project_core_point` enforces it; `core_point_violations` reports what a point
+breaks, by slot; the loop re-checks after projecting and **raises**, since the projection is
+idempotent by construction.
+
+The clamp this replaces kept every entry in `[ε, Q−ε]`, which is outside `proj_Y(conv(𝒵))`
+twice over: positive `Ȳ` on slots the master *fixes* to zero — all `τ ≥ T−2·h_trip` for
+OUT, which is 3 of 12 coordinates at T=6/h_trip=1 — and no trip window at all, so a point
+could assert the whole fleet departs in every slot.
+
+**These are necessary conditions, not a description of `proj_Y`.** Battery and per-vehicle
+occupancy are absent, so the result lies in a *relaxation* of the region: strictly better
+than a box point, and still not a proof of relative interiority. Describe it as a
+**stabilisation point** (formal formulation §16.5 option 4). Do not assert the MW hypothesis.
+
+Validity is unaffected either way — that comes from dual feasibility — but the
+Pareto-optimality claim is the only reason to run MW rather than the plain dual, so a core
+point outside the region makes the whole path pointless rather than wrong.
+
+The window inequality is the cheap form of what `problem/vehicle_dd.window_trip_caps` proves
+for the master, where it is **off** by default: ~1% of LP root for 1–2.2× the master time
+(D49/D50). That cost was master solve time; there is no master solve in a projection.
+
+The subproblem's own fallback — seeding `Ȳ` to all-ones when no core point arrives — projects
+too. A fallback that reinstates the defect the main path just fixed is the two-places-disagree
+pattern behind C5/N6.
+
+**Floor diagnostics count free coordinates only.** Counting all of them reports structure as
+decay: 3 of 12 sit at exactly 0 before anything has decayed.
+
+### 2.6b Recourse proxy shape — four options (S4, D63)
+
+| `theta_per_scenario` | `theta_by_direction` | shape | proxies |
+|---|---|---|---:|
+| false | false | `theta` | 1 |
+| false | true *(default)* | `theta_out`/`theta_ret` | 2 |
+| true | false *(default)* | `theta_s[s]` | \|Ω\| |
+| true | true | `theta_out_s[s]`/`theta_ret_s[s]` | 2\|Ω\| |
+
+The last is the formal formulation's recommended baseline (§12). It was **inexpressible**
+before S4: the master computed `disagg_dir = False if theta_per_scenario`, so the two
+disaggregations were mutually exclusive and one cell of D11's A/B did not exist.
+
+`master.theta_by_direction` is a real config key now. It was previously read from
+`disaggregate_theta_by_direction`, **which no config could set**, hardcoded true — the
+inert-configuration pattern (`AUDIT_v4` §3.8) inverted: a behaviour with no knob. Its default
+resolves to the pre-S4 value in both branches, so no shipped config changed shape, and a test
+asserts that.
+
+`multi_cuts_by_scenario` is **not** free to vary independently: one cut per scenario on a
+shared `theta` bounds `max_s Q_s(y)` while the reported UB is the weighted mean, so config
+load refuses it (D15/D16). Any A/B across the aggregated and per-scenario halves therefore
+moves two things at once and must be read as "aggregate vs disaggregate".
+
+A cut carrying no `scenario_index` under the `2|Ω|` shape **raises** rather than picking an
+epigraph arbitrarily.
+
+**Measured (D64), LP-only at 150 iterations:** the direction split is worth **+4.9%** of LP
+bound (757.79 → 794.78) and is the difference between a truncated bound and a converged root.
+The per-scenario cells add one cut per scenario per iteration, so the master grows 4× faster
+at 4 scenarios and 8× under `2|Ω|`; equal iterations does not hold master size fixed across
+those halves.
+
+**`ρ` is applied once.** `_scenario_weights` is the single reader and **refuses** weights that
+do not sum to 1 rather than renormalising: the cuts are built from the same probabilities, so
+rescaling would make the master's comparison mean something the config did not say. The
+objective used raw weights while the anchor divided by their sum, silently (handout §87,
+Failure 5).
+
+The anchor follows the shape, one row per `(ω, d, j)` using **that scenario's own** demand —
+strictly tighter by Jensen. `_recourse_bound_data` carries the per-scenario vectors alongside
+the mean.
+
 ### 2.7 Master aggregation — validated and enforced
 
 `aggregate_cuts_by_tau` collapses `Σ_q coeff[q,τ]·y[q,τ]` to `coeff[τ]·Y[τ]` where

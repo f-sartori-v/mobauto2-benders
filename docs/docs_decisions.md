@@ -3172,3 +3172,139 @@ fewer variables summed before intersection -- but "cannot bound worse per cut fa
 A/B, at equal iterations, and it is still open.
 
 233 tests pass under p310 in 51 s; 37 are new (15 core point, 22 theta shape).
+
+---
+
+## D64 — 794.62 was never the LP root, and the theta A/B (partial)
+
+Date: 2026-08-17. Configs: `configs/d64/*.yaml`, all derived from
+`configs/phase1/lp_only_150.yaml` -- Q=3, T=44 (660/15), 4 scenarios, 150 LP iterations,
+MW on. **Pure LP**, so no master solve stops on the clock and every cell is reproducible;
+D26 does not apply. This is the only basis in the repository on which a theta-shape
+comparison is a measurement rather than one draw.
+
+### 1. The headline correction: a truncated bound was published as a root
+
+`README.md` carried **794.624549571966** as "LP root relaxation, 150 cuts (reproducible)".
+It was reproducible. It was **not a root**. Its own log says why:
+
+    [LP-PHASE] it=150 obj=794.625 rel_improve=1.11e-06 stall=80/0 cuts=1
+    [LP-PHASE] off after 150 iteration(s): iteration budget (150)
+
+A cut was still being added on the last iteration. The number is whatever the iteration cap
+happened to catch. Re-measured on the current code:
+
+    [LP-PHASE] it=150 obj=794.78 rel_improve=4.46e-12 stall=97/0 cuts=0
+    [LP-PHASE] off after 150 iteration(s): no cut generated
+
+**The LP root is 794.7795573706986**, reached rather than truncated, and reproducible to the
+last digit over two runs.
+
+### 2. Bisected across four commits
+
+Same config, same instance, one run each, in a worktree per commit:
+
+| commit | LP phase ended on | iters | LP bound |
+|---|---|---:|---:|
+| `01b39e8` merge (pre-S1) | **iteration budget (150)** | 150 | 794.624549571966 |
+| `11768ea` S1+S2 (D61) | **no cut generated** | 147 | 794.779555094372 |
+| `4257a7d` + Phase 5 tolerance (D62) | no cut generated | 147 | 794.779555094372 |
+| `e00c1bc` + S3/S4 (D63) | no cut generated | 150 | 794.7795573706986 |
+
+Three things this pins:
+
+- **D61 is what changed it.** Not D62, not D63.
+- **D62's tolerance change is bit-identical here**, which is the confirmation wanted at the
+  time: it loosened a check that was not firing on this instance.
+- **D63 did not move the root** -- 794.779555094372 vs 794.7795573706986, agreeing to 8
+  significant figures, the cut-tolerance scale. It changed the trajectory (convergence at
+  150 rather than 147) and nothing about the bound.
+
+**Mechanism, consistent with the evidence and not isolated by a separate experiment.** The
+intercept used to be *imposed* as `Q(y) - sum(dm*y_inc)` instead of derived from the duals,
+which let it sit up to `face_tol` above the true dual cut (D61 section 3). A cut could then
+look marginally violated when it was not, and the phase kept adding near-duplicates without
+terminating -- exactly the `cuts=1, rel_improve=1.11e-06` signature above. Deriving the
+intercept from `alpha` removed the manufactured violations. Stated as the explanation that
+fits every number measured; a run that isolates it was not done.
+
+**The +0.155 is not evidence that the cuts got stronger.** It is 0.02% on 794, the scale of
+trajectory divergence, and D61's change makes each individual cut *weaker*, not stronger.
+What improved is termination, not cut quality.
+
+### 3. Reading rule this adds
+
+> Say whether the LP phase **converged or was truncated**, and quote the reason it printed.
+> `no cut generated` is a root; `iteration budget (N)` is a bound the cap happened to catch.
+> Reproducible and truncated are not exclusive -- 794.62 reproduced three times and was
+> still not a root.
+
+### 4. Theta shape A/B (D11) -- partial
+
+Four shapes, anchor OFF in all four so the shape is what differs. Cut aggregation is **not**
+free to vary independently: one cut per scenario on a shared theta bounds `max_s Q_s` while
+the reported UB is the weighted mean, which config load refuses (D15/D16). So `multi_cuts`
+is pinned to the shape, and only the within-pair comparisons are one-variable.
+
+**Read the LP-phase bound at exit, not the run's final `best_lb`.** `lp_only_150.yaml` is
+"pure LP" only when the LP phase uses all 150 iterations. When it converges earlier the
+remaining iterations are MIP solves at ~30 s each, and `best_lb` then mixes an LP root with
+MIP progress -- which is exactly the trap that made the `4257a7d` row in section 2 read as
+1071.31 until its log was checked. Every LP bound below is the `[LP-PHASE]` bound at exit.
+
+| cell | proxies | multi-cuts | LP root | LP iters | ended on |
+|---|---:|---|---:|---:|---|
+| `theta_single` | 1 | no | 757.7869449404787 | 150 | **iteration budget** (truncated) |
+| `theta_by_dir` | 2 | no | **794.7795573706986** | 150 | no cut generated |
+| `theta_by_scen` | 4 | yes | **794.7795553673325** | **91** | no cut generated |
+| `theta_by_scen_dir` | 8 | yes | *not measured* | | |
+
+**The direction split is worth +4.9% of LP bound** (757.79 → 794.78) and is the difference
+between a truncated bound and a converged root: `theta_single` stops on the iteration budget
+where `theta_by_dir` converges. Clean one-variable comparison, and it settles the half of
+D11 the shipped default already assumed.
+
+**The per-scenario split reaches the same root in 91 iterations instead of 150** --
+794.7795553673325 against 794.7795573706986, agreeing to 8 significant figures. So it buys
+**iterations, not bound**, on this instance. Whether that is a win depends on cost per
+iteration, and there it loses: it adds one cut per scenario, so at 4 scenarios the master
+grows 4× faster and by iteration 91 carries 364 cuts against 150. Master time per iteration
+reached 30 s. **Fewer, more expensive iterations to the same root** is the honest summary,
+and it does not support switching the default.
+
+`theta_by_scen_dir` and the anchor pair were **stopped, not run**: their LP phases converge
+early and the loop then spends ~30 s/iteration in a MIP phase whose numbers are single draws
+and not comparable across cells, which is ~80 min of CPU for output that would be discarded.
+The right way to run them is with `total_time_limit_s` capped near 400 s so the LP phase
+completes and the MIP tail is cut short.
+
+### 4b. A defect this surfaced in the multi-scenario aggregation *(pre-existing, fails closed)*
+
+`theta_by_scen` logged, in 2 of 96 iterations:
+
+    mode=mixed(mw+unknown)   lb_valid=invalid
+    [CHECK] Bounds are heuristic only; LB/gap optimality logic disabled for current cut mode.
+
+Cause: when one scenario's θ early-exit fires -- its θ already covers its recourse, so it
+generates no cut -- that scenario's diagnostics carry neither `cut_generation_mode` nor
+`cut_valid_lower_bound`. The aggregate reads the missing mode as `"unknown"`, and the
+conjunctive validity aggregation turns the whole iteration INVALID, so `solver.py` drops the
+lower bound.
+
+That is the wrong mapping. A scenario that produced **no cut** is `CutValidity.NO_CUT`, which
+`benders/types.py` already defines as "no cut this iteration; previously established validity
+is untouched" -- not UNKNOWN. The aggregate should be VALID when every scenario that *did*
+produce a cut was valid.
+
+**It fails closed**, so it costs a bound rather than claiming a false one -- the same class as
+the S1 defect (D61 §1), and not a correctness hazard. It did not touch any number in this
+entry: all 91 LP-phase iterations were `lb_valid=valid`, and it fired only in the MIP phase.
+Not fixed here; recorded so the θ A/B is not re-run on top of it.
+
+### 5. What is NOT established
+
+- The anchor A/B (`anchor_off` / `anchor_on` at this basis) -- pending. The 10-iteration
+  result D40/D45 withdrew (0.299 vs 0.314) is still the only measurement, and it is void.
+- Attribution of the +0.155 to a specific line of D61, as against trajectory divergence.
+- Anything about Q>=4, the minute recourse, or the MIP phase. This is one instance, one
+  budget, LP only.

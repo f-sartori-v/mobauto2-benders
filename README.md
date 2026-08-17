@@ -20,14 +20,27 @@ With the cap removed, 150 LP iterations at ~0.8 s each:
 
 | | lower bound |
 |---|---:|
-| LP root relaxation, 150 cuts | **794.62** (reproducible) |
+| LP root relaxation, converged | **794.78** (reproducible) |
 | after one 102 s MIP solve | ~1080 (single draw) |
 | after one 410 s MIP solve | 1111.05 (two draws) |
 | after one 1520 s MIP solve | **1148.65** (single draw) |
-| monolithic MILP, for reference | 1569.44 |
+| monolithic MILP, for reference | 1658.86 in 947 s |
 
-Those three points are close to linear in `ln(t)`: **14× more master time is projected to buy
-about 8% of bound** (D47). Master seconds are not what the lower bound is short of.
+> **Two corrections to this table, both from re-measurement.**
+>
+> **The LP root is 794.7795573706986, not 794.624549571966** (D64). The older figure was
+> never the LP root: at that commit the LP phase stopped on `iteration budget (150)` while
+> still generating cuts (`cuts=1`, `rel_improve=1.11e-06`), so it was a *truncated* bound
+> that the iteration cap happened to catch. After D61 the phase stops on
+> `no cut generated` — it converges — at 794.7796. Both numbers are reproducible; only the
+> second is a root. Bisected across four commits: D61 (S1+S2) is what changed it, and
+> D63 (S3+S4) left it unchanged to 8 significant figures.
+>
+> **The monolith reference is 1658.86 in 947 s, not 1569.44 in 39 s** (D50). Every
+> "% of the monolith's optimum" computed against the old pair is wrong.
+
+Those three MIP points are close to linear in `ln(t)`: **14× more master time is projected
+to buy about 8% of bound** (D47). Master seconds are not what the lower bound is short of.
 
 The master's internal gap falls from **0.9994 to about 0.20**, and an upper bound appears
 for the first time at this size. So the earlier reading — that the master's branch and
@@ -81,7 +94,7 @@ python -m mobauto2_benders --config configs/phase1/lp_only_150.yaml run
 
 | config | what it does | LB | UB |
 |---|---|---:|---:|
-| `lp_only_150.yaml` | 150 LP iterations, no MIP phase | **794.624549571966** | none claimed |
+| `lp_only_150.yaml` | 150 LP iterations, no MIP phase | **794.7795573706986** | none claimed |
 | `lp150_then_mip1.yaml` | the same, then one MIP iteration | ~1080 | ~2170 |
 | `lp150_then_mip8.yaml` | the same, then eight | 1089.98 | 2030.86 |
 | `lp150_then_control.yaml` | the same, then ONE long master solve (410 s) | 1111.05 | 2351.86 |
@@ -97,11 +110,21 @@ lower bound here. Branch-and-cut buys the *upper* bound instead (18% better, bec
 incumbent it accepts has been priced by the subproblem). Details and the two defects the
 measurement found: D46.
 
-`lp_only_150.yaml` is **reproducible**: three independent executions gave
-`794.624549571966` with identical trajectories point by point across all 150 iterations —
-the last two as the seeding phase of the branch-and-cut runs, which is what makes those
-comparable to it at all. An LP has no branch and bound and never stops on the clock, so D26
-does not apply to it. It is the only number in this README that is not a single draw.
+`lp_only_150.yaml` is **reproducible**: two independent executions on the current code gave
+`794.7795573706986` to the last digit, and the superseded `794.624549571966` reproduced three
+times on the code that produced it. An LP has no branch and bound and never stops on the
+clock, so D26 does not apply to it. It is the only number in this README that is not a single
+draw.
+
+**It is now a converged LP root rather than a truncated bound**, and that distinction is the
+whole of D64. The phase used to stop on `iteration budget (150)` with a cut still being added
+every iteration; it now stops on `no cut generated`. The mechanism that fits the evidence:
+the cut intercept used to be *imposed* as `Q(y) − Σ dm·y_inc` rather than derived from the
+duals, which let it sit up to `face_tol` above the true dual cut — so a cut could look
+marginally violated when it was not, and the phase kept adding near-duplicates without ever
+terminating. Deriving the intercept from `α` (D61) removed the manufactured violations. That
+is the explanation consistent with every number measured, not one isolated by a separate
+experiment.
 
 The other five print `NOT REPRODUCIBLE` — their solves stop on the clock, and the same
 iteration under the same configuration gave 1088.07 in one run and 1080.36 in another. The
@@ -136,8 +159,14 @@ added after the fact; each one exists because a number was once quoted without i
   the exception and the only one: it is pure LP, so it reproduces exactly.
 - **Say which cut budget produced a number.** The single largest source of wrong
   conclusions in this project was quoting a bound measured at 10–19 cuts as if it described
-  the method. 794.62 is a 150-cut number; 0.35 is a 14-cut number; they are not comparable
-  and neither supersedes the other without the budget stated.
+  the method. 794.78 is a converged-LP number; 0.35 is a 14-cut number; they are not
+  comparable and neither supersedes the other without the budget stated.
+- **Say whether the LP phase converged or was truncated**, and read the reason it printed —
+  `no cut generated` is a root, `iteration budget (N)` is a bound that the cap happened to
+  catch. This rule exists because `794.624549571966` was published as "LP root relaxation,
+  150 cuts" for months while its own log said `iteration budget (150)` with a cut still
+  being added every iteration (D64). Reproducible and truncated are not exclusive: that
+  number reproduced three times and was still not a root.
 - **Each UB is real** — an exhibited feasible schedule. A Benders gap may now be quoted at
   Q=3, but only from the MIP-phase runs, only as a single draw, and never from the Phase 1
   table, whose LB is not within a factor of 1000 of useful.

@@ -114,13 +114,21 @@ class TheDefaultDidNotMove(unittest.TestCase):
         and the table quoting them has to say so."""
         from mobauto2_benders.config import load_config
 
-        # `theta_sd_smoke.yaml` is the one exemption, and it is exempt by construction:
-        # it exists to exercise the new shape's cut routing, runs 4 iterations, and its
-        # header says it is not a result config. Any OTHER config appearing here has
-        # changed model silently and its numbers are on a different model.
-        exempt = {"default.yaml", "theta_sd_smoke.yaml"}
+        # Two kinds of file are exempt, both by intent rather than by accumulation:
+        #
+        #   default.yaml           untracked live experiment file
+        #   theta_* / d64/theta_*  configs whose PURPOSE is to select a theta shape --
+        #                          the smoke config for the cut routing and the D64 A/B
+        #                          cells. Their headers say so, and D64 quotes their
+        #                          numbers as being on different models by construction.
+        #
+        # Everything else is a config whose numbers are published under the assumption of
+        # its pre-S4 shape. One of those appearing here means the model moved silently.
+        def is_theta_experiment(p) -> bool:
+            return p.stem.startswith("theta_") or p.parent.name == "d64"
+
         for path in sorted(CONFIGS.rglob("*.yaml")):
-            if path.name in exempt:
+            if path.name == "default.yaml" or is_theta_experiment(path):
                 continue
             try:
                 cfg = load_config(path)
