@@ -116,6 +116,42 @@ class ProblemMaster(MasterProblem):
         )
         self._last_cut_attempt: dict[str, Any] | None = None
 
+    def _scenario_weights(self, S: int) -> list[float]:
+        """Scenario probabilities, normalised exactly once.
+
+        `rho` must appear in the expected-cost aggregation once and only once (handout
+        87, Failure 5). This is the single place the master reads them, so the objective
+        and the recourse anchor cannot end up normalising differently -- which they did:
+        the objective used the raw weights while the anchor divided by their sum, so a
+        config whose weights did not already sum to 1 gave the two a different notion of
+        expectation, silently.
+
+        Falls back to uniform only when the weights are absent or the wrong length.
+        Weights that are present, correctly sized and do not sum to 1 are a config
+        error, not something to renormalise behind the caller's back: the cut values
+        that the master compares against are built from these same probabilities, so
+        quietly rescaling here would make the comparison mean something the config did
+        not say.
+        """
+        S = int(S)
+        wts = list(self._p("scenario_weights", []) or [])
+        if not wts or len(wts) != S:
+            return [1.0 / float(max(1, S))] * max(1, S)
+        wts = [float(w) for w in wts]
+        if any(w < 0.0 for w in wts):
+            raise ValueError(
+                f"scenario_weights carries a negative probability: {wts!r}"
+            )
+        total = sum(wts)
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError(
+                f"scenario_weights sum to {total!r}, not 1. They are probabilities and "
+                "the master applies them once, as written, to form the expected "
+                "recourse. Renormalising here would make the objective disagree with "
+                "the cuts, which are built from these same values."
+            )
+        return wts
+
     def _p(self, key: str, default: Any | None = None) -> Any:
         if self.params is None:
             return default
@@ -308,19 +344,40 @@ class ProblemMaster(MasterProblem):
         S = int(self._p("num_scenarios", 0) or 0)
         if use_theta_per_scen and S <= 0:
             use_theta_per_scen = False
-        # If using per-scenario thetas, keep single theta per scenario for simplicity; otherwise allow dir split
-        disagg_dir = (
-            False
-            if use_theta_per_scen
-            else bool(
-                self._p(
-                    "disaggregate_theta_by_direction",
-                    self._p("theta_split_by_direction", True),
-                )
+        disagg_dir = bool(
+            self._p(
+                "disaggregate_theta_by_direction",
+                self._p("theta_split_by_direction", True),
             )
         )
+        # Four recourse-proxy shapes, from coarsest to finest:
+        #
+        #   theta            one variable            scenarios and directions aggregated
+        #   theta_out/_ret   two                     scenarios aggregated
+        #   theta_s[s]       |Omega|                 directions aggregated
+        #   theta_out_s[s],  2*|Omega|               NEITHER aggregated  <-- S4, new
+        #   theta_ret_s[s]
+        #
+        # The last is the formal formulation's recommended baseline (12): "the
+        # scenario-direction multi-cut ... the strongest clean baseline", because it
+        # preserves the natural (omega, d) decomposition rather than averaging distinct
+        # scenario epigraphs before the master ever sees them.
+        #
+        # Until S4 the two disaggregations were MUTUALLY EXCLUSIVE by construction --
+        # `disagg_dir = False if use_theta_per_scen` -- so the recommended shape was not
+        # expressible and one cell of D11's A/B did not exist. All four are now
+        # selectable, which is what makes that comparison runnable.
+        #
+        # A finer shape cannot bound worse than a coarser one on the same cut family: it
+        # is the same epigraph with fewer variables summed before intersection. So this
+        # is expected to help the bound or do nothing, never to hurt it -- and the test
+        # suite asserts that ordering rather than trusting it.
         if use_theta_per_scen:
             m.Scenarios = range(S)
+        if use_theta_per_scen and disagg_dir:
+            m.theta_out_s = pyo.Var(m.Scenarios, within=pyo.NonNegativeReals)
+            m.theta_ret_s = pyo.Var(m.Scenarios, within=pyo.NonNegativeReals)
+        elif use_theta_per_scen:
             m.theta_s = pyo.Var(m.Scenarios, within=pyo.NonNegativeReals)
         elif disagg_dir:
             m.theta_out = pyo.Var(within=pyo.NonNegativeReals)
@@ -346,10 +403,14 @@ class ProblemMaster(MasterProblem):
 
         # Build objective: combine theta terms depending on config
         if use_theta_per_scen:
-            wts = list(self._p("scenario_weights", []) or [])
-            if not wts or len(wts) != S:
-                wts = [1.0 / float(max(1, S)) for _ in range(max(1, S))]
-            obj_expr = sum(float(wts[s]) * m.theta_s[s] for s in range(S))
+            wts = self._scenario_weights(S)
+            if disagg_dir:
+                obj_expr = sum(
+                    float(wts[s]) * (m.theta_out_s[s] + m.theta_ret_s[s])
+                    for s in range(S)
+                )
+            else:
+                obj_expr = sum(float(wts[s]) * m.theta_s[s] for s in range(S))
         else:
             obj_expr = (m.theta_out + m.theta_ret) if disagg_dir else m.theta
         if eps_start > 0.0:
@@ -736,7 +797,63 @@ class ProblemMaster(MasterProblem):
                 def _cap_upto(mm, var, tau_max):
                     return sum(var[q, tau] for q in mm.Q for tau in range(tau_max + 1))
 
-                if hasattr(m, "theta_out") and hasattr(m, "theta_ret"):
+                if hasattr(m, "theta_out_s") and hasattr(m, "theta_ret_s"):
+                    # Scenario-direction thetas (S4). One row per (scenario, direction,
+                    # prefix), using the demand of THAT scenario rather than the
+                    # weighted mean -- which is what makes this form strictly tighter
+                    # than the aggregated ones. `app.py` folds the mean into
+                    # R_out/R_ret for the coarser shapes, and bounding a weighted sum by
+                    # the mean's implied unserved cost is weaker than bounding each
+                    # scenario by its own, by Jensen.
+                    #
+                    # Per-scenario demand is only available when the caller supplied it.
+                    # Fall back to the mean rather than silently skipping the anchor,
+                    # and say which was used.
+                    _per_scen = rlb.get("R_out_by_scenario"), rlb.get("R_ret_by_scenario")
+                    _Ss = int(self._p("num_scenarios", 0) or 0)
+                    _have_per_scen = (
+                        isinstance(_per_scen[0], (list, tuple))
+                        and isinstance(_per_scen[1], (list, tuple))
+                        and len(_per_scen[0]) == _Ss
+                        and len(_per_scen[1]) == _Ss
+                    )
+
+                    def _cum(vec):
+                        acc, out = 0.0, [0.0] * T
+                        for t in range(T):
+                            acc += float(vec[t])
+                            out[t] = acc
+                        return out
+
+                    if _have_per_scen:
+                        _co = [_cum(_per_scen[0][s]) for s in range(_Ss)]
+                        _cr = [_cum(_per_scen[1][s]) for s in range(_Ss)]
+                    else:
+                        _co = [cum_out] * max(1, _Ss)
+                        _cr = [cum_ret] * max(1, _Ss)
+                    self._anchor_demand_source = (
+                        "per_scenario" if _have_per_scen else "weighted_mean"
+                    )
+
+                    def _c_rlb_sd_out_rule(mm, s, j):
+                        tmax = min(T - 1, int(j) + W_sl)
+                        return mm.theta_out_s[s] >= p_pen * (
+                            _co[int(s)][int(j)] - S_cap * _cap_upto(mm, mm.yOUT, tmax)
+                        )
+
+                    def _c_rlb_sd_ret_rule(mm, s, j):
+                        tmax = min(T - 1, int(j) + W_sl)
+                        return mm.theta_ret_s[s] >= p_pen * (
+                            _cr[int(s)][int(j)] - S_cap * _cap_upto(mm, mm.yRET, tmax)
+                        )
+
+                    m.C_recourse_lb_sd_out = pyo.Constraint(
+                        m.Scenarios, m.T, rule=_c_rlb_sd_out_rule
+                    )
+                    m.C_recourse_lb_sd_ret = pyo.Constraint(
+                        m.Scenarios, m.T, rule=_c_rlb_sd_ret_rule
+                    )
+                elif hasattr(m, "theta_out") and hasattr(m, "theta_ret"):
                     # Direction-split theta is the default. Bounding each direction
                     # separately is strictly tighter than bounding their sum.
                     def _c_rlb_out_rule(mm, j):
@@ -760,16 +877,17 @@ class ProblemMaster(MasterProblem):
                     # app.py already folded into R_out/R_ret. Direction split does
                     # not exist in this branch (see the disagg_dir guard above), so
                     # both directions go on one row.
-                    _wts = list(self._p("scenario_weights", []) or [])
-                    _S = int(self._p("num_scenarios", 0) or 0)
-                    if not _wts or len(_wts) != _S:
-                        _wts = [1.0 / float(max(1, _S))] * max(1, _S)
-                    _tw = sum(float(w) for w in _wts) or 1.0
+                    # Same weights the objective uses, normalised in the same one place.
+                    # This branch used to divide by their sum while the objective used
+                    # them raw, so a config whose weights did not already sum to 1 gave
+                    # the anchor and the objective two different notions of expectation.
+                    # `_scenario_weights` now refuses that config outright.
+                    _wts = self._scenario_weights(int(self._p("num_scenarios", 0) or 0))
 
                     def _c_rlb_scen_rule(mm, j):
                         tmax = min(T - 1, int(j) + W_sl)
                         theta_expr = sum(
-                            (float(_wts[s]) / _tw) * mm.theta_s[s] for s in mm.Scenarios
+                            float(_wts[s]) * mm.theta_s[s] for s in mm.Scenarios
                         )
                         return theta_expr >= p_pen * (
                             cum_out[int(j)] - S_cap * _cap_upto(mm, mm.yOUT, tmax)
@@ -1575,6 +1693,32 @@ class ProblemMaster(MasterProblem):
                         cand[f"__theta_s[{int(s)}]"] = float(v)
         except Exception:
             pass
+        # Scenario-direction thetas (S4). Also written as `__theta_out`/`__theta_ret`
+        # totals, weighted by rho, so the end-of-run report and the subproblem's theta
+        # early-exit keep working on every shape rather than silently seeing no theta
+        # under the newest one -- which is how the directional pair came to be missing
+        # from the candidate in the first place (see the note above).
+        if hasattr(m, "theta_out_s") and hasattr(m, "theta_ret_s"):
+            try:
+                S = len(getattr(m, "Scenarios", []))
+            except (TypeError, ValueError):
+                S = 0
+            wts = self._scenario_weights(int(S))
+            tot_out = tot_ret = 0.0
+            seen = False
+            for s in range(int(S)):
+                v_out = pyo.value(m.theta_out_s[s], exception=False)
+                v_ret = pyo.value(m.theta_ret_s[s], exception=False)
+                if v_out is None or v_ret is None:
+                    continue
+                seen = True
+                cand[f"__theta_out_s[{int(s)}]"] = float(v_out)
+                cand[f"__theta_ret_s[{int(s)}]"] = float(v_ret)
+                tot_out += float(wts[s]) * float(v_out)
+                tot_ret += float(wts[s]) * float(v_ret)
+            if seen:
+                cand["__theta_out"] = tot_out
+                cand["__theta_ret"] = tot_ret
 
     def set_report_solution(
         self,
@@ -1889,10 +2033,13 @@ class ProblemMaster(MasterProblem):
             theta that exists but will not convert to a float is a bug worth surfacing.
             """
 
-            def _read(attr: str) -> float | None:
+            def _read(attr: str, index: Any = None) -> float | None:
                 if not hasattr(m, attr):
                     return None
-                val = pyo.value(getattr(m, attr), exception=False)
+                var = getattr(m, attr)
+                if index is not None:
+                    var = var[index]
+                val = pyo.value(var, exception=False)
                 if val is None:
                     return None
                 try:
@@ -1902,8 +2049,17 @@ class ProblemMaster(MasterProblem):
                         f"master {attr} is set but unreadable: {exc}"
                     ) from exc
 
-            theta_out_val = _read("theta_out")
-            theta_ret_val = _read("theta_ret")
+            # Under the scenario-direction shape the relevant pair is THIS scenario's,
+            # not an aggregate. The re-anchoring accounting below compares the cut it is
+            # about to add against the theta it will be added to, so reading a different
+            # scenario's theta would compare two unrelated numbers and either fire
+            # spuriously or, worse, fail to fire.
+            if hasattr(m, "theta_out_s") and scen_idx is not None:
+                theta_out_val = _read("theta_out_s", int(scen_idx))
+                theta_ret_val = _read("theta_ret_s", int(scen_idx))
+            else:
+                theta_out_val = _read("theta_out")
+                theta_ret_val = _read("theta_ret")
             if hasattr(m, "theta"):
                 theta_total_val = _read("theta")
             elif theta_out_val is None and theta_ret_val is None:
@@ -2223,7 +2379,28 @@ class ProblemMaster(MasterProblem):
         # Temporarily disable scaling: enforce raw cut(s)
         # Support disaggregation by direction to strengthen the linearization
         scale = 1.0
-        disagg_dir = hasattr(m, "theta_out") and hasattr(m, "theta_ret")
+        # Directional routing covers two shapes: the scalar pair (scenarios aggregated)
+        # and the scenario-indexed pair from S4. Both take this branch, and it selects
+        # the theta variable in exactly one place below.
+        sd_dir = (
+            hasattr(m, "theta_out_s")
+            and hasattr(m, "theta_ret_s")
+            and scen_idx is not None
+        )
+        disagg_dir = sd_dir or (hasattr(m, "theta_out") and hasattr(m, "theta_ret"))
+        if (
+            hasattr(m, "theta_out_s")
+            and hasattr(m, "theta_ret_s")
+            and scen_idx is None
+        ):
+            # Scenario-direction thetas with no scenario on the cut would silently pick
+            # one arbitrarily, or land on none. Refuse: the cut belongs to exactly one
+            # (omega, d) epigraph and the producer must say which.
+            raise RuntimeError(
+                "the master holds scenario-direction thetas but this cut carries no "
+                "scenario_index. With 2*|Omega| epigraphs there is no default one to "
+                "attach to; the subproblem must label the cut (multi_cuts_by_scenario)."
+            )
         added_any = True
         attempt_diag["scale"] = float(scale)
         if disagg_dir and (const_adj_out is not None) and (const_adj_ret is not None):
@@ -2239,8 +2416,12 @@ class ProblemMaster(MasterProblem):
                 rhs_out = float(const_adj_out) + sum(float(v) * m.yOUT[int(q), int(t)] for (q, t), v in agg_out.items())  # type: ignore[misc]
                 rhs_ret = float(const_adj_ret) + sum(float(v) * m.yRET[int(q), int(t)] for (q, t), v in agg_ret.items())  # type: ignore[misc]
 
-            lhs_out = m.theta_out
-            lhs_ret = m.theta_ret
+            if sd_dir:
+                lhs_out = m.theta_out_s[int(scen_idx)]
+                lhs_ret = m.theta_ret_s[int(scen_idx)]
+            else:
+                lhs_out = m.theta_out
+                lhs_ret = m.theta_ret
 
             # Violation values and shared filter per direction
             lhs_out_val = pyo.value(lhs_out, exception=False)
@@ -2454,24 +2635,34 @@ class ProblemMaster(MasterProblem):
 
         # Create explicit constraint(s)
         if (
-            hasattr(m, "theta_out")
-            and hasattr(m, "theta_ret")
+            disagg_dir
             and (const_adj_out is not None)
             and (const_adj_ret is not None)
         ):
+            # Same routing as the violation check above, and it must stay the same: a
+            # constraint written against a different theta than the one whose violation
+            # was measured would be filtered on one epigraph and enforced on another.
+            if sd_dir:
+                th_out = m.theta_out_s[int(scen_idx)]
+                th_ret = m.theta_ret_s[int(scen_idx)]
+                tag = f"s{int(scen_idx)}_"
+            else:
+                th_out = m.theta_out
+                th_ret = m.theta_ret
+                tag = ""
             con_list = []
             name_list = []
             # OUT direction
             if force or "added_out" in locals() and added_out:
-                cname_out = f"benders_cut_out_{self._cut_idx}"
-                con_out = pyo.Constraint(expr=(m.theta_out >= rhs_out))
+                cname_out = f"benders_cut_out_{tag}{self._cut_idx}"
+                con_out = pyo.Constraint(expr=(th_out >= rhs_out))
                 setattr(m.BendersCuts, cname_out, con_out)
                 con_list.append(con_out)
                 name_list.append(cname_out)
             # RET direction
             if force or "added_ret" in locals() and added_ret:
-                cname_ret = f"benders_cut_ret_{self._cut_idx}"
-                con_ret = pyo.Constraint(expr=(m.theta_ret >= rhs_ret))
+                cname_ret = f"benders_cut_ret_{tag}{self._cut_idx}"
+                con_ret = pyo.Constraint(expr=(th_ret >= rhs_ret))
                 setattr(m.BendersCuts, cname_ret, con_ret)
                 con_list.append(con_ret)
                 name_list.append(cname_ret)

@@ -154,6 +154,26 @@ class MasterSection:
     aggregate_cuts_by_tau: bool = True
     cut_coeff_threshold: float = 0.0
     theta_per_scenario: bool = False
+    # Direction split of the recourse proxy. Was hardcoded True and read through
+    # `self._p("disaggregate_theta_by_direction", ...)` from a key no config could set --
+    # the inert-configuration pattern (AUDIT_v4 3.8), except inverted: not a knob that did
+    # nothing, but a behaviour with no knob. Exposed because S4 makes the combination
+    # (per-scenario AND per-direction) meaningful, and that combination must be OPTED
+    # INTO rather than arriving as a side effect of a default.
+    #
+    # The four shapes and how to select them:
+    #
+    #   theta_per_scenario  theta_by_direction   shape          proxies
+    #   false               false                single         1
+    #   false               true   (default)     by_direction   2
+    #   true                false                by_scenario    |Omega|
+    #   true                true                 by_scen_dir    2*|Omega|   <-- S4
+    #
+    # Defaults reproduce the pre-S4 behaviour exactly: `theta_per_scenario: false` gave
+    # the directional pair, and `true` gave the per-scenario set with the direction split
+    # forced OFF. So `theta_by_direction` defaults to true, and a per-scenario config that
+    # does not mention it keeps its old shape -- see the resolution in app.py.
+    theta_by_direction: bool | None = None
     write_lp_after_cut: bool = False
     # Window trip caps from the single-vehicle decision diagram (D48, stage 1):
     #   sum_{tau in [t1,t2]} (Yout+Yret)[tau] <= Q * max_trips(t1,t2)
@@ -546,6 +566,7 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
             "aggregate_cuts_by_tau": master_params.get("aggregate_cuts_by_tau", True),
             "cut_coeff_threshold": master_params.get("cut_coeff_threshold", 0.0),
             "theta_per_scenario": master_params.get("theta_per_scenario", False),
+            "theta_by_direction": master_params.get("theta_by_direction"),
             "write_lp_after_cut": master_params.get("write_lp_after_cut", False),
             "window_trip_caps": master_params.get("window_trip_caps", False),
             # Both change the bound a run reports, so a table quoting one has to be
@@ -891,6 +912,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "aggregate_cuts_by_tau",
             "cut_coeff_threshold",
             "theta_per_scenario",
+            "theta_by_direction",
             "write_lp_after_cut",
             "window_trip_caps",
             "charge_before_idle",
@@ -1023,6 +1045,13 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         ),
         theta_per_scenario=_ensure_bool(
             master_raw.get("theta_per_scenario", False), "master.theta_per_scenario"
+        ),
+        theta_by_direction=(
+            None
+            if master_raw.get("theta_by_direction") is None
+            else _ensure_bool(
+                master_raw.get("theta_by_direction"), "master.theta_by_direction"
+            )
         ),
         write_lp_after_cut=_ensure_bool(
             master_raw.get("write_lp_after_cut", False), "master.write_lp_after_cut"

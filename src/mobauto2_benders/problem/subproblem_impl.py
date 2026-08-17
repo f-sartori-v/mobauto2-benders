@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from ..benders.subproblem import Subproblem
 from ..benders.types import Candidate, Cut, CutType, SubproblemResult
+from ..signature import project_core_point
 
 
 # Whether a cut-generation mode carries a lower-bound guarantee.
@@ -550,12 +551,54 @@ class ProblemSubproblem(Subproblem):
                 "and still label the cut 'mw'."
             ) from exc
         if core_mass == 0.0 and T > 0:
-            Ybar_out = [1.0 for _ in range(T)]
-            Ybar_ret = [1.0 for _ in range(T)]
+            # Seed, then PROJECT it the same way the solver projects its own core point
+            # (S3). An all-ones seed puts positive Ybar on slots the master fixes to
+            # zero and ignores the trip window, which is exactly the defect S3 removed
+            # from `solver.py`; reintroducing it here would leave the two paths
+            # disagreeing about the region, with this one reachable whenever a caller
+            # supplies no core point.
+            trip_seed = 1
+            try:
+                trip_seed = max(1, int(params.get("trip_slots") or 0))
+            except (TypeError, ValueError):
+                trip_seed = 1
+            if trip_seed <= 1 and params.get("trip_duration_minutes"):
+                try:
+                    trip_seed = max(
+                        1,
+                        math.ceil(
+                            float(params["trip_duration_minutes"])
+                            / max(1.0, float(params.get("slot_resolution") or 1))
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    trip_seed = 1
+            Q_seed = 0
+            try:
+                Q_seed = int(params.get("Q") or 0)
+            except (TypeError, ValueError):
+                Q_seed = 0
+            if Q_seed >= 1:
+                Ybar_out, Ybar_ret = project_core_point(
+                    [1.0] * T, [1.0] * T, Q_seed, trip_seed, 1e-3
+                )
+            else:
+                # No fleet size in the subproblem's params: fall back to the old seed
+                # rather than inventing a Q. Say so, because the selection direction is
+                # then outside the master's region and the resulting cut is still valid
+                # but its Pareto claim is not (16.2).
+                Ybar_out = [1.0 for _ in range(T)]
+                Ybar_ret = [1.0 for _ in range(T)]
+                self._vprint(
+                    "[MW CORE] no fleet size in the subproblem params, so the seeded "
+                    "core point could not be projected into the master region; the cut "
+                    "stays valid but is not Pareto-optimal with respect to a feasible "
+                    "direction."
+                )
             core_seeded = True
             self._vprint(
-                f"[MW CORE] core point arrived all zeros; seeded to all-ones over "
-                f"T={T} so the selection has a direction."
+                f"[MW CORE] core point arrived all zeros; seeded over T={T} "
+                f"(Q={Q_seed}, trip_slots={trip_seed}) so the selection has a direction."
             )
 
         def solve_mw_dual(

@@ -76,6 +76,149 @@ def is_integral(
     return all(abs(float(v) - round(float(v))) <= eps for v in values)
 
 
+def departures_are_possible(T: int, trip_slots: int) -> tuple[list[bool], list[bool]]:
+    """Which slots can carry a departure at all, per direction.
+
+    Mirrors the fixings in `ProblemMaster.initialize`, which are the definition of
+    record:
+
+      * no trip may finish after the horizon, so `y_d[q,t] = 0` for `t >= T - trip_slots`;
+      * an OUT must leave room for the RET that brings the vehicle home, so
+        `yOUT[q,t] = 0` for `t >= T - 2*trip_slots`.
+
+    Returned rather than recomputed at the call site because the Magnanti-Wong core
+    point has to respect it: a core point with `Ybar_out[tau] > 0` at a fixed slot asks
+    MW which dual best values extra capacity in a slot that can never carry a departure,
+    and the answer steers the Pareto selection using a direction outside the region.
+    """
+    T = int(T)
+    trip = max(1, int(trip_slots))
+    out = [t < max(0, T - 2 * trip) for t in range(T)]
+    ret = [t < max(0, T - trip) for t in range(T)]
+    return out, ret
+
+
+def project_core_point(
+    Y_out: Sequence[float],
+    Y_ret: Sequence[float],
+    Q: int,
+    trip_slots: int,
+    eps: float,
+) -> tuple[list[float], list[float]]:
+    """Bring a candidate core point inside the projected master region.
+
+    Magnanti-Wong requires a point in the relative interior of
+    ``proj_Y(conv(Z))`` (formal formulation 16.2). Validity of the resulting cut does
+    not depend on this -- that comes from dual feasibility -- but the *Pareto-optimality*
+    claim does, and the claim is the entire reason MW is there rather than the plain
+    dual.
+
+    The previous core point was an exponential moving average clamped to the **box**
+    ``[eps, Q-eps]`` per slot, which is outside the region on two counts. This enforces
+    three necessary conditions on ``proj_Y``:
+
+    1. **Zero on slots the master fixes.** See `departures_are_possible`.
+    2. **The trip window.** A vehicle that starts a trip at ``u`` cannot start another
+       before ``u + trip_slots``, so over any window of ``trip_slots`` consecutive slots
+       the whole fleet starts at most ``Q`` trips::
+
+           sum_{tau' in [tau, tau+trip_slots-1]} (Y_out[tau'] + Y_ret[tau']) <= Q
+
+       Violated windows are scaled down proportionally, which keeps the profile's shape
+       and cannot introduce a new violation elsewhere (every entry only decreases).
+    3. **Strictly positive where a departure is possible**, floored at ``eps``, so the
+       point stays interior in the coordinates that have an interior. A slot that cannot
+       carry a departure is left at exactly 0: flooring it would reintroduce (1).
+
+    These are *necessary* conditions, not a description of ``proj_Y`` -- battery and
+    per-vehicle occupancy are not represented. So the result is a point in a relaxation
+    of the region, which is strictly better than a box point and still not a proof of
+    relative interiority. Describe it as such (16.5 option 4) rather than asserting the
+    MW hypothesis outright.
+
+    The window inequality is the same fact `problem/vehicle_dd.window_trip_caps` proves
+    in stronger form for the master, where it is off by default because it bought ~1% of
+    LP root for 1-2.2x the master time (D49/D50). That cost was master solve time. There
+    is no master solve here, so the cheap version is used unconditionally.
+    """
+    T = len(list(Y_out))
+    if len(list(Y_ret)) != T:
+        raise ValueError(
+            f"core point halves disagree in length: OUT={T}, RET={len(list(Y_ret))}"
+        )
+    Qf = float(Q)
+    eps = float(eps)
+    trip = max(1, int(trip_slots))
+    ok_out, ok_ret = departures_are_possible(T, trip)
+
+    out = [0.0 if not ok_out[t] else max(0.0, float(Y_out[t])) for t in range(T)]
+    ret = [0.0 if not ok_ret[t] else max(0.0, float(Y_ret[t])) for t in range(T)]
+
+    # Per-slot cap first: one slot alone cannot exceed the fleet.
+    out = [min(v, Qf) for v in out]
+    ret = [min(v, Qf) for v in ret]
+
+    # Then the window cap. Scaling only ever decreases entries, so a single left-to-right
+    # sweep cannot leave an earlier window violated -- but a later scale can tighten an
+    # overlapping earlier window further, which is harmless (still feasible) and is why
+    # this does not need to iterate to a fixed point.
+    for t0 in range(T):
+        t1 = min(T, t0 + trip)
+        total = sum(out[t] + ret[t] for t in range(t0, t1))
+        if total > Qf and total > 0.0:
+            scale = Qf / total
+            for t in range(t0, t1):
+                out[t] *= scale
+                ret[t] *= scale
+
+    # Interior floor, only where a departure is possible. Capped by the window budget so
+    # the floor cannot itself violate the cap: with `trip` slots in a window and both
+    # directions, the largest safe uniform floor is Q / (2*trip).
+    floor = min(eps, Qf / float(2 * trip)) if trip > 0 else eps
+    for t in range(T):
+        if ok_out[t]:
+            out[t] = max(out[t], floor)
+        if ok_ret[t]:
+            ret[t] = max(ret[t], floor)
+
+    return out, ret
+
+
+def core_point_violations(
+    Y_out: Sequence[float],
+    Y_ret: Sequence[float],
+    Q: int,
+    trip_slots: int,
+    tol: float = 1e-9,
+) -> list[str]:
+    """Necessary conditions of `project_core_point` that ``(Y_out, Y_ret)`` breaks.
+
+    Returned as strings rather than a bool so a diagnostic can name the offending slot.
+    Empty means the point satisfies every condition the projection enforces -- which is
+    not the same as being in the relative interior of ``proj_Y``, for the reasons in
+    `project_core_point`.
+    """
+    T = len(list(Y_out))
+    trip = max(1, int(trip_slots))
+    ok_out, ok_ret = departures_are_possible(T, trip)
+    bad: list[str] = []
+    for t in range(T):
+        if not ok_out[t] and float(Y_out[t]) > tol:
+            bad.append(f"Yout[{t}]={float(Y_out[t]):.6g} on a slot the master fixes to 0")
+        if not ok_ret[t] and float(Y_ret[t]) > tol:
+            bad.append(f"Yret[{t}]={float(Y_ret[t]):.6g} on a slot the master fixes to 0")
+        if float(Y_out[t]) < -tol or float(Y_ret[t]) < -tol:
+            bad.append(f"negative entry at tau={t}")
+    for t0 in range(T):
+        t1 = min(T, t0 + trip)
+        total = sum(float(Y_out[t]) + float(Y_ret[t]) for t in range(t0, t1))
+        if total > float(Q) + tol:
+            bad.append(
+                f"window [{t0},{t1 - 1}] starts {total:.6g} trips, above Q={Q}"
+            )
+    return bad
+
+
 def signature_key(
     Y_out: Sequence[float], Y_ret: Sequence[float], decimals: int = 6
 ) -> tuple:

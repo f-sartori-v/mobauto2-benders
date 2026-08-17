@@ -3055,3 +3055,120 @@ minute recourse; it is Q=1, single-scenario, slot recourse by design, because th
 size where the monolith proves optimality in under a second.
 
 196 tests pass under p310 in 50 s.
+
+---
+
+## D63 — The MW core point was outside the master's region, and the (omega,d) recourse proxy now exists
+
+Date: 2026-08-17. S3, S4 and the code half of S5 from the correction plan. No experiment
+here: these are code changes with tests. The measurements they enable -- D11's theta A/B and
+the anchor's re-measurement at the 150-cut basis -- are separate and not run yet.
+
+### 1. S3 -- the core point was a box, and the box is not the region
+
+Magnanti-Wong requires a point in the relative interior of `proj_Y(conv(Z))` (formal
+formulation 16.2). Cut VALIDITY does not depend on it -- that comes from dual feasibility --
+but the Pareto-optimality claim does, and the claim is the only reason to run MW rather than
+the plain dual.
+
+The core point was an exponential moving average clamped to the box `[eps, Q-eps]` per slot,
+which is outside the region on two counts:
+
+1. **Positive `Ybar` on slots the master FIXES to zero.** The master fixes
+   `yOUT = yRET = 0` for `t >= T - trip_slots` and `yOUT = 0` for `t >= T - 2*trip_slots`.
+   MW was being asked which dual best values extra capacity in a slot that can never carry
+   a departure. At T=6/trip=1 that is 3 of 12 coordinates.
+2. **No trip window at all.** A point could assert the whole fleet departs in every slot.
+
+`signature.project_core_point` now enforces three necessary conditions -- zero on fixed
+slots, `sum over any trip_slots-window of (Yout+Yret) <= Q`, and strictly positive elsewhere
+-- and `core_point_violations` reports what a point breaks, by slot. The solver re-checks
+after projecting and raises: the projection is meant to be idempotent, so a violation there
+is a defect in the projection rather than a property of the instance.
+
+**These are necessary conditions, not a description of `proj_Y`** -- battery and per-vehicle
+occupancy are not represented. So the result is a point in a relaxation of the region:
+strictly better than a box point, and still not a proof of relative interiority. It must be
+described as a stabilisation point (16.5 option 4), not asserted to satisfy the MW
+hypothesis.
+
+The window inequality is the cheap form of what `vehicle_dd.window_trip_caps` proves for the
+master, where it is OFF by default because it bought ~1% of LP root for 1-2.2x the master
+time (D49/D50). That cost was master solve time; there is no master solve in a projection.
+
+**Also fixed: the same defect had a second home.** When no core point reaches the
+subproblem, it seeds `Ybar` to all-ones -- which puts mass on fixed slots and ignores the
+window, i.e. exactly what S3 removed from `solver.py`. That path now projects too, and says
+so when it cannot (no fleet size in the subproblem params). A fallback that reintroduces the
+defect the main path just fixed is the two-places-disagree pattern that produced C5/N6.
+
+**The decay is now visible rather than inferable.** The log counts entries sitting on the
+interior floor **over the free coordinates only**. Counting all of them reports structure as
+decay: at T=6/trip=1 that is 3 of 12 before anything has decayed at all.
+
+### 2. S4 -- `theta[omega,d]` exists, and the default did not move
+
+Four shapes now, selected by two booleans:
+
+| `theta_per_scenario` | `theta_by_direction` | shape | proxies |
+|---|---|---|---:|
+| false | false | single | 1 |
+| false | true *(default)* | by_direction | 2 |
+| true | false *(default)* | by_scenario | \|Omega\| |
+| true | true | **by_scenario_direction** | 2\|Omega\| |
+
+The last is the formulation's recommended baseline (12), "the strongest clean baseline".
+Until now it was **inexpressible**: the master computed
+`disagg_dir = False if theta_per_scenario`, so the two disaggregations were mutually
+exclusive by construction and one cell of D11's A/B did not exist.
+
+**`master.theta_by_direction` is new, and it had to be.** The direction split was read
+through `self._p("disaggregate_theta_by_direction", ...)` from a key **no config could
+set**, hardcoded true -- the inert-configuration pattern (AUDIT_v4 3.8) with the sign
+flipped: not a knob that did nothing, but a behaviour with no knob. Exposing it without care
+would have silently switched every existing `theta_per_scenario: true` run from `|Omega|`
+proxies to `2|Omega|`. The default therefore resolves to the pre-S4 value in both branches,
+and a test asserts every shipped config keeps its shape on this commit.
+
+Two smaller things in the same area:
+
+- **The anchor now follows the shape**, with one row per `(scenario, direction, prefix)`
+  using **that scenario's own demand** rather than the weighted mean. Strictly tighter, by
+  Jensen: bounding a weighted sum by the mean's implied unserved cost is weaker than
+  bounding each term by its own. On the shipped multi-scenario instance the two scenarios
+  carry 150 and 103 OUT passengers against a mean of 126.5, so this is not a distinction
+  without a difference. `_recourse_bound_data` now carries the per-scenario vectors
+  alongside the mean; the coarser shapes still read the mean.
+- **`rho` is applied once.** The objective used the raw weights while the anchor divided by
+  their sum, so a config whose weights did not already sum to 1 gave the two different
+  notions of expectation, silently (handout 87, Failure 5). `_scenario_weights` is now the
+  single reader and **refuses** weights that do not sum to 1 rather than renormalising:
+  the cut values the master compares against are built from these same probabilities, so
+  quietly rescaling would make the comparison mean something the config did not say.
+
+A cut carrying no `scenario_index` under this shape now raises rather than picking an
+epigraph arbitrarily.
+
+### 3. S5 -- the code half was already done, and the plan was wrong about it
+
+The correction plan said the recourse anchor was off by default. It is not:
+`config.py` has `recourse_lower_bound: bool = True` and `app.py` sets it on every run. The
+`False` fallback inside `master_impl` applies only to a master constructed directly, without
+`app.py`, which is a test path.
+
+So S5 reduces to its measurement -- re-running the Phase 1 2x2 at the 150-cut budget rather
+than the 10-iteration one D40/D45 withdrew -- and that has NOT been done.
+
+### 4. What is NOT measured
+
+`configs/phase1/theta_sd_smoke.yaml` runs 4 iterations and exists only to prove the cut
+routing attaches each `(omega,d)` cut to its own epigraph. It is not a result config and its
+bounds are not comparable to anything: the run stops on the iteration cap, not the gap.
+
+Specifically, **no claim is made here that any shape is better.** The finer epigraph cannot
+bound worse than the coarser one on the same cut family -- it is the same epigraph with
+fewer variables summed before intersection -- but "cannot bound worse per cut family" is not
+"converges faster", and the two shapes do not produce the same cut family. That is D11's
+A/B, at equal iterations, and it is still open.
+
+233 tests pass under p310 in 51 s; 37 are new (15 core point, 22 theta shape).
