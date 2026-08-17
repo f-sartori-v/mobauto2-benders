@@ -155,6 +155,12 @@ class MasterSection:
     cut_coeff_threshold: float = 0.0
     theta_per_scenario: bool = False
     write_lp_after_cut: bool = False
+    # Window trip caps from the single-vehicle decision diagram (D48, stage 1):
+    #   sum_{tau in [t1,t2]} (Yout+Yret)[tau] <= Q * max_trips(t1,t2)
+    # A valid inequality in Y alone. OFF by default: spec 2.9 (M1) records a sound,
+    # implied inequality that made the master 2.7x slower and its bound worse, so
+    # this is an opt-in whose effect is measured rather than a default.
+    window_trip_caps: bool = False
     # Canonical ordering: charge before idling at the depot (M2). On by default.
     charge_before_idle: bool = True
     # Valid inequality anchoring theta to installed capacity per prefix of the
@@ -187,7 +193,32 @@ class SubproblemSection:
     S: float = 0.0
     Wmax_minutes: int | None = None
     Wmax_slots: int | None = None
+    # `p` is ALWAYS in slot units by the time it reaches here -- it is the coefficient
+    # the LP uses, and the waiting term it trades against is `(tau - t)` in slots
+    # (D7/D8). `p_minutes` is the resolution-independent way to state the same policy
+    # and is converted once, at load: p = p_minutes / slot_resolution.
+    #
+    # Why the second form exists (D50). Stating `p` directly makes the physical
+    # trade-off move with the grid: p=50 at 30-minute slots means one unserved
+    # passenger is worth 50 slots of waiting = 1500 passenger-minutes, while the same
+    # p=50 at 15-minute slots means 750. The repository already contained both --
+    # baseline_d9 at 1500 and the Fase 1 point at 750 -- so no objective from one
+    # resolution was comparable with the other. `Wmax` never had this problem because
+    # `Wmax_minutes` was always the stated form; `p` was the odd one out.
     p: float = 0.0
+    # The input, kept for the manifest so a run can say which form it was given.
+    # None means `p` was stated directly in slot units.
+    p_minutes: float | None = None
+    # Multi-resolution recourse (D51). "slot" is the model this repository has always
+    # had. "minute" evaluates operations on a fixed minute grid while the first stage
+    # stays on slots -- the architecture the CP research note proposes. The capacity
+    # rows stay indexed by departure slot in both, so the cut the master receives is
+    # the same object and every downstream check is unchanged.
+    recourse_resolution: str = "slot"
+    # Where inside its slot a departure is assumed to leave, in minute mode. Measured
+    # to move the answer by ~4% of the objective on baseline_d9, so it is an explicit
+    # knob rather than a constant buried in the pricer.
+    departure_policy: str = "midpoint"
     degenerate_cut_probe_top_k: int = 6
     degenerate_cut_probe_top_k_out: int | None = None
     degenerate_cut_probe_top_k_ret: int | None = None
@@ -516,6 +547,7 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
             "cut_coeff_threshold": master_params.get("cut_coeff_threshold", 0.0),
             "theta_per_scenario": master_params.get("theta_per_scenario", False),
             "write_lp_after_cut": master_params.get("write_lp_after_cut", False),
+            "window_trip_caps": master_params.get("window_trip_caps", False),
             # Both change the bound a run reports, so a table quoting one has to be
             # able to say which side of the A/B it came from (D18's obligation).
             "recourse_lower_bound": master_params.get("recourse_lower_bound", True),
@@ -534,6 +566,8 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
             "Wmax_minutes": sub_params.get("Wmax_minutes"),
             "Wmax_slots": sub_params.get("Wmax_slots"),
             "p": sub_params.get("p"),
+            "recourse_resolution": sub_params.get("recourse_resolution", "slot"),
+            "departure_policy": sub_params.get("departure_policy", "midpoint"),
             "degenerate_cut_probe_top_k": sub_params.get(
                 "degenerate_cut_probe_top_k", 6
             ),
@@ -858,6 +892,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "cut_coeff_threshold",
             "theta_per_scenario",
             "write_lp_after_cut",
+            "window_trip_caps",
             "charge_before_idle",
             "recourse_lower_bound",
             "lp_phase",
@@ -992,6 +1027,9 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         write_lp_after_cut=_ensure_bool(
             master_raw.get("write_lp_after_cut", False), "master.write_lp_after_cut"
         ),
+        window_trip_caps=_ensure_bool(
+            master_raw.get("window_trip_caps", False), "master.window_trip_caps"
+        ),
         charge_before_idle=_ensure_bool(
             master_raw.get("charge_before_idle", True), "master.charge_before_idle"
         ),
@@ -1041,6 +1079,9 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "Wmax_minutes",
             "Wmax_slots",
             "p",
+            "p_minutes",
+            "recourse_resolution",
+            "departure_policy",
             "degenerate_cut_probe_top_k",
             "degenerate_cut_probe_top_k_out",
             "degenerate_cut_probe_top_k_ret",
@@ -1048,9 +1089,67 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         },
         "subproblem",
     )
-    _require_keys(sub_raw, {"S", "p"}, "subproblem")
+    _require_keys(sub_raw, {"S"}, "subproblem")
     if "Wmax_minutes" not in sub_raw and "Wmax_slots" not in sub_raw:
         raise ValueError("subproblem must include Wmax_minutes or Wmax_slots")
+
+    # Resolve the unmet-demand penalty to slot units, once, here (D50).
+    #
+    # Exactly one of the two forms, and both being present is an error rather than a
+    # precedence rule. A precedence rule would let a config state two different
+    # policies and silently honour one -- and the whole reason this key exists is that
+    # `p` already meant two different things in two places without anything saying so.
+    _has_p = "p" in sub_raw
+    _has_p_minutes = "p_minutes" in sub_raw
+    if _has_p and _has_p_minutes:
+        raise ValueError(
+            "subproblem sets both p and p_minutes; they state the same policy in "
+            "different units and only one may be given. p is in slot units and moves "
+            "with model.time.slot_resolution; p_minutes does not. Prefer p_minutes."
+        )
+    if not _has_p and not _has_p_minutes:
+        raise ValueError("subproblem must include p or p_minutes")
+    _recourse_resolution = str(
+        sub_raw.get("recourse_resolution", "slot")
+    ).strip().lower()
+    if _recourse_resolution not in {"slot", "minute"}:
+        raise ValueError(
+            f"subproblem.recourse_resolution must be 'slot' or 'minute', got "
+            f"{_recourse_resolution!r}"
+        )
+    _departure_policy = str(
+        sub_raw.get("departure_policy", "midpoint")
+    ).strip().lower()
+    if _departure_policy not in {"start", "midpoint", "end"}:
+        raise ValueError(
+            f"subproblem.departure_policy must be 'start', 'midpoint' or 'end', got "
+            f"{_departure_policy!r}"
+        )
+    if _recourse_resolution == "minute" and "Wmax_minutes" not in sub_raw:
+        raise ValueError(
+            "subproblem.recourse_resolution='minute' requires Wmax_minutes. Wmax_slots "
+            "cannot substitute: a slot window is not an exact number of minutes, which "
+            "is the entire point of evaluating at minute resolution (D51)."
+        )
+    if _has_p_minutes:
+        _p_minutes_val = _ensure_float(
+            _disallow_expr(sub_raw.get("p_minutes"), "subproblem.p_minutes"),
+            "subproblem.p_minutes",
+        )
+        _slot_res = int(time_section.slot_resolution)
+        if _slot_res <= 0:
+            raise ValueError(
+                f"model.time.slot_resolution must be positive to convert p_minutes, "
+                f"got {_slot_res!r}"
+            )
+        # No rounding. p is a cost coefficient, not an index bound like Wmax, so
+        # ceil()-ing it here would silently change the policy it encodes.
+        _p_slots_val = float(_p_minutes_val) / float(_slot_res)
+    else:
+        _p_minutes_val = None
+        _p_slots_val = _ensure_float(
+            _disallow_expr(sub_raw.get("p"), "subproblem.p"), "subproblem.p"
+        )
     sub_section = SubproblemSection(
         multi_cuts_by_scenario=_ensure_bool(
             sub_raw.get("multi_cuts_by_scenario", True),
@@ -1091,9 +1190,10 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             if sub_raw.get("Wmax_slots") is not None
             else None
         ),
-        p=_ensure_float(
-            _disallow_expr(sub_raw.get("p"), "subproblem.p"), "subproblem.p"
-        ),
+        p=_p_slots_val,
+        p_minutes=_p_minutes_val,
+        recourse_resolution=_recourse_resolution,
+        departure_policy=_departure_policy,
         degenerate_cut_probe_top_k=_ensure_int(
             _disallow_expr(
                 sub_raw.get("degenerate_cut_probe_top_k", 6),

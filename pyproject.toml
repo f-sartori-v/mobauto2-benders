@@ -16,6 +16,12 @@ dependencies = [
 
 [project.scripts]
 mobauto2-benders = "mobauto2_benders.cli:main"
+# The monolithic MILP. It is not an alternative solver for production use -- it is the
+# reference instrument every bound in this repository is checked against (spec
+# non-negotiable 8). It ships here, and installs here, precisely so it cannot go
+# missing again: it was absent from the repository for months while 4183.24 was quoted
+# as "from an independent MILP", with no code to regenerate or inspect (D50).
+mobauto2-milp = "mobauto2_milp.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

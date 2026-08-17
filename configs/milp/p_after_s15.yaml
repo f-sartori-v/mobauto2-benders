@@ -1,0 +1,78 @@
+# STEP 1b: what the penalty fix changes to the ANSWER, on a small instance.
+#
+# The baseline_d9 instance at 15-minute slots instead of 30. Same demand, same fleet,
+# same everything else -- only the grid is finer, which is exactly the situation where
+# stating `p` in slot units silently changes the policy: p=50 means 1500
+# passenger-minutes at slot 30 and 750 at slot 15 (D50).
+#
+# `p_before` keeps the historical bare p=50 (750 passenger-minutes). `p_after` states
+# p_minutes=1500 and resolves to p=100, restoring the policy baseline_d9 uses.
+#
+# Solved by the MONOLITH, so each side is an exact optimum -- the comparison is between
+# two answers, not two approximations. Kept small deliberately: the Q=3 / 4-scenario
+# version of this pair did not prove optimality in 300 s, and an unproven pair compares
+# two truncations rather than two optima.
+#
+# WHAT TO READ. The objectives are NOT comparable -- doubling the unmet penalty raises
+# the objective mechanically. The question is whether the SCHEDULE changes: does the
+# model buy more trips once abandoning a passenger costs what baseline_d9 says it costs?
+
+schema:
+  name: mobauto2_milp_config
+  version: 3
+
+run:
+  name: p_after_s15
+  log_level: INFO
+  seed: 42
+
+data:
+  # Single scenario, matching baseline_d9.yaml's demand_file.
+  scenario_files: [setups/base.yaml]
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 15
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0]
+    initial_actions: [IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+milp:
+  # Symmetry breaking is valid here for the same reason it is in the Benders master
+  # (2.8): a homogeneous fleet ordered by TOTAL departures. The fleet is homogeneous
+  # -- one-element lists above pad by repeating the last entry (4.2).
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  # Tight gap: this run exists to produce a reference number, so it must terminate on
+  # the gap and not on the clock. A clock-truncated MIP is machine-dependent (D26),
+  # and a reference produced that way would be a different number on every machine.
+  solve_time_limit_s: 240
+  mipgap: 1.0e-6
+  solver_backend: cplex
+  cplex_options:
+    CPXPARAM_MIP_Strategy_Symmetry: 5
+    # Single-threaded for reproducibility, matching baseline_d9.yaml.
+    CPXPARAM_Threads: 1
+
+service:
+  S: 15
+  Wmax_minutes: 60
+  p_minutes: 1500.0
+  # Unused on the default aggregate path (aggregate_service_by_start), which is the
+  # one that matches the post-D30 subproblem. Left at 0 so it cannot silently
+  # perturb the objective if that path is ever switched off.
+  fill_first_epsilon: 0.0
+
+solver:
+  solver_tee: false

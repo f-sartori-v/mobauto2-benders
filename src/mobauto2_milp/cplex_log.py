@@ -15,9 +15,9 @@ def _as_float(val: str | None) -> Optional[float]:
 
 
 def parse_cplex_log_text(text: str) -> dict[str, Optional[float] | str]:
-    """Parse CPLEX log text for best integer, best bound, and relative gap.
+    """Parse CPLEX log text for incumbent/bound/gap and first-incumbent time.
 
-    Returns a dict with keys: best_integer, best_bound, gap, source.
+    Returns a dict with keys: best_integer, best_bound, gap, source, first_incumbent_time_s.
     - gap is returned as a ratio (e.g., 0.0445 for 4.45%), when available.
     - source indicates which section was used: "summary" or "node_table".
     """
@@ -25,6 +25,7 @@ def parse_cplex_log_text(text: str) -> dict[str, Optional[float] | str]:
     best_bound = None
     gap = None
     source = None
+    first_incumbent_time_s = None
 
     # 1) Summary lines near the end: "Best Integer = ..." etc.
     best_int_match = None
@@ -117,32 +118,40 @@ def parse_cplex_log_text(text: str) -> dict[str, Optional[float] | str]:
             best_integer = val
             source = "optimal_line_tolerance"
 
+    # 3) Best-effort parse for time to first incumbent from log phrases.
+    # Examples vary by CPLEX mode/version, so keep this conservative.
+    first_patterns = [
+        r"Solution time\s*=\s*([-\d\.eE\+]+)\s*sec",
+        r"time\s*=\s*([-\d\.eE\+]+)\s*sec\.\s*Deterministic time",
+        r"Found incumbent of value [^\n]* after\s*([-\d\.eE\+]+)\s*sec",
+    ]
+    for pat in first_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            first_incumbent_time_s = _as_float(m.group(1))
+            if first_incumbent_time_s is not None:
+                break
+
     return {
         "best_integer": best_integer,
         "best_bound": best_bound,
         "gap": gap,
         "source": source,
+        "first_incumbent_time_s": first_incumbent_time_s,
     }
 
 
-def parse_cplex_log_bounds(
-    log_path: str | Path | None,
-) -> dict[str, Optional[float] | str]:
-    """Parse a CPLEX log file to extract best integer, best bound, and gap."""
+def parse_cplex_log_bounds(log_path: str | Path | None) -> dict[str, Optional[float] | str]:
+    """Parse a CPLEX log file to extract best integer, best bound, gap, and first-incumbent time."""
     if not log_path:
-        return {"best_integer": None, "best_bound": None, "gap": None, "source": None}
+        return {"best_integer": None, "best_bound": None, "gap": None, "source": None, "first_incumbent_time_s": None}
     try:
         p = Path(log_path)
         if not p.exists():
-            return {
-                "best_integer": None,
-                "best_bound": None,
-                "gap": None,
-                "source": None,
-            }
+            return {"best_integer": None, "best_bound": None, "gap": None, "source": None, "first_incumbent_time_s": None}
         text = p.read_text(encoding="utf-8", errors="ignore")
     except Exception:
-        return {"best_integer": None, "best_bound": None, "gap": None, "source": None}
+        return {"best_integer": None, "best_bound": None, "gap": None, "source": None, "first_incumbent_time_s": None}
     return parse_cplex_log_text(text)
 
 

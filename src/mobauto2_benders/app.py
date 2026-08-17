@@ -147,8 +147,10 @@ def _recourse_bound_data(cfg, slot_resolution: int) -> dict | None:
     if Wmax_slots is None:
         if cfg.subproblem.Wmax_minutes is None:
             return None
-        Wmax_slots = math.ceil(
-            float(cfg.subproblem.Wmax_minutes) / max(1, int(slot_resolution))
+        from .problem.subproblem_impl import wmax_minutes_to_slots
+
+        Wmax_slots = wmax_minutes_to_slots(
+            float(cfg.subproblem.Wmax_minutes), int(slot_resolution)
         )
     return {
         "R_out": [float(x) for x in R_out],
@@ -222,6 +224,7 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     mp["cut_coeff_threshold"] = float(cfg.master.cut_coeff_threshold)
     mp["theta_per_scenario"] = bool(cfg.master.theta_per_scenario)
     mp["write_lp_after_cut"] = bool(cfg.master.write_lp_after_cut)
+    mp["window_trip_caps"] = bool(cfg.master.window_trip_caps)
     mp["charge_before_idle"] = bool(cfg.master.charge_before_idle)
     # Carried on the master params so the manifest can record which side of the
     # A/B produced a number. The master itself reads only `lp_relaxation`, which
@@ -267,6 +270,8 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     _set_if_not_none(sp, "Wmax_minutes", cfg.subproblem.Wmax_minutes)
     _set_if_not_none(sp, "Wmax_slots", cfg.subproblem.Wmax_slots)
     sp["p"] = cfg.subproblem.p
+    sp["recourse_resolution"] = cfg.subproblem.recourse_resolution
+    sp["departure_policy"] = cfg.subproblem.departure_policy
     sp["degenerate_cut_probe_top_k"] = int(cfg.subproblem.degenerate_cut_probe_top_k)
     _set_if_not_none(
         sp,
