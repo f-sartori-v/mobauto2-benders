@@ -57,6 +57,11 @@ def _consistent_dual() -> tuple[MWDual, dict]:
     mw = MWDual(
         dm_out={t: SEATS * pi_out[t] for t in range(T)},
         dm_ret={t: SEATS * pi_ret[t] for t in range(T)},
+        # The scalar the cut needs. Formed here from a slot-indexed alpha, but the
+        # interface is the scalar precisely so the minute recourse -- whose demand rows
+        # are keyed by arrival minute -- can supply the same thing.
+        intercept_out=sum(alpha_out[t] * R_out[t] for t in range(T)),
+        intercept_ret=sum(alpha_ret[t] * R_ret[t] for t in range(T)),
         alpha_out=alpha_out,
         alpha_ret=alpha_ret,
     )
@@ -68,8 +73,6 @@ def _consistent_dual() -> tuple[MWDual, dict]:
         SEATS * y_inc_ret[t] * pi_ret[t] for t in range(T)
     )
     data = dict(
-        R_out=R_out,
-        R_ret=R_ret,
         y_inc_out=y_inc_out,
         y_inc_ret=y_inc_ret,
         ub_out=ub_out,
@@ -84,12 +87,8 @@ class InterceptComesFromAlpha(unittest.TestCase):
     def test_it_equals_sum_alpha_times_demand(self):
         mw, data = _consistent_dual()
         a_out, a_ret, diag = derive_cut_intercepts(mw, **data)
-        self.assertAlmostEqual(
-            a_out, sum(mw.alpha_out[t] * data["R_out"][t] for t in range(T)), places=9
-        )
-        self.assertAlmostEqual(
-            a_ret, sum(mw.alpha_ret[t] * data["R_ret"][t] for t in range(T)), places=9
-        )
+        self.assertAlmostEqual(a_out, mw.intercept_out, places=9)
+        self.assertAlmostEqual(a_ret, mw.intercept_ret, places=9)
         # The diagnostics must carry both forms so a run can be audited after the
         # fact, not only at the moment the check passes.
         self.assertAlmostEqual(diag["intercept_out_from_alpha"], a_out, places=9)
@@ -123,9 +122,12 @@ class InterceptComesFromAlpha(unittest.TestCase):
         stale scenario's values -- and the cut would still pass the tightness check.
         """
         mw, data = _consistent_dual()
+        # R_out[0] = 10, so a unit shift in alpha[0] moves the intercept by 10.
         broken = MWDual(
             dm_out=mw.dm_out,
             dm_ret=mw.dm_ret,
+            intercept_out=mw.intercept_out + 10.0,
+            intercept_ret=mw.intercept_ret,
             alpha_out={**mw.alpha_out, 0: mw.alpha_out[0] + 1.0},
             alpha_ret=mw.alpha_ret,
         )
@@ -145,6 +147,8 @@ class InterceptComesFromAlpha(unittest.TestCase):
         nudged = MWDual(
             dm_out=mw.dm_out,
             dm_ret=mw.dm_ret,
+            intercept_out=mw.intercept_out + 1e-7,
+            intercept_ret=mw.intercept_ret,
             alpha_out={**mw.alpha_out, 0: mw.alpha_out[0] + 1e-8},
             alpha_ret=mw.alpha_ret,
         )
@@ -161,8 +165,12 @@ class PlainDualFallbackIsValid(unittest.TestCase):
             "pi_RET": {0: 0.0, 1: -3.0, 2: 0.0, 3: 0.0},
             "alpha_OUT": {0: 4.0, 1: 4.0, 2: 1.0, 3: 0.0},
             "alpha_RET": {0: 0.0, 1: 6.0, 2: 0.0, 3: 2.0},
+            "intercept_out": 41.0,
+            "intercept_ret": 8.0,
         }
         mw = slopes_from_capacity_duals(duals, SEATS, T)
+        self.assertEqual(mw.intercept_out, 41.0)
+        self.assertEqual(mw.intercept_ret, 8.0)
         self.assertEqual(mw.dm_out[0], SEATS * -1.0)
         self.assertEqual(mw.dm_out[2], SEATS * -2.0)
         self.assertEqual(mw.dm_ret[1], SEATS * -3.0)
@@ -176,6 +184,8 @@ class PlainDualFallbackIsValid(unittest.TestCase):
             "pi_RET": {t: 0.0 for t in range(T)},
             "alpha_OUT": {t: 1.0 for t in range(T)},
             "alpha_RET": {t: 1.0 for t in range(T)},
+            "intercept_out": 0.0,
+            "intercept_ret": 0.0,
         }
         mw = slopes_from_capacity_duals(duals, SEATS, T)
         for t in range(T):
@@ -184,7 +194,11 @@ class PlainDualFallbackIsValid(unittest.TestCase):
 
     def test_a_missing_dual_reads_as_zero_not_as_an_error(self):
         """A tau with no capacity row has slope exactly 0 -- arithmetic, not a guess."""
-        mw = slopes_from_capacity_duals({"pi_OUT": {1: -2.0}}, SEATS, T)
+        mw = slopes_from_capacity_duals(
+            {"pi_OUT": {1: -2.0}, "intercept_out": 0.0, "intercept_ret": 0.0},
+            SEATS,
+            T,
+        )
         self.assertEqual(mw.dm_out[0], 0.0)
         self.assertEqual(mw.dm_out[1], SEATS * -2.0)
         self.assertEqual(mw.dm_ret[3], 0.0)

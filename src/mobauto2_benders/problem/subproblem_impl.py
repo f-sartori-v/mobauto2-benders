@@ -13,7 +13,7 @@ except Exception:  # pragma: no cover - optional dependency
     _yaml = None
 
 import pyomo.environ as pyo
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..benders.subproblem import Subproblem
 from ..benders.types import Candidate, Cut, CutType, SubproblemResult
@@ -68,19 +68,31 @@ class MWDual:
     """One dual solution of the passenger-assignment LP, as a cut needs it.
 
     `dm_d[tau]` are the cut slopes, already scaled by seats (`S * pi_d[tau] <= 0`).
-    `alpha_d[t]` are the demand-row duals, from which the intercept is derived.
 
-    Carried as one object rather than four loose dicts because the slopes and the
-    alpha they must agree with are only meaningful together: the strong-duality
-    check in `derive_cut_intercepts` compares one against the other, and a caller
-    holding slopes from one solve and alpha from another would pass that check
-    while producing a cut that is tight at nothing.
+    `intercept_d` is the demand side of the dual objective, `sum_i alpha_d[i] * R_d[i]`,
+    as a SCALAR. It is a scalar rather than a vector because the index of the demand
+    rows is not the index of the capacity rows and need not be: the slot recourse has
+    one demand row per slot, the minute recourse one per arrival MINUTE (D51), and the
+    cut only ever needs the sum. Making the scalar the interface is what lets both
+    resolutions share this code -- and its absence is what broke the minute path when
+    S2 started deriving the intercept from a slot-indexed `alpha` the minute LP does
+    not have.
+
+    `alpha_d` is kept for diagnostics only, keyed by whatever the demand rows are keyed
+    by. Never sum it against a slot-indexed demand vector.
+
+    Carried as one object rather than loose dicts because the slopes and the intercept
+    they must agree with are only meaningful together: `derive_cut_intercepts` checks
+    one against the other, and a caller holding slopes from one solve and an intercept
+    from another would pass that check while producing a cut tight at nothing.
     """
 
     dm_out: Dict[int, float]
     dm_ret: Dict[int, float]
-    alpha_out: Dict[int, float]
-    alpha_ret: Dict[int, float]
+    intercept_out: float
+    intercept_ret: float
+    alpha_out: Dict[int, float] = field(default_factory=dict)
+    alpha_ret: Dict[int, float] = field(default_factory=dict)
 
 
 def slopes_from_capacity_duals(
@@ -96,13 +108,25 @@ def slopes_from_capacity_duals(
     """
     pi_out = dict(duals.get("pi_OUT", {}) or {})
     pi_ret = dict(duals.get("pi_RET", {}) or {})
-    a_out = dict(duals.get("alpha_OUT", {}) or {})
-    a_ret = dict(duals.get("alpha_RET", {}) or {})
+    # The demand side of the dual objective, as a scalar. Both recourse resolutions
+    # publish it under these keys; neither is asked to express its demand duals on the
+    # slot index, because the minute recourse's are keyed by arrival minute (D51) and
+    # summing those against a slot-indexed demand vector is meaningless.
+    if "intercept_out" not in duals or "intercept_ret" not in duals:
+        raise KeyError(
+            "the subproblem returned duals without 'intercept_out'/'intercept_ret'. "
+            "That scalar is the demand side of the dual objective, sum_i alpha[i]*R[i], "
+            "and the cut constant is derived from it (S2). A recourse that cannot "
+            "produce it cannot produce a cut whose tightness is checkable, so it must "
+            "say so rather than let the constant be imposed silently."
+        )
     return MWDual(
         dm_out={t: float(S) * float(pi_out.get(t, 0.0)) for t in range(T)},
         dm_ret={t: float(S) * float(pi_ret.get(t, 0.0)) for t in range(T)},
-        alpha_out={t: float(a_out.get(t, 0.0)) for t in range(T)},
-        alpha_ret={t: float(a_ret.get(t, 0.0)) for t in range(T)},
+        intercept_out=float(duals["intercept_out"]),
+        intercept_ret=float(duals["intercept_ret"]),
+        alpha_out=dict(duals.get("alpha_OUT", {}) or {}),
+        alpha_ret=dict(duals.get("alpha_RET", {}) or {}),
     )
 
 
@@ -145,8 +169,6 @@ def expand_slopes_to_candidate(
 
 def derive_cut_intercepts(
     mw: MWDual,
-    R_out: Iterable[float],
-    R_ret: Iterable[float],
     y_inc_out: Iterable[float],
     y_inc_ret: Iterable[float],
     ub_out: float,
@@ -170,13 +192,11 @@ def derive_cut_intercepts(
     fail, and an overestimating cut -- the only kind that can exclude the optimum,
     and the D30 defect -- had nothing watching for it.
     """
-    R_out = list(R_out)
-    R_ret = list(R_ret)
     y_inc_out = list(y_inc_out)
     y_inc_ret = list(y_inc_ret)
 
-    a_out = sum(float(mw.alpha_out.get(t, 0.0)) * float(R_out[t]) for t in range(T))
-    a_ret = sum(float(mw.alpha_ret.get(t, 0.0)) * float(R_ret[t]) for t in range(T))
+    a_out = float(mw.intercept_out)
+    a_ret = float(mw.intercept_ret)
 
     imposed_out = float(ub_out) - sum(
         float(mw.dm_out.get(tau, 0.0)) * float(y_inc_out[tau]) for tau in range(T)
@@ -246,8 +266,6 @@ def _tightness_tolerance(
 def _cut_intercepts(
     mw: MWDual | None,
     *,
-    R_out: Iterable[float],
-    R_ret: Iterable[float],
     y_inc_out: Iterable[float],
     y_inc_ret: Iterable[float],
     ub_out: float,
@@ -283,8 +301,6 @@ def _cut_intercepts(
     eps_dual = max(1e-5, 1e-7 * abs(float(ub_val)))
     a_out, a_ret, diag = derive_cut_intercepts(
         mw,
-        R_out=R_out,
-        R_ret=R_ret,
         y_inc_out=y_inc_out,
         y_inc_ret=y_inc_ret,
         ub_out=ub_out,
@@ -873,6 +889,14 @@ class ProblemSubproblem(Subproblem):
             return MWDual(
                 dm_out=dm_out,
                 dm_ret=dm_ret,
+                # This LP's demand rows ARE slot-indexed, so the scalar is formed here
+                # from its own alpha and the demand it was built with.
+                intercept_out=sum(
+                    float(R_out_vec[t]) * alpha_out[t] for t in range(T_)
+                ),
+                intercept_ret=sum(
+                    float(R_ret_vec[t]) * alpha_ret[t] for t in range(T_)
+                ),
                 alpha_out=alpha_out,
                 alpha_ret=alpha_ret,
             )
@@ -1546,8 +1570,6 @@ class ProblemSubproblem(Subproblem):
                 ub_ret = float(duals["ub_ret"])
                 const_out, const_ret, dual_diag = _cut_intercepts(
                     mw_sol,
-                    R_out=R_out,
-                    R_ret=R_ret,
                     y_inc_out=sum_y_out,
                     y_inc_ret=sum_y_ret,
                     ub_out=ub_out,
@@ -2105,8 +2127,6 @@ class ProblemSubproblem(Subproblem):
             ub_ret = float(duals["ub_ret"])
             const_out, const_ret, dual_diag = _cut_intercepts(
                 mw_sol,
-                R_out=R_out,
-                R_ret=R_ret,
                 y_inc_out=sum_y_out,
                 y_inc_ret=sum_y_ret,
                 ub_out=ub_out,
@@ -2951,6 +2971,15 @@ def solve_subproblem(
         {
             "alpha_OUT": alpha_OUT,
             "alpha_RET": alpha_RET,
+            # Demand side of the dual objective, as the scalar the cut constant needs.
+            # Slot-indexed here; the minute recourse forms the same scalar over arrival
+            # minutes. See MWDual for why the interface is a scalar and not a vector.
+            "intercept_out": float(
+                sum(alpha_OUT[t] * float(R_out[t]) for t in Tset)
+            ),
+            "intercept_ret": float(
+                sum(alpha_RET[t] * float(R_ret[t]) for t in Tset)
+            ),
             "pi_OUT": pi_OUT,
             "pi_RET": pi_RET,
             # diagnostics

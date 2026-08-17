@@ -721,6 +721,29 @@ def solve_minute_recourse(
         for t in taus
     }
 
+    # Demand-row duals, keyed by ARRIVAL MINUTE -- which is what this LP's demand rows
+    # are indexed by, and the reason the cut interface takes a scalar rather than a
+    # vector (see MWDual). The scalar is `sum_m alpha[m] * pool[m]`, the demand side of
+    # the dual objective, and it is what the cut constant is derived from (S2).
+    #
+    # This used to return `alpha_OUT: {}` with a comment saying a minute-indexed alpha
+    # "has no slot-indexed meaning to report". True of the vector, false of the SUM --
+    # and once S2 started deriving the constant from alpha, the empty dict made this
+    # path produce an intercept of 0 against a recourse of 280, which the strong-duality
+    # check then refused. The check was right; the omission was the defect.
+    alpha_OUT = {
+        int(m): float(mdl.dual.get(mdl.D_out[m], 0.0)) for m in sorted(pools[OUT])
+    }
+    alpha_RET = {
+        int(m): float(mdl.dual.get(mdl.D_ret[m], 0.0)) for m in sorted(pools[RET])
+    }
+    intercept_out = float(
+        sum(alpha_OUT[int(m)] * float(pools[OUT][m]) for m in sorted(pools[OUT]))
+    )
+    intercept_ret = float(
+        sum(alpha_RET[int(m)] * float(pools[RET][m]) for m in sorted(pools[RET]))
+    )
+
     served_out = [0.0] * int(T)
     served_ret = [0.0] * int(T)
     wait_out = wait_ret = 0.0
@@ -738,12 +761,12 @@ def solve_minute_recourse(
 
     obj_val = float(pyo.value(mdl.obj))
     duals: dict[str, Any] = {
-        # alpha is not produced. It is unused on the dual-slope cut path -- the cut
-        # constant is `ub - sum(dm * y_inc)`, not `sum(alpha * R)` -- and a
-        # minute-indexed alpha has no slot-indexed meaning to report. Empty rather than
-        # a fabricated zero vector, which would read as "no demand pressure anywhere".
-        "alpha_OUT": {},
-        "alpha_RET": {},
+        # Keyed by ARRIVAL MINUTE, not by slot. Diagnostics only -- never sum these
+        # against a slot-indexed demand vector.
+        "alpha_OUT": alpha_OUT,
+        "alpha_RET": alpha_RET,
+        "intercept_out": intercept_out,
+        "intercept_ret": intercept_ret,
         "pi_OUT": pi_OUT,
         "pi_RET": pi_RET,
         "served_out_by_tau": served_out,
