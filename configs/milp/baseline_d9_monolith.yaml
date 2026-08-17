@@ -1,0 +1,82 @@
+# The monolithic MILP on the baseline_d9 instance.
+#
+# WHAT IT IS FOR. Non-negotiable 8 of BENDERS_SPEC_v4 requires that any reported
+# lower bound be checked against a feasible objective "sourced from an independent
+# MILP rather than from a Benders run of this same code, which is what made the
+# previous 4190.74 circular (D30)". That number is 4183.24, and until now the code
+# producing it was not in the repository -- so the check could not be regenerated
+# and its independence could not be inspected. This config regenerates it.
+#
+# WHAT "INDEPENDENT" DOES AND DOES NOT MEAN HERE. The monolith attaches the exact
+# recourse LP to the first-stage model and pins theta to it by EQUALITY
+# (MonoThetaLink), so there is no Benders cut, no theta approximation, and none of
+# the D30 defect class can reach it. That is genuine independence FROM THE
+# DECOMPOSITION. It is NOT independence from the formulation: mobauto2_milp/model.py
+# is a second copy of the first-stage model that mobauto2_benders/problem/
+# master_impl.py also implements. A defect present in both copies would be invisible
+# to this check. State it that way when citing 4183.24.
+#
+# THE INSTANCE must match configs/baseline_d9.yaml exactly or the number is not
+# comparable: T_minutes 660 / slot_resolution 30 -> T=22, trip 30 min ->
+# trip_slots 1, delta_chg = 70/(60/30) = 35, Q=2, single scenario setups/base.yaml,
+# S=15, Wmax 60 min, p=50, start_cost_epsilon 0.01, concurrency_penalty 0.25.
+
+schema:
+  name: mobauto2_milp_config
+  version: 3
+
+run:
+  name: baseline_d9_monolith
+  log_level: INFO
+  seed: 42
+
+data:
+  # Single scenario, matching baseline_d9.yaml's demand_file.
+  scenario_files: [setups/base.yaml]
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0]
+    initial_actions: [IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+milp:
+  # Symmetry breaking is valid here for the same reason it is in the Benders master
+  # (2.8): a homogeneous fleet ordered by TOTAL departures. The fleet is homogeneous
+  # -- one-element lists above pad by repeating the last entry (4.2).
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  # Tight gap: this run exists to produce a reference number, so it must terminate on
+  # the gap and not on the clock. A clock-truncated MIP is machine-dependent (D26),
+  # and a reference produced that way would be a different number on every machine.
+  solve_time_limit_s: 900
+  mipgap: 1.0e-6
+  solver_backend: cplex
+  cplex_options:
+    CPXPARAM_MIP_Strategy_Symmetry: 5
+    # Single-threaded for reproducibility, matching baseline_d9.yaml.
+    CPXPARAM_Threads: 1
+
+service:
+  S: 15
+  Wmax_minutes: 60
+  p: 50.0
+  # Unused on the default aggregate path (aggregate_service_by_start), which is the
+  # one that matches the post-D30 subproblem. Left at 0 so it cannot silently
+  # perturb the objective if that path is ever switched off.
+  fill_first_epsilon: 0.0
+
+solver:
+  solver_tee: false

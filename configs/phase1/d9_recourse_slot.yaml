@@ -1,0 +1,132 @@
+# Does a DECOMPOSED minute-level recourse converge? recourse_resolution = slot.
+#
+# D51 answered step 3 monolithically: a slot master with a minute recourse picks a
+# different and better schedule (114 682 vs 123 620 passenger-minutes, six more
+# passengers served). That was one MIP. This pair asks the separate question the
+# project actually needs answered -- whether the same thing works through the Benders
+# decomposition, where the recourse is only ever seen through cuts.
+#
+# WHY IT COSTS ALMOST NOTHING TO TRY. The minute recourse keeps its capacity rows
+# indexed by DEPARTURE SLOT, one per (direction, tau), so it returns exactly one dual
+# per slot -- the same object the slot subproblem returns. The cut, the aggregation,
+# the validity classification and the master are all unchanged. Only the LP behind the
+# dual moves to minutes.
+#
+# E2 (D30) HOLDS: the minute grid and arc set are functions of (T, slot_resolution,
+# Wmax_minutes, departure_policy) and the demand. `y` enters only as the capacity
+# right-hand side. Build it any other way and no cut is valid.
+#
+# THE TARGET. The monolithic minute answer on this instance is 3822.97 in
+# slot-equivalent units (114 682 passenger-minutes). A converged decomposed run should
+# reach it. The slot model's own answer is 4183.24 and is NOT the target here -- it
+# optimises a different objective.
+#
+# READING THE PAIR. The `slot` arm is the control and must still converge to 4183.24,
+# which is the check that nothing in the minute plumbing perturbed the existing path.
+#
+# Magnanti-Wong is OFF and use_dual_slopes ON: `solve_mw_dual` mirrors the SLOT primal
+# and would be selecting duals for an LP that is no longer the one being solved. The
+# plain dual is the honest generator here and is a valid lower bound (spec 2.6).
+
+schema:
+  name: mobauto2_benders_config
+  version: 2
+
+# Deterministic regression baseline for the D9 elastic-path deletion.
+#
+# Purpose: this config is NOT for producing results. It exists so the same run
+# can be executed before and after deleting the elastic subproblem path, and the
+# two logs diffed. The deletion must change nothing; this is how we prove it.
+#
+# Determinism requirements (do not "tune" these away):
+#   - CPXPARAM_Threads: 1   -- parallel MIP is not reproducible run to run.
+#   - solve_time_limit_s high enough that the master always terminates on mipgap,
+#     never on wall clock. Time-limited termination depends on machine load.
+#   - max_iterations small and fixed, so the run always stops at the same place.
+#   - seed fixed.
+
+run:
+  name: d9_recourse_slot
+  log_level: INFO
+  log_file: null
+  report_dir: null
+  seed: 42
+
+data:
+  demand_file: setups/base.yaml
+  scenario_files:
+  scenario_weights: null
+  R_out: null
+  R_ret: null
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0, 150.0, 150.0]
+    initial_actions: [IDL, IDL, IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+master:
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  # Pinned OFF, not inherited: these fixtures exist to diff against archived
+  # logs, so their model must not move when a default changes (D29).
+  recourse_lower_bound: false
+  # Generous: the master must terminate on mipgap, not on the clock.
+  per_iteration_time_limit_s: 120
+  per_iteration_mipgap: 0.05
+  cplex_options:
+    CPXPARAM_Preprocessing_Symmetry: 5
+    # Single-threaded for reproducibility. Slower, deliberately.
+    CPXPARAM_Threads: 1
+  solver_backend: cplex_direct
+  aggregate_cuts_by_tau: true
+  theta_per_scenario: false
+  cut_coeff_threshold: 0.001
+  write_lp_after_cut: false
+
+subproblem:
+  multi_cuts_by_scenario: false
+  use_magnanti_wong: false
+  mw_core_alpha: 0.3
+  use_dual_slopes: true
+  S: 15
+  Wmax_minutes: 60
+  p: 50.0
+  recourse_resolution: slot
+  departure_policy: midpoint
+  degenerate_cut_probe_top_k: 6
+  degenerate_cut_zero_tol: 1.0e-9
+
+solver:
+  # Fixed, small iteration budget: the run must always stop at the same place.
+  max_iterations: 60
+  tolerance: 0.001
+  # High enough never to bind before max_iterations does.
+  # Safety net only: it MUST NOT bind. The run stops at max_iterations, and a
+  # master solve that stops on the clock makes the log non-reproducible, which
+  # destroys the before/after diff this fixture exists for (D26).
+  total_time_limit_s: 240
+  stall_max_no_improve_iters: 0
+  stall_min_abs_improve: 1.0
+  stall_min_rel_improve: 0.002
+  master_solver: cplex
+  subproblem_solver: cplex_direct
+  solver_tee: false
+
+tolerances:
+  eps_bin: 1.0e-5
+  eps_feas: 1.0e-7
+  eps_cut: 1.0e-8
+  eps_hash: 1.0e-6

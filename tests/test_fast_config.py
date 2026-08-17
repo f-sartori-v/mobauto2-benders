@@ -255,3 +255,145 @@ class TestMultiScenarioBoundSemantics(unittest.TestCase):
         multi_cuts_by_scenario defaults true."""
         cfg = self._cfg(multi_cuts=True, theta_per_scenario=False, scenarios=False)
         self.assertTrue(cfg.subproblem.multi_cuts_by_scenario)
+
+
+class TestPenaltyUnits(unittest.TestCase):
+    """D50. `p` is in slot units, so stating it directly makes the policy it encodes
+    move with the grid. `p_minutes` states the same policy resolution-independently.
+
+    The repository already contained both readings before this existed --
+    baseline_d9 at 30-minute slots with p=50 (one unserved passenger worth 1500
+    passenger-minutes) and the Fase 1 point at 15-minute slots with p=50 (worth 750).
+    Each run was internally consistent; no objective from one was comparable with the
+    other, and nothing said so.
+    """
+
+    BASE = CONFIGS / "baseline_d9.yaml"
+
+    def _load(self, text: str):
+        from mobauto2_benders.config import load_config
+        import tempfile, os
+
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return load_config(path)
+        finally:
+            os.unlink(path)
+
+    def _variant(self, slot: int, penalty_line: str) -> str:
+        text = self.BASE.read_text(encoding="utf-8")
+        text = text.replace("slot_resolution: 30", f"slot_resolution: {slot}")
+        return text.replace("  p: 50.0", penalty_line)
+
+    def test_p_minutes_encodes_one_policy_at_every_resolution(self):
+        """The whole point: p * slot_resolution must be invariant."""
+        for slot, expected_p in ((30, 50.0), (15, 100.0), (5, 300.0), (1, 1500.0)):
+            with self.subTest(slot=slot):
+                cfg = self._load(self._variant(slot, "  p_minutes: 1500.0"))
+                self.assertAlmostEqual(cfg.subproblem.p, expected_p, places=9)
+                self.assertAlmostEqual(
+                    cfg.subproblem.p * cfg.model.time.slot_resolution, 1500.0, places=6
+                )
+
+    def test_a_bare_p_does_not_encode_one_policy(self):
+        """The behaviour p_minutes exists to replace, asserted so the difference is
+        visible rather than folklore."""
+        worth = {}
+        for slot in (30, 15):
+            cfg = self._load(self._variant(slot, "  p: 50.0"))
+            worth[slot] = cfg.subproblem.p * cfg.model.time.slot_resolution
+        self.assertEqual(worth[30], 1500.0)
+        self.assertEqual(worth[15], 750.0)
+        self.assertNotEqual(
+            worth[30], worth[15], "bare p would have to be resolution-dependent"
+        )
+
+    def test_p_minutes_is_not_rounded(self):
+        """p is a cost coefficient, not an index bound like Wmax. Rounding it would
+        silently change the policy."""
+        cfg = self._load(self._variant(7, "  p_minutes: 100.0"))
+        self.assertAlmostEqual(cfg.subproblem.p, 100.0 / 7.0, places=12)
+
+    def test_both_forms_at_once_is_refused(self):
+        """Ambiguity fails closed rather than resolving by precedence: a precedence
+        rule would let a config state two policies and silently honour one."""
+        with self.assertRaises(ValueError) as ctx:
+            self._load(self._variant(30, "  p: 50.0\n  p_minutes: 1500.0"))
+        self.assertIn("p_minutes", str(ctx.exception))
+
+    def test_neither_form_is_refused(self):
+        with self.assertRaises(ValueError):
+            self._load(self._variant(30, ""))
+
+    def test_existing_configs_are_unchanged(self):
+        """Backward compatibility: every shipped config states a bare p and must load
+        to exactly the value it always did."""
+        from mobauto2_benders.config import load_config
+
+        for name, expected in (
+            ("baseline_d9.yaml", 50.0),
+            ("phase1/lp_only_150.yaml", 50.0),
+        ):
+            with self.subTest(name=name):
+                cfg = load_config(CONFIGS / name)
+                self.assertAlmostEqual(cfg.subproblem.p, expected, places=9)
+                self.assertIsNone(
+                    cfg.subproblem.p_minutes,
+                    "a config stating a bare p must record p_minutes as None so the "
+                    "manifest can say which form was used",
+                )
+
+
+class TestWmaxIsNeverRoundedUp(unittest.TestCase):
+    """The maximum wait is a service promise, so the discretisation must not grant
+    more of it than the config asked for.
+
+    `ceil` did: at 30-minute slots `Wmax_minutes: 45` became 2 slots, and a passenger
+    could be made to wait 60 minutes against a stated cap of 45. `floor` never grants
+    more than asked.
+    """
+
+    def _fn(self):
+        from mobauto2_benders.problem.subproblem_impl import wmax_minutes_to_slots
+
+        return wmax_minutes_to_slots
+
+    def test_the_cap_is_never_exceeded(self):
+        """The invariant, stated directly: slots * slot_width <= Wmax_minutes."""
+        fn = self._fn()
+        for wmax in (30, 45, 60, 75, 90, 120):
+            for slot in (1, 5, 15, 30):
+                if wmax < slot:
+                    continue
+                with self.subTest(wmax=wmax, slot=slot):
+                    self.assertLessEqual(fn(wmax, slot) * slot, wmax)
+
+    def test_the_shipped_settings_are_unaffected(self):
+        """60 minutes at 30- and 15-minute slots divide exactly, so no number in this
+        repository changes. Asserted so the fix cannot be blamed for a later drift."""
+        fn = self._fn()
+        self.assertEqual(fn(60, 30), 2)
+        self.assertEqual(fn(60, 15), 4)
+
+    def test_the_case_that_used_to_be_wrong(self):
+        fn = self._fn()
+        self.assertEqual(fn(45, 30), 1, "45 minutes at 30-minute slots must be 1 slot")
+
+    def test_a_cap_shorter_than_one_slot_is_refused(self):
+        """floor would give 0 -- no arcs, every passenger unserved, no error. ceil hid
+        this by rounding up to one slot, which is the over-permissive direction."""
+        fn = self._fn()
+        with self.assertRaises(ValueError) as ctx:
+            fn(20, 30)
+        self.assertIn("shorter than one slot", str(ctx.exception))
+
+    def test_both_packages_agree(self):
+        """The rule is implemented once per package; the copies must not drift."""
+        from mobauto2_milp.monolith import wmax_minutes_to_slots as milp_fn
+
+        fn = self._fn()
+        for wmax, slot in ((60, 30), (60, 15), (45, 30), (90, 30), (60, 1)):
+            with self.subTest(wmax=wmax, slot=slot):
+                self.assertEqual(fn(wmax, slot), milp_fn(wmax, slot))

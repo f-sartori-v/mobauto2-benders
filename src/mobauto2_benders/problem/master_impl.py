@@ -562,6 +562,75 @@ class ProblemMaster(MasterProblem):
 
             m.C_sym_break_tot = pyo.Constraint(m.Q, rule=_c_sym_break_tot_rule)
 
+        # Window trip caps from the single-vehicle decision diagram (D48, stage 1).
+        #
+        #   sum_{tau in [t1,t2]} (Yout[tau] + Yret[tau])  <=  Q * max_trips(t1,t2)
+        #
+        # `max_trips` is maximised over every entry state, so it bounds ANY vehicle's
+        # departures in the window whatever happened before t1; summing over Q
+        # independent vehicles gives the right-hand side. The inequality is in Y alone,
+        # so it constrains the first stage and cannot interact with the validity of the
+        # Benders cuts.
+        #
+        # OFF by default, and that is deliberate rather than cautious boilerplate. Spec
+        # 2.9 records M1: an inequality that is sound and implied still took the master
+        # phase from 18.2 s to 49 s and left a WORSE bound at the same budget. A valid
+        # inequality cannot weaken the LP relaxation, but it can make the MIP harder.
+        # So this is an opt-in whose effect is measured, not a default.
+        if bool(self._p("window_trip_caps", False)):
+            from .vehicle_dd import VehicleParams, eligible_slot_count
+            from .vehicle_dd import window_trip_caps as _build_window_trip_caps
+
+            _dd_params = VehicleParams(
+                T=T,
+                trip_slots=trip_slots,
+                Emax=Emax,
+                L=L,
+                delta_chg=delta_chg,
+            )
+            _caps = _build_window_trip_caps(_dd_params, Q)
+            if _caps:
+                m.WindowCapIdx = pyo.Set(
+                    initialize=list(range(len(_caps))), ordered=True
+                )
+
+                def _c_window_trip_cap_rule(m, i):
+                    cap = _caps[int(i)]
+                    return (
+                        sum(
+                            m.Yout[t] + m.Yret[t]
+                            for t in range(cap.t1, cap.t2 + 1)
+                        )
+                        <= float(cap.rhs)
+                    )
+
+                m.C_window_trip_cap = pyo.Constraint(
+                    m.WindowCapIdx, rule=_c_window_trip_cap_rule
+                )
+            # Traceable per non-negotiable 4: a run must be able to say how many of
+            # these rows it carried, and what the widest one claims.
+            self._window_trip_cap_count = len(_caps)
+            _full = next(
+                (c for c in _caps if c.t1 == 0 and c.t2 == T - 1), None
+            )
+            self._vprint(
+                "[WINDOW CAPS] %d rows (T=%d Q=%d trip_slots=%d). Whole horizon: %s"
+                % (
+                    len(_caps),
+                    T,
+                    Q,
+                    trip_slots,
+                    (
+                        f"sum(Y) <= {_full.rhs} "
+                        f"(trivial {Q * eligible_slot_count(_dd_params, 0, T - 1)})"
+                        if _full is not None
+                        else "no non-trivial cap"
+                    ),
+                )
+            )
+        else:
+            self._window_trip_cap_count = 0
+
         for q in m.Q:
             m.b[q, 0].fix(float(binit[q]))
 

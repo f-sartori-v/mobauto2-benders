@@ -211,12 +211,43 @@ src/mobauto2_benders/
   benders/      decomposition loop, cut filtering, shared types
   problem/      MobAuto2 master and subproblem models
   app.py        parameter assembly    config.py  YAML schema (v2)
+src/mobauto2_milp/
+                the monolithic MILP -- the benchmark reference, see below
 configs/        run configurations, including the Phase 1 cells
+  milp/         configs for the monolith
 setups/         demand scenarios -- the inputs every config reads
-tests/          98 tests, no network, CPLEX required for the soundness fixture
+tests/          no network, CPLEX required for the soundness and monolith fixtures
 scripts/        sweep driver and a diagnostics smoke check
 docs/           formulation, audit, decision log, Phase 1 evidence
 ```
+
+## Benchmarking against the monolithic MILP
+
+Every bound this project reports is checked against a feasible objective produced by a
+*monolithic* MILP rather than by a Benders run of this same code — spec non-negotiable 8.
+On the `baseline_d9` instance that objective is **4183.24**.
+
+```bash
+mobauto2-milp --config configs/milp/baseline_d9_monolith.yaml run
+```
+
+It solves to proven optimality in about 7 seconds and prints
+`status=OPTIMAL best_lb=4183.24 best_ub=4183.24`.
+
+**Why it ships here.** For months this code was not in the repository — `aux_py/` was
+empty, and 4183.24 appeared only as prose in the docs and a hardcoded constant in two test
+files. The check could not be regenerated and its independence could not be inspected
+(D50). `tests/test_monolith_reference.py` now fails if the package goes missing, if the
+number changes, if the solve stops on the clock instead of the gap, or if the monolith's
+config drifts away from the instance `configs/baseline_d9.yaml` describes.
+
+**What "independent" means, precisely.** The monolith attaches the exact recourse LP and
+pins `theta` to it by *equality*, so there is no cut and no `theta` approximation — the
+whole D30 defect class cannot reach it. That is independence from the **decomposition**.
+It is not independence from the **formulation**: `mobauto2_milp/model.py` is a second copy
+of the first-stage model that `mobauto2_benders/problem/master_impl.py` also implements,
+kept in sync by hand. A defect present in both copies is invisible to this check. Cite the
+number that way.
 
 ## What is not in this repository, and why
 

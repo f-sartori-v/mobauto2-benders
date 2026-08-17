@@ -75,9 +75,7 @@ class ProblemSubproblem(Subproblem):
         # See docs/docs_decisions.md D9 and docs/BENDERS_SPEC_v3.md §2.5.
         # Allow Wmax to be specified in minutes
         if "Wmax_minutes" in params:
-            Wmax = int(
-                math.ceil(float(params.get("Wmax_minutes", 0)) / max(1, slot_res))
-            )
+            Wmax = wmax_minutes_to_slots(float(params.get("Wmax_minutes", 0)), slot_res)
         else:
             Wmax = int(params.get("Wmax_slots", params.get("Wmax", 0)))
         p_pen = float(params.get("p", 0.0))
@@ -133,6 +131,23 @@ class ProblemSubproblem(Subproblem):
             if debug_timing:
                 self._vprint(msg)
 
+        def _minutes_for(source: Any) -> dict | None:
+            """Per-request arrival minutes for a demand source, or None in slot mode.
+
+            The slot aggregation throws these away at load, so minute-level recourse has
+            to read the file a second time. Returns None when the source is not a file
+            path -- inline demand carries no arrival times to recover, and a minute-mode
+            run against inline demand must fail loudly in solve_subproblem rather than
+            quietly price a schedule against nothing.
+            """
+            if str(params.get("recourse_resolution", "slot")).lower() != "minute":
+                return None
+            if not isinstance(source, (str, Path)):
+                return None
+            from ..minute_pricer import load_request_minutes
+
+            return load_request_minutes(Path(str(source)))
+
         def _load_demand_from_file(
             path_like: Any, Tlen: int
         ) -> tuple[list[float], list[float]]:
@@ -181,6 +196,11 @@ class ProblemSubproblem(Subproblem):
             scenarios = list(params.get("scenario_files"))
         # Normalize single-scenario lists to single-demand path
         single_scenario_override: tuple[list[float], list[float]] | None = None
+        # Which demand source the single-demand path ends up using. Minute mode
+        # has to re-read that exact file, because the slot aggregation discards
+        # arrival minutes; reading a different one would price a schedule against
+        # demand the slot run never saw.
+        single_demand_source: Any = params.get("demand_file")
         if scenarios and len(scenarios) == 1:
             s0 = scenarios[0]
             if isinstance(s0, (str, Path)):
@@ -196,6 +216,7 @@ class ProblemSubproblem(Subproblem):
             R_out0 = (R_out0 + [0.0] * T)[:T]
             R_ret0 = (R_ret0 + [0.0] * T)[:T]
             single_scenario_override = (R_out0, R_ret0)
+            single_demand_source = s0
             scenarios = []
         # Multi-cut vs averaged cut control.
         # New flag: multi_cuts_by_scenario (True => return one cut per scenario)
@@ -688,6 +709,14 @@ class ProblemSubproblem(Subproblem):
                     ),
                     debug_scenario_label=str(scen_label),
                     solve_time_limit_s=params.get("solve_time_limit_s"),
+                    recourse_resolution=str(
+                        params.get("recourse_resolution", "slot")
+                    ),
+                    Wmax_minutes=params.get("Wmax_minutes"),
+                    departure_policy=str(
+                        params.get("departure_policy", "midpoint")
+                    ),
+                    request_minutes=_minutes_for(s),
                 )
                 t_solve0 = time.perf_counter()
                 duals, ub_val = solve_subproblem(
@@ -1526,6 +1555,10 @@ class ProblemSubproblem(Subproblem):
                 ),
                 debug_scenario_label="single",
                 solve_time_limit_s=params.get("solve_time_limit_s"),
+                recourse_resolution=str(params.get("recourse_resolution", "slot")),
+                Wmax_minutes=params.get("Wmax_minutes"),
+                departure_policy=str(params.get("departure_policy", "midpoint")),
+                request_minutes=_minutes_for(single_demand_source),
             )
             t_solve0 = time.perf_counter()
             duals, ub_val = solve_subproblem(
@@ -1876,6 +1909,48 @@ class ProblemSubproblem(Subproblem):
 # post-truncation R vectors to build its recourse lower bound. Duplicating the
 # truncation rule there would be how the two copies drift apart -- exactly what
 # happened to initial_battery and initial_actions (D23).
+
+def wmax_minutes_to_slots(wmax_minutes: float, slot_resolution: int) -> int:
+    """Largest whole number of slots whose implied wait never exceeds `wmax_minutes`.
+
+    FLOOR, not ceil. `ceil` grants MORE waiting than the config asked for: at 30-minute
+    slots, `Wmax_minutes: 45` becomes ceil(1.5) = 2 slots, and a passenger may then be
+    made to wait a full 60 minutes against a stated cap of 45. The cap is a service
+    promise, so rounding it up is the one direction that must not happen silently.
+
+    Measured consequence of the old behaviour, on the shipped settings: none. At
+    Wmax_minutes 60 and slot_resolution 30 the quotient is exactly 2, so ceil and floor
+    agree and no result in this repository changes. The fix matters for any Wmax that is
+    not a whole multiple of the slot width, and for the finer grids the multi-resolution
+    work introduces.
+
+    NOTE what this does and does not guarantee. It bounds the wait measured from the
+    START of the arrival slot to the START of the departure slot. A passenger arriving
+    mid-slot waits less; a departure placed mid-slot (the midpoint convention of the
+    research note) adds up to half a slot, which can push the true wait past the cap
+    again -- at 30-minute slots, up to 75 minutes against a stated 60. That is a
+    property of the slot ABSTRACTION, not of this conversion, and it is why
+    `minute_pricer` enforces the real cap in minutes when it prices a schedule.
+    """
+    import math as _math
+
+    slot_resolution = int(slot_resolution)
+    if slot_resolution <= 0:
+        raise ValueError(
+            f"slot_resolution must be positive to convert Wmax_minutes, "
+            f"got {slot_resolution!r}"
+        )
+    slots = int(_math.floor(float(wmax_minutes) / float(slot_resolution)))
+    if slots < 1:
+        raise ValueError(
+            f"Wmax_minutes={wmax_minutes!r} is shorter than one slot "
+            f"({slot_resolution} min), so no departure can serve any demand inside the "
+            "cap and every passenger would be counted as unserved. Raise Wmax_minutes "
+            "to at least the slot width, or refine slot_resolution. (The previous "
+            "ceil() hid this by silently rounding the cap up to one slot.)"
+        )
+    return slots
+
 def load_demand_doc(path: Path) -> Any:
     if not path.exists():
         raise FileNotFoundError(f"Demand file not found: {path}")
@@ -2153,6 +2228,14 @@ class SPParams:
     debug_force_nominal_departures: bool = False
     debug_scenario_label: str | None = None
     solve_time_limit_s: float | None = None
+    # Multi-resolution recourse (D51). "slot" is the model this repository has always
+    # had; "minute" evaluates operations on a fixed minute grid while the first stage
+    # stays on slots. The capacity rows stay indexed by departure slot in both, so the
+    # cut the master receives is the same object either way.
+    recourse_resolution: str = "slot"
+    Wmax_minutes: float | None = None
+    departure_policy: str = "midpoint"
+    request_minutes: dict | None = None
 
 
 def solve_subproblem(
@@ -2167,6 +2250,40 @@ def solve_subproblem(
 
     Returns (duals: dict[str, dict[int, float]], objective_value: float)
     """
+    if str(getattr(P, "recourse_resolution", "slot")).lower() == "minute":
+        # Minute-level recourse. Same dual interface (one pi per departure slot), so
+        # every caller above -- cut construction, aggregation, validity, the master --
+        # is unchanged. See minute_pricer.solve_minute_recourse and D51.
+        from ..minute_pricer import solve_minute_recourse
+
+        if not P.request_minutes:
+            raise ValueError(
+                "recourse_resolution='minute' needs per-request arrival minutes, but "
+                "request_minutes is empty. The slot aggregation discards them at load, "
+                "so the demand file has to be read again in minute form -- silently "
+                "falling back to the slot model here would report a multi-resolution "
+                "run that never happened."
+            )
+        if P.Wmax_minutes is None:
+            raise ValueError(
+                "recourse_resolution='minute' needs Wmax_minutes. Wmax_slots cannot "
+                "substitute: the whole point is that a slot window is not an exact "
+                "number of minutes (D51)."
+            )
+        return solve_minute_recourse(
+            T=P.T,
+            slot_resolution=P.slot_resolution,
+            wmax_minutes=float(P.Wmax_minutes),
+            p_slots=float(P.p),
+            C_out=list(C_out),
+            C_ret=list(C_ret),
+            request_minutes=P.request_minutes,
+            policy=str(P.departure_policy),
+            lp_solver=P.lp_solver,
+            solver_options=P.solver_options,
+            solve_time_limit_s=P.solve_time_limit_s,
+        )
+
     t_build0 = time.perf_counter()
     m = pyo.ConcreteModel()
     m.name = "subproblem"

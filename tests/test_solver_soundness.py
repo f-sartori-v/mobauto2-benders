@@ -30,6 +30,15 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "soundness.yaml"
 # run of this same code, which made the check circular: it could not detect a
 # defect that inflated the bound by less than 7.5. It did not detect the layered
 # subproblem (D30), whose cuts pushed the reported LB to 4492 on a longer run.
+#
+# REGENERATE IT (D50). The MILP that produces this number now ships:
+#     mobauto2-milp --config configs/milp/baseline_d9_monolith.yaml run
+# and tests/test_monolith_reference.py asserts it still comes out at 4183.24, that
+# the run terminates on the gap rather than the clock, and that the monolith's config
+# still describes the same instance as configs/baseline_d9.yaml. For months this
+# constant had no reproducible source in the repository at all; that is what made
+# 4190.74 survivable. Note the independence is from the DECOMPOSITION, not the
+# formulation -- mobauto2_milp/model.py is a second copy of the first-stage model.
 KNOWN_FEASIBLE_UB = 4183.24
 
 

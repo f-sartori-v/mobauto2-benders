@@ -12,6 +12,12 @@ from .master import MasterProblem
 from .subproblem import Subproblem
 from .types import CutValidity, SolveStatus, SubproblemResult, classify_cut_validity
 from .cplex_log import parse_cplex_log_bounds
+from ..signature import (
+    candidate_signature,
+    fibre_size,
+    is_integral,
+    signature_key,
+)
 import pyomo.environ as pyo
 
 log = logging.getLogger(__name__)
@@ -944,6 +950,22 @@ class BendersSolver:
                 clock_truncated_master_solves=int(clock_truncated_master_solves),
             )
 
+        # --- Fibre diagnostic (D48, DESIGN_DD_v1 stage 0) ---
+        #
+        # The recourse is a function of the signature Y_d[tau] = sum_q y_d[q,tau], not
+        # of y. This counts how often the loop hands the subproblem a signature it has
+        # already priced, and how large the fibre over each integer signature is.
+        #
+        # Read it with the LP phase in mind. While `lp_phase` is on the candidate is
+        # fractional, so its signature is fractional and repeats are not expected -- a
+        # count of zero there says nothing about the fibre, only that the LP visits
+        # distinct points. The claim in D48 is about INTEGER solutions and about the
+        # master's branch and bound, which this loop-level counter cannot observe.
+        # `frac=` on each line records which regime produced the number.
+        fibre_seen: dict[tuple, int] = {}
+        fibre_repeats: int = 0
+        fibre_integral_candidates: int = 0
+
         for it in range(1, max_it + 1):
             iter_t0 = time.perf_counter()
             rep = IterReport(k=it)
@@ -1471,28 +1493,17 @@ class BendersSolver:
                         self._mw_core_out = [seed for _ in range(Tn)]
                         self._mw_core_ret = [seed for _ in range(Tn)]
 
-                # Update core from current incumbent (moving average)
+                # Update core from current incumbent (moving average).
+                #
+                # The incumbent's contribution to the core point IS its signature
+                # (problem/signature.py, D48), so this reads it through the one
+                # definition rather than reparsing the names here. The hand-rolled
+                # loop this replaces wrapped the parse in `except Exception: continue`,
+                # which silently dropped any malformed key -- and Ybar is the direction
+                # MW maximises in (D42), so a silently short core point biases every
+                # subsequent cut selection while still reporting mode `mw`.
                 if mres.candidate and Qn is not None and Tn is not None:
-                    cur_out = [0.0 for _ in range(Tn)]
-                    cur_ret = [0.0 for _ in range(Tn)]
-                    for name, val in mres.candidate.items():
-                        if not isinstance(name, str):
-                            continue
-                        try:
-                            if name.startswith("yOUT["):
-                                inside = name[name.find("[") + 1 : name.find("]")]
-                                _, t_str = inside.split(",")
-                                t = int(t_str.strip())
-                                if 0 <= t < Tn:
-                                    cur_out[t] += float(val)
-                            elif name.startswith("yRET["):
-                                inside = name[name.find("[") + 1 : name.find("]")]
-                                _, t_str = inside.split(",")
-                                t = int(t_str.strip())
-                                if 0 <= t < Tn:
-                                    cur_ret[t] += float(val)
-                        except Exception:
-                            continue
+                    cur_out, cur_ret = candidate_signature(mres.candidate, Tn)
                     if self._mw_core_out is None or self._mw_core_ret is None:
                         self._mw_core_out = list(cur_out)
                         self._mw_core_ret = list(cur_ret)
@@ -1559,6 +1570,56 @@ class BendersSolver:
                     self.subproblem.params["solve_time_limit_s"] = float(remaining_time)
             except Exception:
                 pass
+
+            # Fibre diagnostic, recorded just before the candidate is priced so the
+            # signature logged is exactly the one the subproblem sees.
+            _t_master_params = getattr(self.master, "params", None)
+            _T_sig = None
+            if isinstance(_t_master_params, dict):
+                if _t_master_params.get("T") is not None:
+                    _T_sig = int(_t_master_params["T"])
+                elif _t_master_params.get("T_minutes") is not None:
+                    # `app._prepare_params` sets "T" only when the config states it
+                    # outright; with T_minutes + slot_resolution the master derives it
+                    # in `initialize()` and params never carries it. Reading only "T"
+                    # made this whole diagnostic silently inert on every config in
+                    # configs/ -- they all use T_minutes. Derive it the same way the
+                    # master does rather than defaulting to something.
+                    _T_sig = int(_t_master_params["T_minutes"]) // max(
+                        1, int(_t_master_params.get("slot_resolution", 1) or 1)
+                    )
+            if _T_sig is not None and mres.candidate:
+                _Yo, _Yr = candidate_signature(mres.candidate, _T_sig)
+                _integral = is_integral(_Yo) and is_integral(_Yr)
+                _key = signature_key(_Yo, _Yr)
+                _prev = fibre_seen.get(_key)
+                fibre_seen[_key] = it
+                if _prev is not None:
+                    fibre_repeats += 1
+                if _integral:
+                    fibre_integral_candidates += 1
+                _Qn = None
+                if _t_master_params.get("Q") is not None:
+                    _Qn = int(_t_master_params["Q"])
+                _fib = (
+                    fibre_size(_Yo, _Yr, _Qn)
+                    if (_integral and _Qn is not None)
+                    else None
+                )
+                _vprint(
+                    "[FIBRE] it=%d frac=%s trips=%.6g fibre=%s repeat_of=%s "
+                    "distinct=%d repeats=%d integral=%d"
+                    % (
+                        it,
+                        "no" if _integral else "yes",
+                        float(sum(_Yo) + sum(_Yr)),
+                        ("-" if _fib is None else str(_fib)),
+                        ("-" if _prev is None else str(_prev)),
+                        len(fibre_seen),
+                        fibre_repeats,
+                        fibre_integral_candidates,
+                    )
+                )
 
             _vprint("Evaluating Subproblem (SP) at candidate...")
             sp_t0 = time.perf_counter()
@@ -1738,10 +1799,32 @@ class BendersSolver:
                     and sp_total_obj is not None
                 ):
                     if float(mp_total_inc) > float(sp_total_obj) + 1e-6:
+                        # Printed at 17 significant digits and with the excess stated
+                        # outright. At %.6g both sides render identically for any
+                        # violation under ~0.005 at this objective's magnitude, so the
+                        # line could not distinguish "theta overestimates" -- the
+                        # defect it exists to report -- from float accumulation over a
+                        # few dozen cuts. An alarm that cannot be triaged gets ignored,
+                        # which is the D40/D41 lesson about error lines that carry no
+                        # information.
+                        #
+                        # Note the threshold is ABSOLUTE 1e-6 against a total of order
+                        # 1e3, i.e. ~1e-9 relative, while comparable checks in this
+                        # codebase are scale-relative (`_ok` in subproblem_impl,
+                        # `_assert_q_invariant` in master_impl). Whether it should be
+                        # relative is a separate question and is NOT changed here --
+                        # loosening a validity check on the strength of one warning is
+                        # how a real defect gets tuned away.
+                        _excess = float(mp_total_inc) - float(sp_total_obj)
                         log.warning(
-                            "[CHECK FAIL] MP total exceeds SP total at same y: mp_total=%.6g sp_total=%.6g (objective mismatch or theta overestimates)",
+                            "[CHECK FAIL] MP total exceeds SP total at same y: "
+                            "mp_total=%.17g sp_total=%.17g excess=%.3g "
+                            "rel=%.3g tol=1e-06 absolute "
+                            "(objective mismatch or theta overestimates)",
                             float(mp_total_inc),
                             float(sp_total_obj),
+                            _excess,
+                            _excess / max(1.0, abs(float(sp_total_obj))),
                         )
                 if (
                     lower_bound_semantics_valid

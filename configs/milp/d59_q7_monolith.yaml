@@ -1,0 +1,84 @@
+# How does the MONOLITH scale in Q? This is the question that decides stage 3.
+#
+# D58 measured the Dantzig-Wolfe root against the monolith at Q=3 and found the bar
+# lower than expected: the monolith proves optimality in 181 s, while column generation
+# spends 110 s producing the root alone -- 61% of the whole budget before any branching.
+# Branch-and-price cannot beat that here.
+#
+# So the real question is not whether the decomposition wins at Q=3. It is whether a
+# regime exists where the monolith STOPS closing in reasonable time, because that is the
+# only place a decomposition can win. Two points so far: 0.8 s at Q=2/T=22, 181 s at
+# Q=3/T=44. This file adds Q=5, changing nothing else.
+#
+# THE HYPOTHESIS THIS TESTS (D59). Q=5 did not close in 1200 s. If difficulty in Q is a
+# PEAK rather than a ramp, larger fleets should get EASIER again: demand and horizon are
+# fixed, so past some point every request is servable and the instance loses its bite.
+# That would make the hard band a bounded region, which is where a decomposition earns
+# its place -- and it would also mean this method is not needed on either side of it.
+#
+# A run that hits the cap is not a failure of this file -- it is the informative outcome.
+# It would mean the monolith degrades sharply in Q and there IS a target. Read the bound
+# beside the incumbent, and do not quote a truncated objective as an optimum.
+#
+# Derived from d47_monolith_check.yaml. Threads: 0 (all cores) is inherited from it, and
+# both arms of the D58 comparison had all cores, so the comparison stays like-for-like.
+
+schema:
+  name: mobauto2_milp_config
+  version: 3
+
+run:
+  name: d59_q7_monolith
+  log_level: INFO
+  seed: 42
+
+data:
+  # Single scenario, matching baseline_d9.yaml's demand_file.
+  scenario_files: [setups/base.yaml, setups/base_plus100_out_noon.yaml, setups/base_ret_peak_adv.yaml, setups/base_vol20_pm60.yaml]
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 15
+    trip_duration_minutes: 30
+  fleet:
+    Q: 7
+    initial_battery: [150.0]
+    initial_actions: [IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+milp:
+  # Symmetry breaking is valid here for the same reason it is in the Benders master
+  # (2.8): a homogeneous fleet ordered by TOTAL departures. The fleet is homogeneous
+  # -- one-element lists above pad by repeating the last entry (4.2).
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  # Tight gap: this run exists to produce a reference number, so it must terminate on
+  # the gap and not on the clock. A clock-truncated MIP is machine-dependent (D26),
+  # and a reference produced that way would be a different number on every machine.
+  solve_time_limit_s: 1800
+  mipgap: 1.0e-6
+  solver_backend: cplex
+  cplex_options:
+    CPXPARAM_MIP_Strategy_Symmetry: 5
+    # Single-threaded for reproducibility, matching baseline_d9.yaml.
+    CPXPARAM_Threads: 0
+
+service:
+  S: 15
+  Wmax_minutes: 60
+  p: 50.0
+  # Unused on the default aggregate path (aggregate_service_by_start), which is the
+  # one that matches the post-D30 subproblem. Left at 0 so it cannot silently
+  # perturb the objective if that path is ever switched off.
+  fill_first_epsilon: 0.0
+
+solver:
+  solver_tee: false
