@@ -3744,3 +3744,139 @@ it is one contiguous register, D1 to D68, with no duplicate allocation (D67 §1)
 and the `--solver` override (4). No
 measurement in this entry is new: sections 3 and 4 are quoted from the branch that produced
 them, and section 2's comparison is a structural check on one fixture, not a benchmark.
+
+---
+
+## D69 — The novelty check: discretisation error in vehicle scheduling is occupied, the valuation/decision split is routine in energy planning, and what survives is the direction and the dual compatibility
+
+Date: 2026-08-22. Closes the one item PROJECT_STATE_v6 §2 marked as blocking submission: the
+framing *aggregate first stage + fine-grained dual-compatible recourse + decision-level cost
+quantified* had never been checked against the discretisation-error literature.
+
+**No run was executed and no number in this repository moves.** This is a search-level check
+— its scope, and what it does not cover, is section 7. The verdict is about what may be
+*claimed*, not about what was measured.
+
+### 1. Family 1 — discretisation error in vehicle scheduling is occupied, and by an exact method
+
+Boland, Hewitt, Marshall and Savelsbergh's continuous-time service network design (Oper. Res.
+2017) introduced Dynamic Discretization Discovery: iteratively refine a *partially*
+time-expanded network until the coarse model's solution is optimal for continuous time,
+typically at a fraction of the full time-expanded network's size.
+
+The closest neighbour is not in freight but in our own family: van Lieshout and van der
+Schaft, **Dynamic Discretization Discovery for the Multi-Depot Vehicle Scheduling Problem
+with Trip Shifting** (arXiv:2304.05665; INFORMS J. on Computing 2024). Its premise is ours
+almost verbatim — allowing departure times to deviate a few minutes from the original
+timetable lets new combinations of trips be carried out by the same vehicle — and it
+guarantees an optimal continuous-time solution without enumerating the shifts.
+
+**Consequence, and it is the expensive one:** the sentence "slot-level vehicle scheduling
+models are too coarse to price minute-level reachability, and this goes unnoticed" **cannot
+be written.** It was noticed, in the same problem family, and answered with an exact
+algorithm. Any draft that opens on the discovery of discretisation error is refuted by one
+citation.
+
+### 2. The direction is opposite, and that is the structural difference that survives
+
+DDD's coarse model is a **relaxation**: travel times are under-approximated on the partial
+network, so the coarse objective is a **lower** bound, and refinement closes the gap from
+below until it is exact. The same sign holds in the energy analogue of section 4 — an
+appropriately constructed aggregated model is proved to bound the full-scale optimum from
+below.
+
+Here the slot model **overstates** cost under all three placement conventions, so the slot
+optimum is an **upper** bound on the minute-level optimum (PROJECT_STATE_v6 §2, claim 3).
+
+The two consequences are the same fact read twice, and both must be stated together:
+
+- **Positive:** the refinement machinery built to close a relaxation gap does not transfer,
+  because there is no gap of that sign to close. That is a real structural difference and it
+  is the technical hook.
+- **Negative:** it is also exactly why a slot-level Benders lower bound bounds the *slot*
+  problem and says nothing rigorous about the minute-level one. The differentiator and the
+  scoping constraint are one property.
+
+### 3. Family 2 — quantifying aggregation error is forty-five years old
+
+Zipkin's bounds on aggregating variables and on row aggregation in linear programs (1980),
+with the a priori / a posteriori split, and the aggregation bounds later derived for
+stochastic linear programs, already answer "how wrong is the aggregated objective".
+Measuring valuation error is therefore **not a contribution in itself**; it is an instance of
+a named, bounded question.
+
+### 4. Family 3 — the valuation/decision split is routine method in energy planning
+
+Time-series aggregation for capacity expansion re-evaluates the aggregated model's investment
+decisions in the full-resolution operational model and reports the cost error. That is our
+decision error under another name, as standard practice. Santosuosso, Klinz and Wogrin
+(arXiv:2510.09357, 2025) establish performance guarantees for it, prove the aggregated model
+bounds the full-scale optimum, and compare their refinement against Benders decomposition.
+
+**Consequence:** "we separate what the model claims its schedule costs from what the schedule
+really costs" is not a novel methodological move. It is imported, and must be cited as
+imported rather than introduced.
+
+### 5. What is left, and it is a combination rather than an idea
+
+Three items, defensible only together:
+
+1. **The direction** (section 2): an over-approximating aggregation, not a relaxation.
+2. **Dual compatibility** (D52): the minute recourse keeps its capacity rows indexed by
+   departure slot, so it returns exactly one dual per slot — the same object the slot
+   subproblem returns. Master, cut machinery and E1–E4 are untouched, and the subproblem
+   costs under 1% of an iteration. **In DDD, refinement changes the network and therefore the
+   master.** Here the master is deliberately left coarse. This is the load-bearing item.
+3. **Two results a "just refine the grid" reading would predict away:** decision error does
+   not vanish as the grid refines and is not monotone (D55), and the departure-placement
+   convention moves the measured gain between 0% and 49% (D54).
+
+The application-level observation stands beside them rather than under them: waiting time is
+misvalued by 66–86% while the objective hides it, because at the default penalty the
+objective is 93% unmet-demand headcount and only 6.8% waiting.
+
+### 6. What this changes in how claim 3 must be written
+
+Not *"we show that slot aggregation misprices its own schedules"*. That claim is now
+answerable with one citation. It must become:
+
+> Discretisation error in vehicle scheduling is known and has an exact treatment when the
+> coarse model is a relaxation (DDD). We ask what remains when the aggregation
+> **over-approximates** and the fine resolution is confined to the **recourse**: the
+> correction is free (under 1% of an iteration, no new cut machinery, no projection), grid
+> refinement does not substitute for it, and the cost of omitting it is 28.5% in valuation
+> and 6.0% in decision, 3.84% operationally across four scenarios.
+
+Two obligations follow for the manuscript: DDD is cited as the **closest neighbour**, not as
+background; and the related-work paragraph says explicitly why it does not apply here.
+
+### 7. What was searched, and what was not
+
+- Four framings were searched: discretisation error and DDD in scheduling; aggregation error
+  bounds in LP and stochastic LP; coarse-master / fine-subproblem decomposition; and
+  fidelity-gap evaluation of aggregated models.
+- **Abstracts were read, not full texts** — including arXiv:2304.05665, arXiv:2510.09357 and
+  arXiv:2402.01265 (Martin-Iradi, Schmid, Cummings and Jacquillat, microtransit: a two-stage
+  Benders plus column generation whose second stage is a *routing* structure, not a finer time
+  grid; related, but not prior art for item 2).
+- **Not done:** a Scopus or Web of Science query, the full text of either DDD paper, and any
+  targeted check of whether item 2 — a fine recourse dual-compatible with a coarse master —
+  has been done explicitly in transit. The search covering item 2 returned only generic
+  Benders-aggregation material.
+- **Therefore: absence of evidence here is weak evidence.** Item 2 is the load-bearing claim
+  and it is the one this check covers least well.
+
+### 8. Verdict
+
+The framing **as written in PROJECT_STATE_v6 §2 is not defensible as novel**; the narrowed
+form in section 6 is. The item moves off the blocking list and becomes a **positioning
+requirement**, plus one residual task: read the two DDD papers in full before writing the
+related-work paragraph, and confirm there that neither confines refinement to the recourse.
+
+Sources: <https://pubsonline.informs.org/doi/10.1287/opre.2017.1624>,
+<https://arxiv.org/abs/2304.05665>,
+<https://pubsonline.informs.org/doi/10.1287/ijoc.2024.0698>,
+<https://pubsonline.informs.org/doi/10.1287/opre.28.6.1450>,
+<https://link.springer.com/article/10.1007/BF02591859>,
+<https://arxiv.org/abs/2510.09357>,
+<https://arxiv.org/abs/2402.01265>.

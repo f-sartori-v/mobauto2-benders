@@ -1,7 +1,7 @@
 # Project state — v6
 
 **Read this first, and read it instead of the older documents.** Everything below is what is
-still true on `main` as of D68. It exists because the project's failure mode is not wrong
+still true on `main` as of D69. It exists because the project's failure mode is not wrong
 work, it is **stale documents that are still readable**: two outside reports were written
 six weeks apart, and both quoted numbers this repository had already withdrawn, because
 nothing said in one place which numbers were dead.
@@ -18,7 +18,7 @@ close.
 | Document | Status | What it is for |
 |---|---|---|
 | **this file** | current | Where the project stands, what is dead, how to run it |
-| `docs_decisions.md` | current, authoritative | The register, D1–D68, one contiguous allocation. **The only file whose D-numbers need no remapping** |
+| `docs_decisions.md` | current, authoritative | The register, D1–D69, one contiguous allocation. **The only file whose D-numbers need no remapping** |
 | `BENDERS_SPEC_v4.md` | current | The model as implemented, and the eight non-negotiables |
 | `RESEARCH_NOTE_v2.md` | current | The multi-resolution contribution (claim 3), measured |
 | `DESIGN_DD_v1.md` | current for E1–E4 | Exactness conditions and the structural argument. **Design only — nothing in it is measured** |
@@ -81,7 +81,7 @@ found "nothing moved the bound" — it had already been moved.
 The "hard band" fallback was tested rather than assumed: the band exists at Q=5–6, and the
 method's advantage inside it is measured at **zero** (D59).
 
-### Claim 3 — the contribution is evaluation fidelity 🟡 **measured; one literature check outstanding**
+### Claim 3 — the contribution is evaluation fidelity 🟡 **measured; the novelty claim is narrowed, not clear (D69)**
 
 *Slot-aggregated vehicle scheduling models misprice their own schedules and choose worse
 ones, because a slot is too coarse to say who is reachable inside a service-time promise. A
@@ -126,11 +126,27 @@ slot-level Benders lower bound bounds the slot problem and says nothing rigorous
 minute-level problem.* Reporting one against minute-level optimality would be a claim the
 construction does not support.
 
-**Outstanding, and it blocks submission:** the framing *aggregate first stage + fine-grained
-dual-compatible recourse + decision-level cost quantified* has not been checked against the
-discretisation-error literature in scheduling. Discretisation error there is well-trodden;
-**this combination may not be.** The novelty claim is contingent on that check, which is the
-one open item requiring no solver and no code.
+**The literature check is done (D69), and it removes the headline claim.** Discretisation
+error in vehicle scheduling is not only well-trodden, it has an **exact** treatment in this
+exact family: Dynamic Discretization Discovery for the multi-depot vehicle scheduling problem
+with trip shifting, whose premise — letting departure times deviate a few minutes from the
+timetable so new trip combinations become feasible — is ours almost verbatim. So *"slot
+aggregation misprices its own schedules and nobody notices"* is answerable with one citation
+and **must not be written**. Separately, the valuation/decision split is routine practice in
+energy-systems time-series aggregation, and aggregation error bounds date to Zipkin (1980);
+neither is ours to introduce.
+
+**What survives is a combination, and it is narrower:** (i) here the aggregation
+**over-approximates**, where DDD's coarse model is a *relaxation* — so the refinement
+machinery does not transfer, and that same property is why a slot-level bound says nothing
+about the minute-level problem; (ii) the fine resolution is confined to the **recourse**, and
+is dual-compatible with a coarse master that never changes, where DDD refines the network and
+therefore the master; (iii) grid refinement does not substitute for it and is not monotone
+(D55), and the placement convention moves the gain 0–49% (D54). Item (ii) is load-bearing and
+is the one D69's search covers least well.
+
+**Residual, and it no longer blocks:** read both DDD papers in full before writing the
+related-work paragraph, and confirm neither confines refinement to the recourse.
 
 ---
 
@@ -193,7 +209,7 @@ The four documents are genuinely absent from this repository — including
 
 ## 5. What is open
 
-Two levers, and one literature check. Everything else on the bound is closed **by
+Two levers, and one reading task (D69 §8: the two DDD papers in full). Everything else on the bound is closed **by
 measurement** and must not be re-attempted: cumulative-prefix symmetry; `b >= L·yRET` (M1);
 branch-and-Benders-cut for the *lower* bound; tightening `per_iteration_mipgap`; the
 per-iteration time limit as a tuning knob; Dantzig–Wolfe on the vehicle index; window trip
@@ -394,8 +410,10 @@ solved.
   results, not performance results.
 - **No competitiveness number moves.** HiGHS is not CPLEX; every timing in `docs/` stands on
   the CPLEX run that produced it.
-- **The literature check in §2 claim 3 has not been done**, and the novelty claim depends on
-  it.
+- **The literature check (D69) is a search-level check, not a systematic review.** Abstracts
+  were read, not full texts; no bibliographic database was queried; and the one item it
+  covers least well — a fine recourse dual-compatible with a coarse master — is the one the
+  narrowed novelty claim rests on. Absence of evidence there is weak evidence.
 - **Neither live lever in §5 is implemented**, so neither falsifier has been exercised.
 - **Scope limits stand as limits, not as an argument to keep going:** one instance size, four
   scenarios, a single monolith baseline, and scenario scaling never tested.
