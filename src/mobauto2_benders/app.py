@@ -294,6 +294,13 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
 
     sp["lp_solver"] = cfg.solver.subproblem_solver
     sp["multi_cuts_by_scenario"] = bool(cfg.subproblem.multi_cuts_by_scenario)
+    # The resolved generator (S1b). config.py collapses cut_mode and the legacy
+    # boolean pair into exactly one of mw / dual / finite_difference, so the
+    # dispatch reads one value instead of guessing a precedence between two flags.
+    sp["cut_mode"] = str(cfg.subproblem.cut_mode)
+    sp["acknowledge_no_lower_bound"] = bool(
+        cfg.subproblem.acknowledge_no_lower_bound
+    )
     sp["use_magnanti_wong"] = bool(cfg.subproblem.use_magnanti_wong)
     sp["mw_core_alpha"] = float(cfg.subproblem.mw_core_alpha)
     sp["mw_core_eps"] = float(getattr(cfg.subproblem, "mw_core_eps", 1e-3))

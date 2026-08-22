@@ -206,6 +206,29 @@ class MasterSection:
 @dataclass(slots=True)
 class SubproblemSection:
     multi_cuts_by_scenario: bool = True
+    # Which generator builds the cut. One key with three values, replacing two booleans
+    # that could not express three mutually exclusive modes (S1b).
+    #
+    #   mw                 Magnanti-Wong Pareto-optimal dual on the optimal face
+    #   dual               plain capacity duals -- valid, not Pareto-optimal. The Level
+    #                      A/B ablation baseline the formal formulation asks for
+    #   finite_difference  perturbation estimates. NOT a certified lower bound
+    #                      (handout 75/76); requires acknowledge_no_lower_bound
+    #
+    # The old form was `use_magnanti_wong` + `use_dual_slopes`, dispatched as
+    # `if mw: ... elif dual: ... else: fdiff`. With both true -- which every shipped
+    # config sets -- the `dual` branch was UNREACHABLE, so the ablation baseline could not
+    # be run at all (AUDIT_v4 3.5). Two booleans cannot carry three exclusive states
+    # without one of them becoming dead, which is what happened.
+    #
+    # `None` means "derive from the legacy booleans", so no existing config changes
+    # behaviour. Setting both forms is refused rather than silently resolved.
+    cut_mode: str | None = None
+    # Required to run `finite_difference` (S7). That mode produces cuts with no
+    # lower-bound guarantee, and the runtime already drops `best_lb` when it is used --
+    # but only after the run has spent its budget. Refusing at load turns an hour of
+    # wasted solve into an immediate error.
+    acknowledge_no_lower_bound: bool = False
     use_magnanti_wong: bool = False
     mw_core_alpha: float = 0.3
     mw_core_eps: float = 1e-3
@@ -579,6 +602,10 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
         },
         "subproblem": {
             "multi_cuts_by_scenario": sub_params.get("multi_cuts_by_scenario", True),
+            "cut_mode": sub_params.get("cut_mode"),
+            "acknowledge_no_lower_bound": sub_params.get(
+                "acknowledge_no_lower_bound", False
+            ),
             "use_magnanti_wong": sub_params.get("use_magnanti_wong", False),
             "mw_core_alpha": sub_params.get("mw_core_alpha", 0.3),
             "mw_core_eps": sub_params.get("mw_core_eps", 1e-3),
@@ -1100,6 +1127,8 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         sub_raw,
         {
             "multi_cuts_by_scenario",
+            "cut_mode",
+            "acknowledge_no_lower_bound",
             "use_magnanti_wong",
             "mw_core_alpha",
             "mw_core_eps",
@@ -1160,6 +1189,89 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "cannot substitute: a slot window is not an exact number of minutes, which "
             "is the entire point of evaluating at minute resolution (D51)."
         )
+    # Resolve the cut generator (S1b).
+    #
+    # `cut_mode` is the one key. The legacy pair `use_magnanti_wong` / `use_dual_slopes`
+    # is still accepted so no shipped config changes behaviour, and is resolved with the
+    # dispatch's own precedence: mw wins, then dual, then finite differences. That
+    # precedence is exactly what made `dual` unreachable -- every shipped config sets
+    # BOTH booleans true -- so the enum exists to let it be selected at all.
+    _CUT_MODES = ("mw", "dual", "finite_difference")
+    _cut_mode_raw = sub_raw.get("cut_mode")
+    _legacy_mw = "use_magnanti_wong" in sub_raw
+    _legacy_dual = "use_dual_slopes" in sub_raw
+    if _cut_mode_raw is not None and (_legacy_mw or _legacy_dual):
+        raise ValueError(
+            "subproblem.cut_mode is set alongside use_magnanti_wong/use_dual_slopes. "
+            "They state the same choice in two forms and resolving both would mean "
+            "picking a winner silently. Use cut_mode alone: "
+            f"one of {', '.join(_CUT_MODES)}."
+        )
+    if _cut_mode_raw is None:
+        _resolved_cut_mode = (
+            "mw"
+            if bool(sub_raw.get("use_magnanti_wong", False))
+            else ("dual" if bool(sub_raw.get("use_dual_slopes", False)) else "finite_difference")
+        )
+    else:
+        _resolved_cut_mode = str(_cut_mode_raw).strip().lower()
+        if _resolved_cut_mode not in _CUT_MODES:
+            raise ValueError(
+                f"subproblem.cut_mode must be one of {', '.join(_CUT_MODES)}, got "
+                f"{_cut_mode_raw!r}"
+            )
+
+    # finite_difference produces cuts with NO lower-bound guarantee (S7).
+    #
+    # The runtime already drops `best_lb` when this mode is used, which is correct and
+    # tested -- but only after the run has spent its budget. A run that cannot produce a
+    # bound should fail before it spends an hour not producing one. Requiring an explicit
+    # acknowledgement also stops the mode being reached by ACCIDENT, which is how it was
+    # reachable before: it is the `else` branch of the legacy booleans, so a config that
+    # simply omitted both landed on it.
+    if _resolved_cut_mode == "finite_difference" and not bool(
+        sub_raw.get("acknowledge_no_lower_bound", False)
+    ):
+        raise ValueError(
+            "subproblem cut generation resolves to 'finite_difference', which produces "
+            "cuts with no lower-bound guarantee: a perturbation estimate bounds the "
+            "recourse from ABOVE, so a cut built from it can exclude the optimum "
+            "(handout 75/76). The run would complete and then report no lower bound. "
+            "Set subproblem.cut_mode to 'mw' or 'dual', or set "
+            "subproblem.acknowledge_no_lower_bound: true to run it as a diagnostic. "
+            "Note this mode is also the fall-through of the legacy "
+            "use_magnanti_wong/use_dual_slopes pair, so omitting both selects it."
+        )
+
+    # Magnanti-Wong cannot be used with the minute recourse.
+    #
+    # `solve_mw_dual` builds the dual of the SLOT primal: its dual-feasibility rows are
+    # `alpha[t] + pi[tau] <= (tau - t)` over slot arc pairs. The minute recourse's primal
+    # has demand rows per arrival MINUTE and arc costs
+    # `(departure_minute - arrival_minute)/delta`, so the two are duals of different
+    # linear programs. A dual that is feasible for the slot LP carries no weak-duality
+    # relation to the minute recourse, and a cut built from it can OVERESTIMATE -- the
+    # one error that excludes the optimum, and D30's exact failure mode.
+    #
+    # Refused at load rather than repaired at runtime because there is nothing to repair:
+    # the MW auxiliary LP would have to be rebuilt over minute arcs to mean anything, and
+    # that is F2's territory, not a fallback. Nothing previously guarded this;
+    # configs/phase1/rq5_benders_minute_p56.yaml escapes it only by happening to set
+    # use_magnanti_wong: false.
+    if _recourse_resolution == "minute" and bool(
+        sub_raw.get("use_magnanti_wong", False)
+    ):
+        raise ValueError(
+            "subproblem.use_magnanti_wong is true with recourse_resolution='minute'. "
+            "solve_mw_dual is the dual of the SLOT primal -- its rows are "
+            "alpha[t] + pi[tau] <= (tau-t) over slot arcs -- while the minute recourse's "
+            "primal has one demand row per arrival minute. They are duals of different "
+            "LPs, so a dual optimal for one bears no weak-duality relation to the other "
+            "and the cut built from it can overestimate the recourse, which is what "
+            "excludes the optimum (D30). Set use_magnanti_wong: false and "
+            "use_dual_slopes: true to run the minute recourse on plain capacity duals, "
+            "which are valid at minute resolution because they come from that LP."
+        )
     if _has_p_minutes:
         _p_minutes_val = _ensure_float(
             _disallow_expr(sub_raw.get("p_minutes"), "subproblem.p_minutes"),
@@ -1183,6 +1295,11 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         multi_cuts_by_scenario=_ensure_bool(
             sub_raw.get("multi_cuts_by_scenario", True),
             "subproblem.multi_cuts_by_scenario",
+        ),
+        cut_mode=_resolved_cut_mode,
+        acknowledge_no_lower_bound=_ensure_bool(
+            sub_raw.get("acknowledge_no_lower_bound", False),
+            "subproblem.acknowledge_no_lower_bound",
         ),
         use_magnanti_wong=_ensure_bool(
             sub_raw.get("use_magnanti_wong", False), "subproblem.use_magnanti_wong"

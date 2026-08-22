@@ -302,6 +302,33 @@ passed vacuously** — `intercept_source: imposed_no_dual`.
 | `dual` (`use_magnanti_wong: false, use_dual_slopes: true`) | **yes** | `dm_out[τ] = S·pi_out[τ]` from `solve_subproblem`. Not Pareto-optimal; the natural ablation baseline. Still not reachable *by configuration* — `AUDIT_v4` §3.5 — but the same generator is now reachable as the MW fallback |
 | `finite_difference` | **no** | diagnostic only; never for a reported result. The only remaining mode without a guarantee |
 
+**Mode selection is `subproblem.cut_mode`** — `mw | dual | finite_difference` — replacing
+`use_magnanti_wong` + `use_dual_slopes`. Two booleans cannot carry three mutually
+exclusive states without one going dead, and one did: the dispatch is
+`if mw … elif dual … else fdiff`, every shipped config set **both** true, so `dual` was
+unreachable (`AUDIT_v4` §3.5). The legacy pair is still accepted, resolved with the same
+precedence, so no shipped config changes behaviour; setting both forms is refused.
+
+**`finite_difference` requires `subproblem.acknowledge_no_lower_bound: true`.** It has no
+lower-bound guarantee, the runtime already drops `best_lb` when it is used, and it is the
+*fall-through* of the legacy pair — so a config that simply omitted both booleans landed on
+it silently and found out an hour later. Refused at load instead.
+
+**Magnanti–Wong is refused with `recourse_resolution: minute`.** `solve_mw_dual` builds the
+dual of the **slot** primal (`α[t] + π[τ] ≤ (τ−t)` over slot arcs); the minute recourse's
+primal has one demand row per arrival **minute**. They are duals of different LPs, so a
+dual optimal for one carries no weak-duality relation to the other and a cut from it can
+overestimate the recourse — D30's failure mode. Nothing guarded this before;
+`configs/phase1/rq5_benders_minute_p56.yaml` escaped it only by setting the flag false.
+
+**Multi-scenario validity aggregation distinguishes NO_CUT from UNKNOWN.** A scenario whose
+θ early-exit fires produces no cut and carries no mode; reading that absence as `unknown`
+made the conjunction false and dropped the run's lower bound (D64 §4b). The aggregate is
+valid when every scenario that *did* produce a cut was valid; abstentions are counted in the
+label (`mw+no_cut(1)`), not folded in as a mode. Still fail-closed: a cut with no stated
+provenance is genuinely UNKNOWN and still poisons the aggregate, and zero contributors is
+not valid.
+
 **The mapping from mode to guarantee is one table**, `CUT_MODE_VALID_LOWER_BOUND` in
 `subproblem_impl.py`, and an unlisted mode raises rather than defaulting. It used to be a
 boolean set by hand in each dispatch branch, which is how the branch and the flag came to

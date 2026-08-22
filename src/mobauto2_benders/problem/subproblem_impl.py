@@ -95,6 +95,35 @@ class MWDual:
     alpha_ret: Dict[int, float] = field(default_factory=dict)
 
 
+def resolve_cut_mode(params: Mapping[str, Any]) -> str:
+    """The generator this run uses, as one value (S1b).
+
+    `cut_mode` is authoritative when present; `config.py` always sets it. The legacy
+    `use_magnanti_wong` / `use_dual_slopes` pair is honoured only for callers that build
+    params by hand -- tests and scripts -- and is resolved with the dispatch's historical
+    precedence: mw, then dual, then finite differences.
+
+    That precedence is why the enum exists. Every shipped config set BOTH booleans true,
+    so `dual` -- the valid, non-Pareto ablation baseline the formal formulation's Level
+    A/B needs -- was unreachable (AUDIT_v4 3.5). Two booleans cannot carry three
+    mutually exclusive states without one going dead.
+    """
+    mode = params.get("cut_mode")
+    if mode:
+        mode = str(mode).strip().lower()
+        if mode not in CUT_MODE_VALID_LOWER_BOUND and mode != "mw_dual_fallback":
+            raise RuntimeError(
+                f"cut_mode is {mode!r}, which no generator implements. Expected one of "
+                f"{', '.join(sorted(CUT_MODE_VALID_LOWER_BOUND))}."
+            )
+        return mode
+    if bool(params.get("use_magnanti_wong", False)):
+        return "mw"
+    if bool(params.get("use_dual_slopes", False)):
+        return "dual"
+    return "finite_difference"
+
+
 def slopes_from_capacity_duals(
     duals: Mapping[str, Any], S: float, T: int
 ) -> MWDual:
@@ -530,7 +559,8 @@ class ProblemSubproblem(Subproblem):
         active_taus = sorted(t_idx) if t_idx else list(range(T))
 
         # Optional Magnanti–Wong selection
-        mw_enabled: bool = bool(params.get("use_magnanti_wong", False))
+        _cut_mode_cfg: str = resolve_cut_mode(params)
+        mw_enabled: bool = _cut_mode_cfg == "mw"
         core_point = params.get("mw_core_point") or {}
         Ybar_out = (
             list(core_point.get("Yout", [])) if isinstance(core_point, dict) else []
@@ -1054,7 +1084,7 @@ class ProblemSubproblem(Subproblem):
                 R_ret = (R_ret + [0.0] * T)[:T]
 
                 # If using dual slopes, force at least one layer per time to create capacity constraints
-                use_dual = bool(params.get("use_dual_slopes", False))
+                use_dual = _cut_mode_cfg == "dual"
                 K_out_lp = (
                     [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
                 )
@@ -1414,7 +1444,7 @@ class ProblemSubproblem(Subproblem):
                 )
 
             # Phase 2: generate cuts (unless early-exit above)
-            use_dual = bool(params.get("use_dual_slopes", False))
+            use_dual = _cut_mode_cfg == "dual"
             K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
             K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret
             for rec in scenario_records:
@@ -1730,25 +1760,51 @@ class ProblemSubproblem(Subproblem):
                 agg_cut_time = agg["timing_cutgen_s"][idx_max]
             else:
                 raise ValueError("ub_aggregation must be one of 'mean', 'sum', 'max'")
+            # A scenario that generated NO cut is not a scenario with an unknown cut.
+            #
+            # The theta early-exit skips cut generation for a scenario whose theta already
+            # covers its recourse, and that scenario's diagnostics therefore carry neither
+            # `cut_generation_mode` nor `cut_valid_lower_bound`. Reading the absence as
+            # "unknown" made the conjunction False and dropped the run's lower bound --
+            # measured in D64 on `theta_by_scen`, 2 of 96 iterations, reported as
+            # `mixed(mw+unknown)` and `Bounds are heuristic only`.
+            #
+            # `CutValidity.NO_CUT` already names the right semantics: "no cut this
+            # iteration; previously established validity is untouched" (benders/types.py).
+            # So the aggregate is valid when every scenario that DID produce a cut was
+            # valid, and the contributors are what the mode label reports.
+            #
+            # Still fail-closed where it matters: a scenario that produced a cut and said
+            # nothing about it is genuinely UNKNOWN and still poisons the aggregate, and an
+            # aggregate with no contributors at all is not valid.
+            _contributors = [
+                sd for sd in scenario_diags if "cut_valid_lower_bound" in sd
+            ]
+            _abstained = len(scenario_diags) - len(_contributors)
             agg_cut_lb_valid = (
-                all(
-                    bool(sd.get("cut_valid_lower_bound", False))
-                    for sd in scenario_diags
-                )
-                if scenario_diags
+                all(bool(sd["cut_valid_lower_bound"]) for sd in _contributors)
+                if _contributors
                 else False
             )
             # Report which cut generator produced this aggregate. A single label when
-            # every scenario agreed, otherwise "mixed(a+b)" -- never silently blank,
-            # since a reported number must state the mode that produced it.
+            # every contributing scenario agreed, otherwise "mixed(a+b)" -- never silently
+            # blank, since a reported number must state the mode that produced it.
+            # Abstaining scenarios are counted, not folded in as a mode: "no_cut(1)" says
+            # one scenario contributed nothing, which is a different fact from a cut whose
+            # provenance is unknown.
             _modes = sorted(
-                {str(sd.get("cut_generation_mode", "unknown")) for sd in scenario_diags}
+                {
+                    str(sd.get("cut_generation_mode", "unknown"))
+                    for sd in _contributors
+                }
             )
             agg_cut_mode = (
                 _modes[0]
                 if len(_modes) == 1
-                else (f"mixed({'+'.join(_modes)})" if _modes else "unknown")
+                else (f"mixed({'+'.join(_modes)})" if _modes else "no_cut")
             )
+            if _abstained:
+                agg_cut_mode = f"{agg_cut_mode}+no_cut({_abstained})"
 
             if not multi_cuts:
                 # Weighted average of constants and coefficients
@@ -1876,7 +1932,7 @@ class ProblemSubproblem(Subproblem):
                 R_ret = (R_ret + [0.0] * T)[:T]
 
             # If using dual slopes, ensure at least one layer to create capacity constraints
-            use_dual = bool(params.get("use_dual_slopes", False))
+            use_dual = _cut_mode_cfg == "dual"
             K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
             K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret
             sp_params = SPParams(
