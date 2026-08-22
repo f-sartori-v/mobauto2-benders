@@ -13,10 +13,332 @@ except Exception:  # pragma: no cover - optional dependency
     _yaml = None
 
 import pyomo.environ as pyo
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..benders.subproblem import Subproblem
 from ..benders.types import Candidate, Cut, CutType, SubproblemResult
+from ..signature import project_core_point
+
+
+# Whether a cut-generation mode carries a lower-bound guarantee.
+#
+# One table rather than a boolean set by hand in each dispatch branch. The branches
+# and the flag were separate facts about the same thing, and they disagreed: the MW
+# fallback set `cut_lb_valid = False` in one place while `solver.py` read the missing
+# diagnostics key as True in another, which is the defect `CutValidity` was introduced
+# to describe (benders/types.py). A mode whose name is not in this table raises rather
+# than defaulting, so adding a generator without deciding its guarantee is not possible.
+#
+#   mw                 Pareto-optimal dual on the optimal face. Valid.
+#   mw_dual_fallback   MW declined; plain capacity duals instead. Valid but not Pareto
+#                      optimal -- validity comes from dual feasibility (handout 77).
+#   dual               plain capacity duals by configuration. The Level A/B baseline.
+#   finite_difference  perturbation estimates. NOT a certified lower bound
+#                      (handout 75/76): a heuristic subproblem value bounds Q(x) from
+#                      ABOVE, so a cut built from it can exclude the optimum.
+CUT_MODE_VALID_LOWER_BOUND: Dict[str, bool] = {
+    "mw": True,
+    "mw_dual_fallback": True,
+    "dual": True,
+    "finite_difference": False,
+}
+
+
+def cut_mode_carries_lower_bound(mode: str) -> bool:
+    """Look up a mode's lower-bound guarantee, refusing unknown modes.
+
+    Fail-closed is not enough here: defaulting an unrecognised mode to False would
+    silently drop `best_lb` for a run whose cuts may be perfectly valid, and
+    defaulting to True would report a bound that nothing certified. Both are wrong
+    answers to "I do not know", so the only correct response is to refuse.
+    """
+    try:
+        return CUT_MODE_VALID_LOWER_BOUND[str(mode)]
+    except KeyError:
+        raise RuntimeError(
+            f"cut generation reported mode {mode!r}, which has no recorded "
+            "lower-bound guarantee. Add it to CUT_MODE_VALID_LOWER_BOUND with an "
+            "explicit decision; neither True nor False is a safe default for a "
+            "generator whose validity nobody has stated."
+        ) from None
+
+
+@dataclass(frozen=True, slots=True)
+class MWDual:
+    """One dual solution of the passenger-assignment LP, as a cut needs it.
+
+    `dm_d[tau]` are the cut slopes, already scaled by seats (`S * pi_d[tau] <= 0`).
+
+    `intercept_d` is the demand side of the dual objective, `sum_i alpha_d[i] * R_d[i]`,
+    as a SCALAR. It is a scalar rather than a vector because the index of the demand
+    rows is not the index of the capacity rows and need not be: the slot recourse has
+    one demand row per slot, the minute recourse one per arrival MINUTE (D51), and the
+    cut only ever needs the sum. Making the scalar the interface is what lets both
+    resolutions share this code -- and its absence is what broke the minute path when
+    S2 started deriving the intercept from a slot-indexed `alpha` the minute LP does
+    not have.
+
+    `alpha_d` is kept for diagnostics only, keyed by whatever the demand rows are keyed
+    by. Never sum it against a slot-indexed demand vector.
+
+    Carried as one object rather than loose dicts because the slopes and the intercept
+    they must agree with are only meaningful together: `derive_cut_intercepts` checks
+    one against the other, and a caller holding slopes from one solve and an intercept
+    from another would pass that check while producing a cut tight at nothing.
+    """
+
+    dm_out: Dict[int, float]
+    dm_ret: Dict[int, float]
+    intercept_out: float
+    intercept_ret: float
+    alpha_out: Dict[int, float] = field(default_factory=dict)
+    alpha_ret: Dict[int, float] = field(default_factory=dict)
+
+
+def resolve_cut_mode(params: Mapping[str, Any]) -> str:
+    """The generator this run uses, as one value (S1b).
+
+    `cut_mode` is authoritative when present; `config.py` always sets it. The legacy
+    `use_magnanti_wong` / `use_dual_slopes` pair is honoured only for callers that build
+    params by hand -- tests and scripts -- and is resolved with the dispatch's historical
+    precedence: mw, then dual, then finite differences.
+
+    That precedence is why the enum exists. Every shipped config set BOTH booleans true,
+    so `dual` -- the valid, non-Pareto ablation baseline the formal formulation's Level
+    A/B needs -- was unreachable (AUDIT_v4 3.5). Two booleans cannot carry three
+    mutually exclusive states without one going dead.
+    """
+    mode = params.get("cut_mode")
+    if mode:
+        mode = str(mode).strip().lower()
+        if mode not in CUT_MODE_VALID_LOWER_BOUND and mode != "mw_dual_fallback":
+            raise RuntimeError(
+                f"cut_mode is {mode!r}, which no generator implements. Expected one of "
+                f"{', '.join(sorted(CUT_MODE_VALID_LOWER_BOUND))}."
+            )
+        return mode
+    if bool(params.get("use_magnanti_wong", False)):
+        return "mw"
+    if bool(params.get("use_dual_slopes", False)):
+        return "dual"
+    return "finite_difference"
+
+
+def slopes_from_capacity_duals(
+    duals: Mapping[str, Any], S: float, T: int
+) -> MWDual:
+    """Build the plain-dual (non-Pareto) cut data straight from `solve_subproblem`.
+
+    `dm_d[tau] = S * pi_d[tau]`, with `pi <= 0` for a `<=` row in a minimisation.
+    This is a **valid** lower-bounding cut -- validity comes from dual feasibility
+    (handout 77) -- it is simply not Pareto-optimal. That makes it the correct
+    fallback when Magnanti-Wong declines, and the ablation baseline the formal
+    formulation's Level A/B comparison needs.
+    """
+    pi_out = dict(duals.get("pi_OUT", {}) or {})
+    pi_ret = dict(duals.get("pi_RET", {}) or {})
+    # The demand side of the dual objective, as a scalar. Both recourse resolutions
+    # publish it under these keys; neither is asked to express its demand duals on the
+    # slot index, because the minute recourse's are keyed by arrival minute (D51) and
+    # summing those against a slot-indexed demand vector is meaningless.
+    if "intercept_out" not in duals or "intercept_ret" not in duals:
+        raise KeyError(
+            "the subproblem returned duals without 'intercept_out'/'intercept_ret'. "
+            "That scalar is the demand side of the dual objective, sum_i alpha[i]*R[i], "
+            "and the cut constant is derived from it (S2). A recourse that cannot "
+            "produce it cannot produce a cut whose tightness is checkable, so it must "
+            "say so rather than let the constant be imposed silently."
+        )
+    return MWDual(
+        dm_out={t: float(S) * float(pi_out.get(t, 0.0)) for t in range(T)},
+        dm_ret={t: float(S) * float(pi_ret.get(t, 0.0)) for t in range(T)},
+        intercept_out=float(duals["intercept_out"]),
+        intercept_ret=float(duals["intercept_ret"]),
+        alpha_out=dict(duals.get("alpha_OUT", {}) or {}),
+        alpha_ret=dict(duals.get("alpha_RET", {}) or {}),
+    )
+
+
+def expand_slopes_to_candidate(
+    candidate: Candidate,
+    dm_out: Mapping[int, float],
+    dm_ret: Mapping[int, float],
+    T: int,
+) -> Tuple[Dict[Tuple[int, int], float], Dict[Tuple[int, int], float]]:
+    """Broadcast per-slot slopes onto the master's per-(q,tau) variable names.
+
+    The slope is identical across `q` by construction -- the recourse sees only
+    `Y_d[tau] = sum_q y_d[q,tau]` (D48/E1) -- which is what makes the master's
+    `aggregate_cuts_by_tau` collapse an identity rather than an approximation.
+    `_assert_q_invariant` enforces it on the other side.
+
+    Extracted because this block was written out four times, twice per dispatch
+    site. Duplicated cut-generation code is how C3 and N6 each stayed invisible
+    for months: a fix applied to one copy leaves the other producing the old cut.
+    """
+    c_out: Dict[Tuple[int, int], float] = {}
+    c_ret: Dict[Tuple[int, int], float] = {}
+    for name in candidate.keys():
+        if not isinstance(name, str):
+            continue
+        if name.startswith("yOUT["):
+            target, slopes = c_out, dm_out
+        elif name.startswith("yRET["):
+            target, slopes = c_ret, dm_ret
+        else:
+            continue
+        inside = name[name.find("[") + 1 : name.find("]")]
+        q_str, tau_str = inside.split(",")
+        q = int(q_str.strip())
+        tau = int(tau_str.strip())
+        if 0 <= tau < T:
+            target[(q, tau)] = float(slopes.get(tau, 0.0))
+    return c_out, c_ret
+
+
+def derive_cut_intercepts(
+    mw: MWDual,
+    y_inc_out: Iterable[float],
+    y_inc_ret: Iterable[float],
+    ub_out: float,
+    ub_ret: float,
+    T: int,
+    eps_dual: float,
+) -> Tuple[float, float, Dict[str, float]]:
+    """Derive the cut intercepts from the demand duals, and verify strong duality.
+
+    Returns `(a_out, a_ret, diagnostics)` with `a_d = sum_t alpha_d[t] * R_d[t]`.
+
+    The cut for direction `d` is `theta_d >= a_d + sum_tau dm_d[tau] * Y_d[tau]`.
+    At the incumbent `Y_d = C_d / S` this evaluates to
+    `sum_t alpha_d R_d + sum_tau C_d[tau] pi_d[tau]`, which strong duality equates
+    to `Q_d(Y_inc)`. So the tightness property the formal formulation checks in 20.1
+    now *follows* from the dual rather than being imposed.
+
+    Raises when the two disagree by more than `eps_dual`. That disagreement is the
+    live version of formulation 20.3, and it is the detector this code did not have:
+    the previous intercept was written as `ub - sum(dm*y_inc)`, so 20.1 could not
+    fail, and an overestimating cut -- the only kind that can exclude the optimum,
+    and the D30 defect -- had nothing watching for it.
+    """
+    y_inc_out = list(y_inc_out)
+    y_inc_ret = list(y_inc_ret)
+
+    a_out = float(mw.intercept_out)
+    a_ret = float(mw.intercept_ret)
+
+    imposed_out = float(ub_out) - sum(
+        float(mw.dm_out.get(tau, 0.0)) * float(y_inc_out[tau]) for tau in range(T)
+    )
+    imposed_ret = float(ub_ret) - sum(
+        float(mw.dm_ret.get(tau, 0.0)) * float(y_inc_ret[tau]) for tau in range(T)
+    )
+
+    d_out = a_out - imposed_out
+    d_ret = a_ret - imposed_ret
+    diagnostics = {
+        "intercept_out_from_alpha": float(a_out),
+        "intercept_ret_from_alpha": float(a_ret),
+        "intercept_out_imposed": float(imposed_out),
+        "intercept_ret_imposed": float(imposed_ret),
+        "intercept_gap_out": float(d_out),
+        "intercept_gap_ret": float(d_ret),
+        "intercept_eps_dual": float(eps_dual),
+    }
+    if abs(d_out) > eps_dual or abs(d_ret) > eps_dual:
+        raise RuntimeError(
+            "strong duality failed on the selected dual: the intercept derived from "
+            f"alpha is OUT={a_out:.10g} / RET={a_ret:.10g}, while Q(y) - sum(dm*y_inc) "
+            f"gives OUT={imposed_out:.10g} / RET={imposed_ret:.10g} "
+            f"(diff OUT={d_out:.3g}, RET={d_ret:.3g}, tol={eps_dual:.3g}). "
+            "Either the dual LP does not represent the dual of the primal (a wrong "
+            "row, a wrong sign, a stale right-hand side), or the primal objective "
+            "used to anchor the cut is not the one the duals came from. A cut built "
+            "through this disagreement can overestimate the recourse, which is the "
+            "one error that excludes the optimum (D30)."
+        )
+    return a_out, a_ret, diagnostics
+
+
+def _tightness_tolerance(
+    eps_cut: float, target_val: float, dual_diag: Mapping[str, float]
+) -> float:
+    """Tolerance for "the assembled cut equals Q(y) at the incumbent" (20.1).
+
+    Must be at least as loose as the slack the cut generator is ALLOWED to have, or
+    the code rejects duals it just admitted. That inconsistency was live and hidden:
+
+      - `solve_mw_dual` states the optimal face as an inequality with
+        `face_tol = max(1e-6, 1e-9*|Q|)` of slack, deliberately, because a float
+        equality against a separately computed primal optimum is infeasible for a
+        few ulps of disagreement.
+      - this check used `eps_cut * max(1, |Q|)`, i.e. `1e-8 * 22.4 = 2.24e-7` on the
+        Phase 5 instance.
+
+    So MW could legitimately return a dual 1e-6 inside the face and the tightness
+    check would refuse the cut built from it. Nothing noticed, because the intercept
+    was IMPOSED as `Q(y) - sum(dm*y_inc)`, which made this check an identity that
+    could not fail (S2). Deriving the intercept from alpha exposed it immediately:
+    the Phase 5 MW arm aborted with a measured gap of exactly -1e-06 = face_tol.
+
+    The two jobs are now separated. `derive_cut_intercepts` checks the CONSTANT
+    against the duals at `eps_dual`, which is the tolerance that has to admit the
+    face slack. This function checks the ASSEMBLED cut -- constant plus broadcast
+    slopes -- so its remaining job is to catch a bad broadcast, and it inherits
+    `eps_dual` so it cannot fire on a constant already accepted upstream.
+    """
+    floor = float(eps_cut) * max(1.0, abs(float(target_val)))
+    eps_dual = float(dual_diag.get("intercept_eps_dual", 0.0) or 0.0)
+    return max(floor, eps_dual)
+
+
+def _cut_intercepts(
+    mw: MWDual | None,
+    *,
+    y_inc_out: Iterable[float],
+    y_inc_ret: Iterable[float],
+    ub_out: float,
+    ub_ret: float,
+    T: int,
+    ub_val: float,
+    dm_out: Mapping[int, float],
+    dm_ret: Mapping[int, float],
+) -> Tuple[float, float, Dict[str, float]]:
+    """Directional cut intercepts, derived from alpha whenever a dual is available.
+
+    `mw is None` only on the `finite_difference` path, which has no duals to derive
+    from and is already marked as not a valid lower bound. There the intercept must
+    still be imposed, and the strong-duality check is meaningless because there is
+    no dual to check -- so it is skipped rather than passed vacuously.
+    """
+    if mw is None:
+        y_inc_out = list(y_inc_out)
+        y_inc_ret = list(y_inc_ret)
+        a_out = float(ub_out) - sum(
+            float(dm_out.get(tau, 0.0)) * float(y_inc_out[tau]) for tau in range(T)
+        )
+        a_ret = float(ub_ret) - sum(
+            float(dm_ret.get(tau, 0.0)) * float(y_inc_ret[tau]) for tau in range(T)
+        )
+        return a_out, a_ret, {"intercept_source": "imposed_no_dual"}
+
+    # Tolerance must exceed the optimal-face slack. `solve_mw_dual` admits duals
+    # within `face_tol = max(1e-6, 1e-9*|ub|)` of the face, so a selected dual can
+    # legitimately sit that far inside it, and the derived intercept then differs
+    # from the imposed one by up to the same amount. Anything beyond an order of
+    # magnitude past that slack is a real disagreement, not float noise.
+    eps_dual = max(1e-5, 1e-7 * abs(float(ub_val)))
+    a_out, a_ret, diag = derive_cut_intercepts(
+        mw,
+        y_inc_out=y_inc_out,
+        y_inc_ret=y_inc_ret,
+        ub_out=ub_out,
+        ub_ret=ub_ret,
+        T=T,
+        eps_dual=eps_dual,
+    )
+    diag["intercept_source"] = "alpha"
+    return a_out, a_ret, diag
 
 
 class ProblemSubproblem(Subproblem):
@@ -237,7 +559,8 @@ class ProblemSubproblem(Subproblem):
         active_taus = sorted(t_idx) if t_idx else list(range(T))
 
         # Optional Magnanti–Wong selection
-        mw_enabled: bool = bool(params.get("use_magnanti_wong", False))
+        _cut_mode_cfg: str = resolve_cut_mode(params)
+        mw_enabled: bool = _cut_mode_cfg == "mw"
         core_point = params.get("mw_core_point") or {}
         Ybar_out = (
             list(core_point.get("Yout", [])) if isinstance(core_point, dict) else []
@@ -274,12 +597,54 @@ class ProblemSubproblem(Subproblem):
                 "and still label the cut 'mw'."
             ) from exc
         if core_mass == 0.0 and T > 0:
-            Ybar_out = [1.0 for _ in range(T)]
-            Ybar_ret = [1.0 for _ in range(T)]
+            # Seed, then PROJECT it the same way the solver projects its own core point
+            # (S3). An all-ones seed puts positive Ybar on slots the master fixes to
+            # zero and ignores the trip window, which is exactly the defect S3 removed
+            # from `solver.py`; reintroducing it here would leave the two paths
+            # disagreeing about the region, with this one reachable whenever a caller
+            # supplies no core point.
+            trip_seed = 1
+            try:
+                trip_seed = max(1, int(params.get("trip_slots") or 0))
+            except (TypeError, ValueError):
+                trip_seed = 1
+            if trip_seed <= 1 and params.get("trip_duration_minutes"):
+                try:
+                    trip_seed = max(
+                        1,
+                        math.ceil(
+                            float(params["trip_duration_minutes"])
+                            / max(1.0, float(params.get("slot_resolution") or 1))
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    trip_seed = 1
+            Q_seed = 0
+            try:
+                Q_seed = int(params.get("Q") or 0)
+            except (TypeError, ValueError):
+                Q_seed = 0
+            if Q_seed >= 1:
+                Ybar_out, Ybar_ret = project_core_point(
+                    [1.0] * T, [1.0] * T, Q_seed, trip_seed, 1e-3
+                )
+            else:
+                # No fleet size in the subproblem's params: fall back to the old seed
+                # rather than inventing a Q. Say so, because the selection direction is
+                # then outside the master's region and the resulting cut is still valid
+                # but its Pareto claim is not (16.2).
+                Ybar_out = [1.0 for _ in range(T)]
+                Ybar_ret = [1.0 for _ in range(T)]
+                self._vprint(
+                    "[MW CORE] no fleet size in the subproblem params, so the seeded "
+                    "core point could not be projected into the master region; the cut "
+                    "stays valid but is not Pareto-optimal with respect to a feasible "
+                    "direction."
+                )
             core_seeded = True
             self._vprint(
-                f"[MW CORE] core point arrived all zeros; seeded to all-ones over "
-                f"T={T} so the selection has a direction."
+                f"[MW CORE] core point arrived all zeros; seeded over T={T} "
+                f"(Q={Q_seed}, trip_slots={trip_seed}) so the selection has a direction."
             )
 
         def solve_mw_dual(
@@ -298,10 +663,21 @@ class ProblemSubproblem(Subproblem):
             ub_base: float,
             lp: str,
             lp_opts: dict | None = None,
-        ) -> tuple[dict[int, float], dict[int, float]] | None:
+        ) -> MWDual | None:
             """Solve the dual LP on the optimal face to select a Pareto-optimal dual.
 
-            Returns dm_out[t], dm_ret[t] (slopes w.r.t. sum_y_out[t], sum_y_ret[t]).
+            Returns the slopes `dm_d[t]` w.r.t. `sum_y_d[t]` **and** the demand duals
+            `alpha_d[t]`.
+
+            Alpha is returned because the cut intercept must be *derived* from it,
+            `a_d = sum_t alpha_d[t] * R_d[t]`, rather than imposed as
+            `ub_base - sum dm*y_inc` (S2). The imposed form is algebraically equal only
+            when the selected dual sits exactly on the optimal face; `OptFace` below is
+            deliberately an inequality with `face_tol` of slack, so the imposed intercept
+            can sit up to `face_tol` ABOVE the true dual cut -- an overestimate, the one
+            direction that can exclude the optimum. Deriving it also turns the tightness
+            diagnostic (formal formulation 20.1) from an identity the code writes into a
+            fact about the dual it selected.
             """
             md = pyo.ConcreteModel()
             md.name = "mw_dual"
@@ -445,41 +821,6 @@ class ProblemSubproblem(Subproblem):
                 )
                 return None
 
-            # Weak duality, checked on the dual that was actually selected.
-            #
-            # This is the runtime half of MW verification 3. The offline half is
-            # the underestimation test in tests/test_solver_soundness.py, which
-            # runs on a fixture; nothing checked the property on a live run, and
-            # the tightness assertion cannot substitute for it because
-            # `const = ub_base - sum(dm*y_inc)` makes tightness at the incumbent
-            # an identity the code imposes rather than a fact about the dual.
-            #
-            # Every dual-feasible point satisfies dual_obj <= ub_base. The
-            # OptFace constraint pins it from below at ub_base - face_tol, so the
-            # selected dual must land in a band of width face_tol. Above the band
-            # means the dual LP does not represent the true dual of the primal --
-            # a wrong row, a wrong sign, a stale right-hand side -- and the cut
-            # built from it would OVERESTIMATE the recourse, which is exactly the
-            # cut that excludes the optimum. D30 was that defect and it went six
-            # months unseen; refusing here costs one expression evaluation.
-            try:
-                dual_obj_val = float(pyo.value(dual_obj_expr(md)))
-            except Exception as exc:
-                self._vprint(
-                    f"[MW FAIL] the dual objective is unreadable after load: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-                return None
-            if dual_obj_val > float(ub_base) + face_tol:
-                self._vprint(
-                    "[MW FAIL] weak duality violated by the selected dual: "
-                    f"dual_obj={dual_obj_val:.10g} > ub_base={float(ub_base):.10g} "
-                    f"(tol={face_tol:.3g}). A cut from this dual would overestimate "
-                    "the recourse. Refusing it; the caller falls back and marks the "
-                    "cut NOT a valid lower bound (D39)."
-                )
-                return None
-
             # A pi with no value is a variable the backend never sent to the solver:
             # it carries a zero objective coefficient and appears in no row, which
             # happens at any tau where the candidate schedules no trip in that
@@ -496,21 +837,99 @@ class ProblemSubproblem(Subproblem):
                 return (0.0, False) if raw is None else (float(raw), True)
 
             dm_out, dm_ret = {}, {}
+            pi_out_val, pi_ret_val = {}, {}
+            alpha_out, alpha_ret = {}, {}
             n_seen = 0
             for tau in range(T_):
                 vo, ok_o = _pi(md.pi_OUT[tau])
                 vr, ok_r = _pi(md.pi_RET[tau])
                 n_seen += int(ok_o) + int(ok_r)
+                pi_out_val[tau] = vo
+                pi_ret_val[tau] = vr
                 dm_out[tau] = float(S_cap) * vo
                 dm_ret[tau] = float(S_cap) * vr
+            # Alpha is read with the same discipline, but a missing alpha is NOT
+            # structural the way a missing pi is: `A_OUT_CAP`/`A_RET_CAP` put every
+            # alpha in a row, so the backend always sends them. An unset alpha
+            # therefore means the load did not deliver what it claimed, and the
+            # intercept built from it would silently read 0 -- which is the same
+            # all-zero failure the pi comment above refuses, moved to the constant.
+            for t in range(T_):
+                va, ok_a = _pi(md.a_OUT[t])
+                vb, ok_b = _pi(md.a_RET[t])
+                n_seen += int(ok_a) + int(ok_b)
+                if not (ok_a and ok_b):
+                    self._vprint(
+                        f"[MW FAIL] demand dual alpha unset at t={t} "
+                        f"(OUT set={ok_a}, RET set={ok_b}); every alpha appears in a "
+                        "row, so this is a load failure, not a structural zero. "
+                        "Refusing rather than deriving an intercept from it."
+                    )
+                    return None
+                alpha_out[t] = va
+                alpha_ret[t] = vb
             if n_seen == 0 and T_ > 0:
                 self._vprint(
                     "[MW FAIL] the dual solution carries no values at all "
-                    f"({2 * T_} multipliers, none set); refusing to build an "
+                    f"({4 * T_} multipliers, none set); refusing to build an "
                     "all-zero slope vector from it."
                 )
                 return None
-            return dm_out, dm_ret
+
+            # Weak duality, checked on the dual that was actually selected.
+            #
+            # This is the runtime half of MW verification 3; the offline half is the
+            # underestimation test in tests/test_solver_soundness.py. Every
+            # dual-feasible point satisfies dual_obj <= ub_base, and OptFace pins it
+            # from below at ub_base - face_tol, so the selected dual must land in a
+            # band of width face_tol. Above the band means the dual LP does not
+            # represent the dual of the primal -- a wrong row, a wrong sign, a stale
+            # right-hand side -- and the cut built from it would OVERESTIMATE the
+            # recourse, which is the one error that excludes the optimum. D30 was
+            # that defect and it went six months unseen.
+            #
+            # Computed from the values read above, NOT via `pyo.value(dual_obj_expr)`.
+            # That is not a style preference: `pi_RET[0]` appears in no DF row (no arc
+            # can reach tau=0, since arcs need t+1 <= tau) and carries coefficient 0.0
+            # in both this expression and the MW objective whenever C_ret[0] = 0, so
+            # the backend never sends it and `pyo.value` raises on an uninitialized
+            # var. The check was therefore REFUSING EVERY MW SOLUTION on any instance
+            # with no RET capacity in slot 0 -- measured on the test suite, which
+            # printed "[MW FAIL] the dual objective is unreadable after load". A guard
+            # that fails closed in the wrong place is how C3 hid: MW was reported as
+            # enabled and never ran. Unset multipliers contribute exactly 0.0 here,
+            # which is arithmetic, not a guess -- their coefficient is 0 by the same
+            # structural fact that left them unsent.
+            dual_obj_val = (
+                sum(float(R_out_vec[t]) * alpha_out[t] for t in range(T_))
+                + sum(float(R_ret_vec[t]) * alpha_ret[t] for t in range(T_))
+                + sum(cap_out_rhs[tau] * pi_out_val[tau] for tau in range(T_))
+                + sum(cap_ret_rhs[tau] * pi_ret_val[tau] for tau in range(T_))
+            )
+            if dual_obj_val > float(ub_base) + face_tol:
+                self._vprint(
+                    "[MW FAIL] weak duality violated by the selected dual: "
+                    f"dual_obj={dual_obj_val:.10g} > ub_base={float(ub_base):.10g} "
+                    f"(tol={face_tol:.3g}). A cut from this dual would overestimate "
+                    "the recourse. Refusing it; the caller falls back to the plain "
+                    "capacity duals, which remain a valid lower bound (S1)."
+                )
+                return None
+
+            return MWDual(
+                dm_out=dm_out,
+                dm_ret=dm_ret,
+                # This LP's demand rows ARE slot-indexed, so the scalar is formed here
+                # from its own alpha and the demand it was built with.
+                intercept_out=sum(
+                    float(R_out_vec[t]) * alpha_out[t] for t in range(T_)
+                ),
+                intercept_ret=sum(
+                    float(R_ret_vec[t]) * alpha_ret[t] for t in range(T_)
+                ),
+                alpha_out=alpha_out,
+                alpha_ret=alpha_ret,
+            )
 
         # Finite-difference coefficient builder: for each tau, solve with +S capacity
         def coeffs_by_fdiff(
@@ -665,7 +1084,7 @@ class ProblemSubproblem(Subproblem):
                 R_ret = (R_ret + [0.0] * T)[:T]
 
                 # If using dual slopes, force at least one layer per time to create capacity constraints
-                use_dual = bool(params.get("use_dual_slopes", False))
+                use_dual = _cut_mode_cfg == "dual"
                 K_out_lp = (
                     [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
                 )
@@ -1025,7 +1444,7 @@ class ProblemSubproblem(Subproblem):
                 )
 
             # Phase 2: generate cuts (unless early-exit above)
-            use_dual = bool(params.get("use_dual_slopes", False))
+            use_dual = _cut_mode_cfg == "dual"
             K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
             K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret
             for rec in scenario_records:
@@ -1083,7 +1502,6 @@ class ProblemSubproblem(Subproblem):
                 t_cut0 = time.perf_counter()
                 cut_mode_used = "dual" if use_dual else "finite_difference"
                 proxy_diag: dict[str, Any] = {}
-                cut_lb_valid = True
                 if mw_enabled:
                     # MW-selected dual slopes on optimal face
                     # Ensure at least one capacity layer per tau for dual π variables
@@ -1109,81 +1527,47 @@ class ProblemSubproblem(Subproblem):
                         solver_options,
                     )
                     if dm_pair is None:
-                        # Fallback to finite differences to guarantee nonzero slopes.
-                        # Finite-difference slopes are NOT a provable lower bound on the
-                        # recourse, so the resulting cut cannot support a gap/optimality
-                        # claim -- mark it invalid so solver.py drops best_lb.
-                        c_out_fd, c_ret_fd, dm_out, dm_ret = coeffs_by_fdiff(
-                            ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret
-                        )
-                        cut_mode_used = "mw_fdiff_fallback"
-                        cut_lb_valid = False
+                        # Fall back to the PLAIN DUAL, not to finite differences (S1).
+                        #
+                        # `dm = S*pi` from `solve_subproblem` is already computed and
+                        # already sitting in `duals`. It is a valid lower-bounding cut --
+                        # validity comes from dual feasibility (handout 77) -- merely not
+                        # Pareto-optimal. Finite-difference slopes carry no such
+                        # guarantee, so the previous fallback discarded a valid cut it
+                        # was holding in favour of an invalid one, and then set
+                        # cut_lb_valid = False, which makes solver.py drop best_lb for
+                        # the WHOLE run. One MW hiccup voided the run's bound.
+                        mw_sol = slopes_from_capacity_duals(duals, S, T)
+                        cut_mode_used = "mw_dual_fallback"
                         self._vprint(
-                            f"[SP WARN] scenario={scen_label}: solve_mw_dual returned no solution; "
-                            "fell back to finite differences. Cut is NOT a valid lower bound."
+                            f"[SP WARN] scenario={scen_label}: solve_mw_dual returned no "
+                            "solution; fell back to the plain capacity duals. The cut is "
+                            "still a valid lower bound, but it is not Pareto-optimal."
                         )
                     else:
-                        dm_out, dm_ret = dm_pair
+                        mw_sol = dm_pair
                         cut_mode_used = "mw"
-                    # Expand to per-(q,t)
-                    c_out_map: Dict[tuple[int, int], float] = {}
-                    c_ret_map: Dict[tuple[int, int], float] = {}
-                    for name in candidate.keys():
-                        if not isinstance(name, str):
-                            continue
-                        if name.startswith("yOUT["):
-                            inside = name[name.find("[") + 1 : name.find("]")]
-                            q_str, tau_str = inside.split(",")
-                            q = int(q_str.strip())
-                            tau = int(tau_str.strip())
-                            if 0 <= tau < T:
-                                c_out_map[(q, tau)] = dm_out.get(tau, 0.0)
-                        elif name.startswith("yRET["):
-                            inside = name[name.find("[") + 1 : name.find("]")]
-                            q_str, tau_str = inside.split(",")
-                            q = int(q_str.strip())
-                            tau = int(tau_str.strip())
-                            if 0 <= tau < T:
-                                c_ret_map[(q, tau)] = dm_ret.get(tau, 0.0)
+                    dm_out, dm_ret = mw_sol.dm_out, mw_sol.dm_ret
+                    c_out_map, c_ret_map = expand_slopes_to_candidate(
+                        candidate, dm_out, dm_ret, T
+                    )
                 elif use_dual:
-                    pi_out = dict(duals.get("pi_OUT", {}))
-                    pi_ret = dict(duals.get("pi_RET", {}))
-                    # Duals on capacity (<=) constraints in Pyomo have negative sign for binding constraints
-                    # Build supporting hyperplane slopes consistent with finite differences: dm should be ≤ 0
-                    dm_out = {
-                        int(t): float(S) * float(pi_out.get(int(t), 0.0))
-                        for t in range(T)
-                    }
-                    dm_ret = {
-                        int(t): float(S) * float(pi_ret.get(int(t), 0.0))
-                        for t in range(T)
-                    }
-                    # Expand to per-(q,t)
-                    c_out_map: Dict[tuple[int, int], float] = {}
-                    c_ret_map: Dict[tuple[int, int], float] = {}
-                    for name in candidate.keys():
-                        if not isinstance(name, str):
-                            continue
-                        if name.startswith("yOUT["):
-                            inside = name[name.find("[") + 1 : name.find("]")]
-                            q_str, tau_str = inside.split(",")
-                            q = int(q_str.strip())
-                            tau = int(tau_str.strip())
-                            if 0 <= tau < T:
-                                c_out_map[(q, tau)] = dm_out.get(tau, 0.0)
-                        elif name.startswith("yRET["):
-                            inside = name[name.find("[") + 1 : name.find("]")]
-                            q_str, tau_str = inside.split(",")
-                            q = int(q_str.strip())
-                            tau = int(tau_str.strip())
-                            if 0 <= tau < T:
-                                c_ret_map[(q, tau)] = dm_ret.get(tau, 0.0)
+                    mw_sol = slopes_from_capacity_duals(duals, S, T)
+                    dm_out, dm_ret = mw_sol.dm_out, mw_sol.dm_ret
+                    c_out_map, c_ret_map = expand_slopes_to_candidate(
+                        candidate, dm_out, dm_ret, T
+                    )
                 else:
-                    # Finite-difference coefficients and constant per scenario
+                    # Finite-difference coefficients and constant per scenario.
+                    # Diagnostic only: not a certified lower bound (handout 75/76).
+                    mw_sol = None
                     c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(
                         ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret
                     )
-                    cut_lb_valid = False
+                # Validity follows from the mode that was actually used, looked up in
+                # one place. Setting it by hand per branch is what let the flag and the
+                # branch disagree.
+                cut_lb_valid = cut_mode_carries_lower_bound(cut_mode_used)
                 fallback_diag: dict[str, Any] = {}
                 t_cut1 = time.perf_counter()
                 cutgen_time = t_cut1 - t_cut0
@@ -1208,27 +1592,27 @@ class ProblemSubproblem(Subproblem):
                 sum_y_ret = [
                     float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)
                 ]
-                const = float(ub_val)
-                const -= sum(dm_out.get(tau, 0.0) * sum_y_out[tau] for tau in range(T))
-                const -= sum(dm_ret.get(tau, 0.0) * sum_y_ret[tau] for tau in range(T))
+                # `solve_subproblem` splits its objective by direction exactly, so
+                # ub_out + ub_ret == ub_val. Read them rather than defaulting: the
+                # defaults below were dead (both keys are always present) and the
+                # `ub_out = const` one would have been wrong if ever taken.
+                ub_out = float(duals["ub_out"])
+                ub_ret = float(duals["ub_ret"])
+                const_out, const_ret, dual_diag = _cut_intercepts(
+                    mw_sol,
+                    y_inc_out=sum_y_out,
+                    y_inc_ret=sum_y_ret,
+                    ub_out=ub_out,
+                    ub_ret=ub_ret,
+                    T=T,
+                    ub_val=ub_val,
+                    dm_out=dm_out,
+                    dm_ret=dm_ret,
+                )
+                const = const_out + const_ret
                 consts.append(const)
                 coeffs_out_list.append(c_out_map)
                 coeffs_ret_list.append(c_ret_map)
-                # Per-direction constants if available from SP diagnostics
-                try:
-                    ub_out = float(duals.get("ub_out", const))
-                except Exception:
-                    ub_out = float(const)
-                try:
-                    ub_ret = float(duals.get("ub_ret", 0.0))
-                except Exception:
-                    ub_ret = 0.0
-                const_out = float(ub_out) - sum(
-                    dm_out.get(tau, 0.0) * sum_y_out[tau] for tau in range(T)
-                )
-                const_ret = float(ub_ret) - sum(
-                    dm_ret.get(tau, 0.0) * sum_y_ret[tau] for tau in range(T)
-                )
                 consts_out.append(const_out)
                 consts_ret.append(const_ret)
                 # Evaluate line at incumbent for diagnostics
@@ -1246,11 +1630,17 @@ class ProblemSubproblem(Subproblem):
                     )
                 )
                 target_val = float(ub_val)
-                if abs(float(target_val) - float(theta_lb_s)) > eps_cut * max(
-                    1.0, abs(float(target_val))
-                ):
+                tight_tol = _tightness_tolerance(eps_cut, target_val, dual_diag)
+                if abs(float(target_val) - float(theta_lb_s)) > tight_tol:
                     raise RuntimeError(
-                        "Cut tightness failed at incumbent; aborting cut generation."
+                        f"cut tightness failed at the incumbent (scenario {scen_label}): "
+                        f"the assembled cut evaluates to {theta_lb_s:.12g} where the "
+                        f"subproblem optimum is {target_val:.12g} "
+                        f"(diff {target_val - theta_lb_s:.3g}, tol {tight_tol:.3g}). "
+                        "The intercept itself was already checked against the duals, so "
+                        "a failure here points at the slope broadcast rather than at the "
+                        "constant: a coefficient on the wrong (q,tau), a slope dropped, "
+                        "or a candidate key the expansion did not recognise."
                     )
                 cuts.append(
                     Cut(
@@ -1319,9 +1709,21 @@ class ProblemSubproblem(Subproblem):
                         "timing_cutgen_s": cutgen_time,
                         "cut_generation_mode": cut_mode_used,
                         "mw_core_point_seeded": bool(core_seeded),
+                        # The core point MW ACTUALLY maximised over. An all-zero Ybar gives
+                        # the MW objective no direction, so it is seeded, and S3 then projects
+                        # it into the master region -- either step can make this differ from
+                        # what the caller passed. The Pareto claim is about THIS point;
+                        # comparing dominance at the passed vector compares at a direction MW
+                        # never saw. Reported because a silent substitution is how that goes
+                        # unnoticed for as long as it did.
+                        "mw_core_point_used": {
+                            "Yout": list(Ybar_out),
+                            "Yret": list(Ybar_ret),
+                        },
                         "cut_generation_proxy": proxy_diag,
                         "cut_generation_fallback": fallback_diag,
                         "cut_valid_lower_bound": bool(cut_lb_valid),
+                        "cut_intercept": dict(dual_diag),
                     }
                 )
                 agg.setdefault("timing_cutgen_s", []).append(cutgen_time)
@@ -1369,25 +1771,51 @@ class ProblemSubproblem(Subproblem):
                 agg_cut_time = agg["timing_cutgen_s"][idx_max]
             else:
                 raise ValueError("ub_aggregation must be one of 'mean', 'sum', 'max'")
+            # A scenario that generated NO cut is not a scenario with an unknown cut.
+            #
+            # The theta early-exit skips cut generation for a scenario whose theta already
+            # covers its recourse, and that scenario's diagnostics therefore carry neither
+            # `cut_generation_mode` nor `cut_valid_lower_bound`. Reading the absence as
+            # "unknown" made the conjunction False and dropped the run's lower bound --
+            # measured in D64 on `theta_by_scen`, 2 of 96 iterations, reported as
+            # `mixed(mw+unknown)` and `Bounds are heuristic only`.
+            #
+            # `CutValidity.NO_CUT` already names the right semantics: "no cut this
+            # iteration; previously established validity is untouched" (benders/types.py).
+            # So the aggregate is valid when every scenario that DID produce a cut was
+            # valid, and the contributors are what the mode label reports.
+            #
+            # Still fail-closed where it matters: a scenario that produced a cut and said
+            # nothing about it is genuinely UNKNOWN and still poisons the aggregate, and an
+            # aggregate with no contributors at all is not valid.
+            _contributors = [
+                sd for sd in scenario_diags if "cut_valid_lower_bound" in sd
+            ]
+            _abstained = len(scenario_diags) - len(_contributors)
             agg_cut_lb_valid = (
-                all(
-                    bool(sd.get("cut_valid_lower_bound", False))
-                    for sd in scenario_diags
-                )
-                if scenario_diags
+                all(bool(sd["cut_valid_lower_bound"]) for sd in _contributors)
+                if _contributors
                 else False
             )
             # Report which cut generator produced this aggregate. A single label when
-            # every scenario agreed, otherwise "mixed(a+b)" -- never silently blank,
-            # since a reported number must state the mode that produced it.
+            # every contributing scenario agreed, otherwise "mixed(a+b)" -- never silently
+            # blank, since a reported number must state the mode that produced it.
+            # Abstaining scenarios are counted, not folded in as a mode: "no_cut(1)" says
+            # one scenario contributed nothing, which is a different fact from a cut whose
+            # provenance is unknown.
             _modes = sorted(
-                {str(sd.get("cut_generation_mode", "unknown")) for sd in scenario_diags}
+                {
+                    str(sd.get("cut_generation_mode", "unknown"))
+                    for sd in _contributors
+                }
             )
             agg_cut_mode = (
                 _modes[0]
                 if len(_modes) == 1
-                else (f"mixed({'+'.join(_modes)})" if _modes else "unknown")
+                else (f"mixed({'+'.join(_modes)})" if _modes else "no_cut")
             )
+            if _abstained:
+                agg_cut_mode = f"{agg_cut_mode}+no_cut({_abstained})"
 
             if not multi_cuts:
                 # Weighted average of constants and coefficients
@@ -1515,7 +1943,7 @@ class ProblemSubproblem(Subproblem):
                 R_ret = (R_ret + [0.0] * T)[:T]
 
             # If using dual slopes, ensure at least one layer to create capacity constraints
-            use_dual = bool(params.get("use_dual_slopes", False))
+            use_dual = _cut_mode_cfg == "dual"
             K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
             K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret
             sp_params = SPParams(
@@ -1684,7 +2112,6 @@ class ProblemSubproblem(Subproblem):
             t_cut0 = time.perf_counter()
             cut_mode_used = "dual" if use_dual else "finite_difference"
             proxy_diag: dict[str, Any] = {}
-            cut_lb_valid = True
             if mw_enabled:
                 dm_pair = solve_mw_dual(
                     T,
@@ -1705,79 +2132,39 @@ class ProblemSubproblem(Subproblem):
                     solver_options,
                 )
                 if dm_pair is None:
-                    # Fallback to finite differences to guarantee nonzero slopes.
-                    # Finite-difference slopes are NOT a provable lower bound on the
-                    # recourse, so the resulting cut cannot support a gap/optimality
-                    # claim -- mark it invalid so solver.py drops best_lb.
-                    c_out_fd, c_ret_fd, dm_out, dm_ret = coeffs_by_fdiff(
-                        ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret
-                    )
-                    cut_mode_used = "mw_fdiff_fallback"
-                    cut_lb_valid = False
+                    # Fall back to the PLAIN DUAL, not to finite differences (S1).
+                    # See the twin site in the multi-scenario path for the reasoning:
+                    # the plain dual is valid, is already computed, and the previous
+                    # fallback threw it away for slopes that void the run's bound.
+                    mw_sol = slopes_from_capacity_duals(duals, S, T)
+                    cut_mode_used = "mw_dual_fallback"
                     self._vprint(
-                        "[SP WARN] solve_mw_dual returned no solution; fell back to finite "
-                        "differences. Cut is NOT a valid lower bound."
+                        "[SP WARN] solve_mw_dual returned no solution; fell back to the "
+                        "plain capacity duals. The cut is still a valid lower bound, but "
+                        "it is not Pareto-optimal."
                     )
                 else:
-                    dm_out, dm_ret = dm_pair
+                    mw_sol = dm_pair
                     cut_mode_used = "mw"
-                # Expand to per-(q,t)
-                c_out_map: Dict[tuple[int, int], float] = {}
-                c_ret_map: Dict[tuple[int, int], float] = {}
-                for name in candidate.keys():
-                    if not isinstance(name, str):
-                        continue
-                    if name.startswith("yOUT["):
-                        inside = name[name.find("[") + 1 : name.find("]")]
-                        q_str, tau_str = inside.split(",")
-                        q = int(q_str.strip())
-                        tau = int(tau_str.strip())
-                        if 0 <= tau < T:
-                            c_out_map[(q, tau)] = dm_out.get(tau, 0.0)
-                    elif name.startswith("yRET["):
-                        inside = name[name.find("[") + 1 : name.find("]")]
-                        q_str, tau_str = inside.split(",")
-                        q = int(q_str.strip())
-                        tau = int(tau_str.strip())
-                        if 0 <= tau < T:
-                            c_ret_map[(q, tau)] = dm_ret.get(tau, 0.0)
+                dm_out, dm_ret = mw_sol.dm_out, mw_sol.dm_ret
+                c_out_map, c_ret_map = expand_slopes_to_candidate(
+                    candidate, dm_out, dm_ret, T
+                )
             elif use_dual:
-                # Read duals π on capacity layers and aggregate by time tau
-                pi_out = dict(duals.get("pi_OUT", {}))
-                pi_ret = dict(duals.get("pi_RET", {}))
-                # Slopes dm[t] = S * π[t] (typically <= 0 in minimization; more capacity reduces cost)
-                dm_out = {
-                    int(t): float(S) * float(pi_out.get(int(t), 0.0)) for t in range(T)
-                }
-                dm_ret = {
-                    int(t): float(S) * float(pi_ret.get(int(t), 0.0)) for t in range(T)
-                }
-                # Expand to per-(q,t)
-                c_out_map: Dict[tuple[int, int], float] = {}
-                c_ret_map: Dict[tuple[int, int], float] = {}
-                for name in candidate.keys():
-                    if not isinstance(name, str):
-                        continue
-                    if name.startswith("yOUT["):
-                        inside = name[name.find("[") + 1 : name.find("]")]
-                        q_str, tau_str = inside.split(",")
-                        q = int(q_str.strip())
-                        tau = int(tau_str.strip())
-                        if 0 <= tau < T:
-                            c_out_map[(q, tau)] = dm_out.get(tau, 0.0)
-                    elif name.startswith("yRET["):
-                        inside = name[name.find("[") + 1 : name.find("]")]
-                        q_str, tau_str = inside.split(",")
-                        q = int(q_str.strip())
-                        tau = int(tau_str.strip())
-                        if 0 <= tau < T:
-                            c_ret_map[(q, tau)] = dm_ret.get(tau, 0.0)
+                mw_sol = slopes_from_capacity_duals(duals, S, T)
+                dm_out, dm_ret = mw_sol.dm_out, mw_sol.dm_ret
+                c_out_map, c_ret_map = expand_slopes_to_candidate(
+                    candidate, dm_out, dm_ret, T
+                )
             else:
-                # Finite differences fallback
+                # Finite differences: diagnostic only, not a certified lower bound
+                # (handout 75/76).
+                mw_sol = None
                 c_out_map, c_ret_map, dm_out, dm_ret = coeffs_by_fdiff(
                     ub_val, C_out, C_ret, K_out, K_ret, R_out, R_ret
                 )
-                cut_lb_valid = False
+            # Validity follows from the mode used; see the twin site's note.
+            cut_lb_valid = cut_mode_carries_lower_bound(cut_mode_used)
             fallback_diag: dict[str, Any] = {}
 
             t_cut1 = time.perf_counter()
@@ -1800,26 +2187,23 @@ class ProblemSubproblem(Subproblem):
             sum_y_out = [float(C_out[tau]) / S if S != 0 else 0.0 for tau in range(T)]
             sum_y_ret = [float(C_ret[tau]) / S if S != 0 else 0.0 for tau in range(T)]
 
-            # Intercept (const) so that the cut passes through current incumbent: const = Q(y) - dm·Y
-            const = float(ub_val)
-            const -= sum(dm_out.get(t, 0.0) * sum_y_out[t] for t in range(T))
-            const -= sum(dm_ret.get(t, 0.0) * sum_y_ret[t] for t in range(T))
-
-            # Directional intercepts if available from decomposition diagnostics
-            try:
-                ub_out = float(duals.get("ub_out", const))
-            except Exception:
-                ub_out = float(const)
-            try:
-                ub_ret = float(duals.get("ub_ret", 0.0))
-            except Exception:
-                ub_ret = 0.0
-            const_out = float(ub_out) - sum(
-                dm_out.get(t, 0.0) * sum_y_out[t] for t in range(T)
+            # Intercepts derived from the demand duals, with strong duality checked
+            # against the imposed form (S2). `solve_subproblem` splits its objective by
+            # direction exactly, so ub_out + ub_ret == ub_val.
+            ub_out = float(duals["ub_out"])
+            ub_ret = float(duals["ub_ret"])
+            const_out, const_ret, dual_diag = _cut_intercepts(
+                mw_sol,
+                y_inc_out=sum_y_out,
+                y_inc_ret=sum_y_ret,
+                ub_out=ub_out,
+                ub_ret=ub_ret,
+                T=T,
+                ub_val=ub_val,
+                dm_out=dm_out,
+                dm_ret=dm_ret,
             )
-            const_ret = float(ub_ret) - sum(
-                dm_ret.get(t, 0.0) * sum_y_ret[t] for t in range(T)
-            )
+            const = const_out + const_ret
 
             # Optional: evaluate the line at the incumbent (theta_lb) to verify tightness (≈ ub_val)
             theta_lb = (
@@ -1834,11 +2218,16 @@ class ProblemSubproblem(Subproblem):
                 )
             )
             target_val = float(ub_val)
-            if abs(float(target_val) - float(theta_lb)) > eps_cut * max(
-                1.0, abs(float(target_val))
-            ):
+            tight_tol = _tightness_tolerance(eps_cut, target_val, dual_diag)
+            if abs(float(target_val) - float(theta_lb)) > tight_tol:
                 raise RuntimeError(
-                    "Cut tightness failed at incumbent; aborting cut generation."
+                    "cut tightness failed at the incumbent: the assembled cut evaluates "
+                    f"to {theta_lb:.12g} where the subproblem optimum is "
+                    f"{target_val:.12g} (diff {target_val - theta_lb:.3g}, "
+                    f"tol {tight_tol:.3g}). The intercept itself was already checked "
+                    "against the duals, so a failure here points at the slope broadcast "
+                    "rather than at the constant: a coefficient on the wrong (q,tau), a "
+                    "slope dropped, or a candidate key the expansion did not recognise."
                 )
 
             # Emit cut metadata
@@ -1896,9 +2285,21 @@ class ProblemSubproblem(Subproblem):
                 "timing_cutgen_s": cutgen_time,
                 "cut_generation_mode": cut_mode_used,
                 "mw_core_point_seeded": bool(core_seeded),
+                # The core point MW ACTUALLY maximised over. An all-zero Ybar gives
+                # the MW objective no direction, so it is seeded, and S3 then projects
+                # it into the master region -- either step can make this differ from
+                # what the caller passed. The Pareto claim is about THIS point;
+                # comparing dominance at the passed vector compares at a direction MW
+                # never saw. Reported because a silent substitution is how that goes
+                # unnoticed for as long as it did.
+                "mw_core_point_used": {
+                    "Yout": list(Ybar_out),
+                    "Yret": list(Ybar_ret),
+                },
                 "cut_generation_proxy": proxy_diag,
                 "cut_generation_fallback": fallback_diag,
                 "cut_valid_lower_bound": bool(cut_lb_valid),
+                "cut_intercept": dict(dual_diag),
             }
             return SubproblemResult(
                 is_feasible=True, cut=cut, upper_bound=ub_val, diagnostics=diagnostics
@@ -2648,6 +3049,15 @@ def solve_subproblem(
         {
             "alpha_OUT": alpha_OUT,
             "alpha_RET": alpha_RET,
+            # Demand side of the dual objective, as the scalar the cut constant needs.
+            # Slot-indexed here; the minute recourse forms the same scalar over arrival
+            # minutes. See MWDual for why the interface is a scalar and not a vector.
+            "intercept_out": float(
+                sum(alpha_OUT[t] * float(R_out[t]) for t in Tset)
+            ),
+            "intercept_ret": float(
+                sum(alpha_RET[t] * float(R_ret[t]) for t in Tset)
+            ),
             "pi_OUT": pi_OUT,
             "pi_RET": pi_RET,
             # diagnostics

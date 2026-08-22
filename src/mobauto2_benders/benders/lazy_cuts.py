@@ -13,10 +13,17 @@ Two things about this file are not stylistic choices.
 the reported bound: an INVALID or UNKNOWN cut is added to the master and the lower
 bound is dropped afterwards. That is sound only where the loop owns the bound and
 can retract it at the end. Inside a branch-and-bound tree there is nothing to
-retract: an `mw_fdiff_fallback` slope that excludes the true optimum prunes a
+retract: a `finite_difference` slope that excludes the true optimum prunes a
 subtree, CPLEX never revisits it, and no later accounting recovers what was lost.
 So the rule inverts here -- only CutValidity.VALID may be injected, and every
 other state aborts the solve.
+
+*Updated by S1.* The example used to be `mw_fdiff_fallback`, the mode the
+Magnanti-Wong path fell into when its auxiliary LP declined. That mode no longer
+exists: MW now falls back to the plain capacity duals, which are a valid lower
+bound, so an MW failure inside a tree is survivable rather than fatal to it.
+`finite_difference` remains the one generator with no guarantee, and it is
+diagnostic-only. The rule above is unchanged -- it just has one fewer way to fire.
 
 **Aborting is not the same as skipping.** Returning from a LazyConstraintCallback
 without calling `add` tells CPLEX the incumbent is acceptable, which is exactly

@@ -49,9 +49,14 @@ must be produced on the corrected model.
 6. Gapped runs never reported as optima without a marker. **Tested**
    (`test_gapped_run_is_not_reported_as_optimal`).
 7. Every reported number states which subproblem mode produced it. **Implemented** — each
-   dispatch branch labels itself (`mw`, `mw_fdiff_fallback`, `dual`,
+   dispatch branch labels itself (`mw`, `mw_dual_fallback`, `dual`,
    `finite_difference`), the multi-scenario aggregate reports one label or
    `mixed(a+b)`, and the manifest records it alongside `cut_valid_lower_bound`.
+   The mode→guarantee mapping is `CUT_MODE_VALID_LOWER_BOUND`, and a mode absent from
+   it raises: neither `True` nor `False` is a safe default for a generator whose
+   validity nobody has stated (S1). A test asserts the table and the dispatch labels
+   are the *same set*, so a removed mode cannot linger in the table and an added one
+   cannot ship untabled.
 8. **New.** A reported lower bound must be accompanied by evidence that the master is a
    relaxation. Two independent defects (`AUDIT_v4` C3, C4) each silently produced bounds
    that were not bounds. The standing check is
@@ -248,23 +253,192 @@ Three points that v3 got wrong or omitted:
 **Slopes and broadcast:**
 
 ```
-dm_out[τ] = S · Σ_k π_OUT[τ,k]          (<= 0)
+dm_out[τ] = S · π_OUT[τ]                (<= 0)
 coeff_yOUT[(q,τ)] = dm_out[τ]  for every q      # identical across q by construction
 ```
+
+The `Σ_k` is gone: there are no layers (§2.5), so there is one `π` per slot. The broadcast
+is `expand_slopes_to_candidate`, extracted because this block had been written out four
+times and a fix to one copy left the others generating the old cut.
+
+**Intercept — derived, not imposed (S2).**
+
+```
+a_d = Σ_t α_d[t] · R_d[t]                       # from the dual
+check:  | a_d − ( Q_d(y) − Σ_τ dm_d[τ]·y_inc_d[τ] ) |  ≤  ε_dual        else RAISE
+```
+
+It used to be `const = Q(y) − Σ dm·y_inc`, written directly. That is algebraically equal to
+`Σ α R` **only** when the selected dual sits exactly on the optimal face, and `OptFace` is
+deliberately an inequality with `face_tol` of slack (a float equality against a separately
+computed primal optimum is infeasible for a few ulps). Two consequences, and the second is
+the one that matters:
+
+1. The tightness diagnostic (formal formulation §20.1) **could not fail** — the code wrote
+   the identity it then verified. §20.1 and §20.3 were unmonitored.
+2. The imposed intercept could sit up to `face_tol` **above** the true dual cut. That is an
+   overestimate, and an overestimating cut is the only kind that can exclude the optimum.
+   D30 was that defect.
+
+`ε_dual = max(1e-5, 1e-7·|Q(y)|)`, which must exceed `face_tol = max(1e-6, 1e-9·|Q(y)|)`:
+a dual legitimately inside the face moves the derived intercept by up to that slack, so a
+tighter tolerance would fire on correct behaviour and be loosened until it fired on nothing.
+
+Both intercepts are recorded per iteration under `diagnostics["cut_intercept"]`
+(`intercept_out_from_alpha`, `intercept_out_imposed`, `intercept_gap_out`, and the RET
+twins), so a run can be audited after the fact rather than only at the moment the check
+passes.
+
+`finite_difference` has no duals to derive from and is already marked as carrying no
+guarantee, so there the intercept stays imposed and the check is **skipped rather than
+passed vacuously** — `intercept_source: imposed_no_dual`.
 
 #### Fallback paths
 
 | Mode | Valid lower bound | Notes |
 |---|---|---|
 | `mw` | **yes** | default |
-| `mw_fdiff_fallback` | **no** | MW returned no solution; sets `cut_lb_valid = False` and logs `[SP WARN]`. v3 wrongly stated this branch marked itself invalid — it did not, which is how C3 hid |
-| `dual` (`use_magnanti_wong: false, use_dual_slopes: true`) | **yes** | `dm_out[τ] = S·pi_out[τ]` from `solve_subproblem`. Not Pareto-optimal; the natural ablation baseline. **Currently unreachable** — see `AUDIT_v4` §3.5 |
-| `finite_difference` | **no** | diagnostic only; never for a reported result |
+| `mw_dual_fallback` | **yes** | **Replaces `mw_fdiff_fallback` (S1).** MW returned no solution, so the cut is built from the plain capacity duals already returned by `solve_subproblem`. Validity comes from dual feasibility, so the run keeps its bound; it is simply not Pareto-optimal. Logs `[SP WARN]` |
+| `dual` (`use_magnanti_wong: false, use_dual_slopes: true`) | **yes** | `dm_out[τ] = S·pi_out[τ]` from `solve_subproblem`. Not Pareto-optimal; the natural ablation baseline. Still not reachable *by configuration* — `AUDIT_v4` §3.5 — but the same generator is now reachable as the MW fallback |
+| `finite_difference` | **no** | diagnostic only; never for a reported result. The only remaining mode without a guarantee |
+
+**Mode selection is `subproblem.cut_mode`** — `mw | dual | finite_difference` — replacing
+`use_magnanti_wong` + `use_dual_slopes`. Two booleans cannot carry three mutually
+exclusive states without one going dead, and one did: the dispatch is
+`if mw … elif dual … else fdiff`, every shipped config set **both** true, so `dual` was
+unreachable (`AUDIT_v4` §3.5). The legacy pair is still accepted, resolved with the same
+precedence, so no shipped config changes behaviour; setting both forms is refused.
+
+**`finite_difference` requires `subproblem.acknowledge_no_lower_bound: true`.** It has no
+lower-bound guarantee, the runtime already drops `best_lb` when it is used, and it is the
+*fall-through* of the legacy pair — so a config that simply omitted both booleans landed on
+it silently and found out an hour later. Refused at load instead.
+
+**Magnanti–Wong is refused with `recourse_resolution: minute`.** `solve_mw_dual` builds the
+dual of the **slot** primal (`α[t] + π[τ] ≤ (τ−t)` over slot arcs); the minute recourse's
+primal has one demand row per arrival **minute**. They are duals of different LPs, so a
+dual optimal for one carries no weak-duality relation to the other and a cut from it can
+overestimate the recourse — D30's failure mode. Nothing guarded this before;
+`configs/phase1/rq5_benders_minute_p56.yaml` escaped it only by setting the flag false.
+
+**Multi-scenario validity aggregation distinguishes NO_CUT from UNKNOWN.** A scenario whose
+θ early-exit fires produces no cut and carries no mode; reading that absence as `unknown`
+made the conjunction false and dropped the run's lower bound (D64 §4b). The aggregate is
+valid when every scenario that *did* produce a cut was valid; abstentions are counted in the
+label (`mw+no_cut(1)`), not folded in as a mode. Still fail-closed: a cut with no stated
+provenance is genuinely UNKNOWN and still poisons the aggregate, and zero contributors is
+not valid.
+
+**The mapping from mode to guarantee is one table**, `CUT_MODE_VALID_LOWER_BOUND` in
+`subproblem_impl.py`, and an unlisted mode raises rather than defaulting. It used to be a
+boolean set by hand in each dispatch branch, which is how the branch and the flag came to
+disagree (`AUDIT_v4` C5/N6).
+
+**Why `mw_fdiff_fallback` was wrong and not merely weak.** On failure the MW path
+*discarded a valid cut it was already holding* — `S·π` was sitting in the same `duals`
+dict — in favour of finite-difference slopes that carry no lower-bounding guarantee, and
+then set `cut_lb_valid = False`, which makes `solver.py` drop `best_lb` for the **whole
+run**. One MW hiccup voided the bound.
+
+**Measured while making the change:** the MW path was declining far more often than anyone
+had reason to think, and for a benign reason. The runtime weak-duality check evaluated
+`pyo.value(dual_obj_expr(md))`, and `pi_RET[0]` appears in no dual-feasibility row — no arc
+can reach `τ=0`, since arcs require `t+1 ≤ τ` — so whenever `C_ret[0] = 0` its coefficient
+is `0.0` in both that expression and the MW objective, the backend never sends the variable,
+and `pyo.value` raises on it. The guard therefore refused every MW solution on such an
+instance while reporting the mode as enabled: **C3's shape exactly, in the code written to
+prevent C3**. The check now computes the dual objective from the multipliers read back
+(unset ones contribute exactly `0.0`, which is arithmetic — their coefficient is zero by the
+same structural fact that left them unsent). The test suite went from emitting `[MW FAIL]`
+to emitting none.
 
 `cut_valid_lower_bound` propagates to `solver.py`, which drops `best_lb` when false. In
 multi-scenario runs validity is aggregated **conjunctively** — valid only if every
 scenario's cut is valid, defaulting to false on an empty set. That semantics is correct
 and must not be "simplified".
+
+#### The core point — projected into the master region (S3, D63)
+
+`Ȳ` is the direction MW maximises in, so it has to be a direction the master can move in.
+It is now **projected**, not clamped to a box:
+
+```
+Ȳ_d[τ] = 0                                              wherever the master fixes y_d[·,τ]=0
+Σ_{τ' ∈ [τ, τ+h_trip−1]} (Ȳ_out[τ'] + Ȳ_ret[τ'])  ≤ Q    ∀τ
+Ȳ_d[τ] ≥ floor > 0                                      on every remaining slot
+```
+
+`signature.project_core_point` enforces it; `core_point_violations` reports what a point
+breaks, by slot; the loop re-checks after projecting and **raises**, since the projection is
+idempotent by construction.
+
+The clamp this replaces kept every entry in `[ε, Q−ε]`, which is outside `proj_Y(conv(𝒵))`
+twice over: positive `Ȳ` on slots the master *fixes* to zero — all `τ ≥ T−2·h_trip` for
+OUT, which is 3 of 12 coordinates at T=6/h_trip=1 — and no trip window at all, so a point
+could assert the whole fleet departs in every slot.
+
+**These are necessary conditions, not a description of `proj_Y`.** Battery and per-vehicle
+occupancy are absent, so the result lies in a *relaxation* of the region: strictly better
+than a box point, and still not a proof of relative interiority. Describe it as a
+**stabilisation point** (formal formulation §16.5 option 4). Do not assert the MW hypothesis.
+
+Validity is unaffected either way — that comes from dual feasibility — but the
+Pareto-optimality claim is the only reason to run MW rather than the plain dual, so a core
+point outside the region makes the whole path pointless rather than wrong.
+
+The window inequality is the cheap form of what `problem/vehicle_dd.window_trip_caps` proves
+for the master, where it is **off** by default: ~1% of LP root for 1–2.2× the master time
+(D49/D50). That cost was master solve time; there is no master solve in a projection.
+
+The subproblem's own fallback — seeding `Ȳ` to all-ones when no core point arrives — projects
+too. A fallback that reinstates the defect the main path just fixed is the two-places-disagree
+pattern behind C5/N6.
+
+**Floor diagnostics count free coordinates only.** Counting all of them reports structure as
+decay: 3 of 12 sit at exactly 0 before anything has decayed.
+
+### 2.6b Recourse proxy shape — four options (S4, D63)
+
+| `theta_per_scenario` | `theta_by_direction` | shape | proxies |
+|---|---|---|---:|
+| false | false | `theta` | 1 |
+| false | true *(default)* | `theta_out`/`theta_ret` | 2 |
+| true | false *(default)* | `theta_s[s]` | \|Ω\| |
+| true | true | `theta_out_s[s]`/`theta_ret_s[s]` | 2\|Ω\| |
+
+The last is the formal formulation's recommended baseline (§12). It was **inexpressible**
+before S4: the master computed `disagg_dir = False if theta_per_scenario`, so the two
+disaggregations were mutually exclusive and one cell of D11's A/B did not exist.
+
+`master.theta_by_direction` is a real config key now. It was previously read from
+`disaggregate_theta_by_direction`, **which no config could set**, hardcoded true — the
+inert-configuration pattern (`AUDIT_v4` §3.8) inverted: a behaviour with no knob. Its default
+resolves to the pre-S4 value in both branches, so no shipped config changed shape, and a test
+asserts that.
+
+`multi_cuts_by_scenario` is **not** free to vary independently: one cut per scenario on a
+shared `theta` bounds `max_s Q_s(y)` while the reported UB is the weighted mean, so config
+load refuses it (D15/D16). Any A/B across the aggregated and per-scenario halves therefore
+moves two things at once and must be read as "aggregate vs disaggregate".
+
+A cut carrying no `scenario_index` under the `2|Ω|` shape **raises** rather than picking an
+epigraph arbitrarily.
+
+**Measured (D64), LP-only at 150 iterations:** the direction split is worth **+4.9%** of LP
+bound (757.79 → 794.78) and is the difference between a truncated bound and a converged root.
+The per-scenario cells add one cut per scenario per iteration, so the master grows 4× faster
+at 4 scenarios and 8× under `2|Ω|`; equal iterations does not hold master size fixed across
+those halves.
+
+**`ρ` is applied once.** `_scenario_weights` is the single reader and **refuses** weights that
+do not sum to 1 rather than renormalising: the cuts are built from the same probabilities, so
+rescaling would make the master's comparison mean something the config did not say. The
+objective used raw weights while the anchor divided by their sum, silently (handout §87,
+Failure 5).
+
+The anchor follows the shape, one row per `(ω, d, j)` using **that scenario's own** demand —
+strictly tighter by Jensen. `_recourse_bound_data` carries the per-scenario vectors alongside
+the mean.
 
 ### 2.7 Master aggregation — validated and enforced
 

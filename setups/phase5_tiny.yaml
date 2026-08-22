@@ -1,0 +1,54 @@
+# Tiny instance for the Phase 5 exactness gate (handout section 86, phase 5).
+#
+# Purpose: small enough that the monolithic MILP proves optimality in seconds, so
+# `z*_Benders == z*_monolith` can be asserted as an EQUALITY. Every other exactness
+# check in this repository is an inequality -- `LB <= (a known feasible objective)` --
+# which catches a bound that is not a bound (the D30 class) and nothing else. It does
+# not catch a decomposition that is valid but converges to the wrong place, and it does
+# not catch a master missing a constraint the monolith has.
+#
+# Instance shape, at T_minutes 180 / slot_resolution 30 -> T=6, trip 30 min ->
+# trip_slots 1, Q=1:
+#
+#   OUT arrivals all fall in slot 0 (minutes 0-29), RET arrivals all in slot 2
+#   (minutes 60-89). Every request is strictly inside the horizon, so NOTHING is
+#   discarded -- important, because a discarded request would have to be discarded
+#   identically on both sides or the two solvers would be pricing different
+#   instances (D25).
+#
+#   6 of each direction, against S=15 seats, so one departure per direction serves
+#   all of them and the instance is not capacity-starved. That matters: an instance
+#   whose optimum is dominated by the unserved penalty would make the equality hold
+#   for a reason that has nothing to do with the cut geometry.
+#
+# The deliberate non-degeneracy: the optimum is strictly between 0 (which an
+# all-idle schedule would give if demand were 0) and the all-unserved cost. The
+# test asserts that bracket, so a degenerate instance cannot make the equality
+# vacuous by having both solvers agree on nothing.
+
+n: 12
+requests:
+- dir: OUT
+  time: 5
+- dir: OUT
+  time: 10
+- dir: OUT
+  time: 15
+- dir: OUT
+  time: 20
+- dir: OUT
+  time: 25
+- dir: OUT
+  time: 28
+- dir: RET
+  time: 65
+- dir: RET
+  time: 70
+- dir: RET
+  time: 75
+- dir: RET
+  time: 80
+- dir: RET
+  time: 85
+- dir: RET
+  time: 88

@@ -2860,3 +2860,525 @@ measured against the right baseline three times and lost three times: 390x slowe
 monolith (D56), dominated as a cut (D57), and beaten at the root by the solver's own cuts
 (here). The honest conclusion is that this problem, at these sizes, does not want to be
 decomposed.
+
+---
+
+## D61 — The Magnanti-Wong fallback threw away a valid cut, and the guard meant to protect the bound was silently disabling MW
+
+Date: 2026-08-17. Correctness work (S1, S2 of the correction plan), taken before the
+competitiveness push so that every gap measured afterwards is readable. No experiment here:
+these are defects with tests, not measurements.
+
+### 1. S1 — the fallback discarded a valid cut it was already holding
+
+When `solve_mw_dual` declined, the dispatch fell to `coeffs_by_fdiff` and set
+`cut_lb_valid = False`, which makes `solver.py` drop `best_lb` for the **whole run**.
+
+But the plain capacity duals were already computed and already sitting in the same `duals`
+dict. `dm_d[tau] = S * pi_d[tau]` is a valid lower-bounding cut -- validity comes from dual
+feasibility (handout 77), not from optimality -- it is simply not Pareto-optimal. So on
+failure the code replaced a valid cut with an invalid one and then voided the bound.
+
+`mw_fdiff_fallback` is gone. `mw_dual_fallback` replaces it and **carries a lower bound**.
+`finite_difference` remains the one generator with no guarantee, diagnostic-only.
+
+The mode-to-guarantee mapping is now one table, `CUT_MODE_VALID_LOWER_BOUND`, and an
+unlisted mode **raises**: neither `True` nor `False` answers "nobody decided". Previously the
+flag was set by hand in each dispatch branch, which is precisely how the branch and the flag
+came to disagree (C5/N6). A test asserts the table and the emitted labels are the same set in
+both directions, so a removed mode cannot linger and an added one cannot ship untabled.
+
+### 2. The measurement that fell out of it: MW was declining for a benign reason
+
+The runtime weak-duality check evaluated `pyo.value(dual_obj_expr(md))` after loading the
+dual solution. `pi_RET[0]` appears in **no** dual-feasibility row -- arcs require
+`t+1 <= tau`, so nothing reaches `tau = 0` -- hence whenever `C_ret[0] = 0` its coefficient
+is `0.0` in that expression *and* in the MW objective, the backend never sends the variable,
+and `pyo.value` raises on an uninitialized var.
+
+So the guard refused **every MW solution** on any instance with no RET capacity in slot 0,
+while the run reported its mode as `mw`. That is C3's exact shape, occurring inside the code
+written to prevent C3: a guard that fails closed in the wrong place stops the thing it
+guards from ever running, and says nothing.
+
+Visible in the suite before the fix:
+
+    [MW FAIL] the dual objective is unreadable after load: ValueError:
+              No value for uninitialized VarData object pi_RET[0]
+    [SP WARN] solve_mw_dual returned no solution; fell back to ...
+
+The check now computes the dual objective from the multipliers read back. Unset multipliers
+contribute exactly `0.0`, which is arithmetic rather than a guess: their coefficient is zero
+by the same structural fact that left them unsent. After the fix the suite emits **zero**
+`[MW FAIL]` and **zero** `[SP WARN]` lines across 184 tests.
+
+**What this does NOT establish.** How often MW was declining on the *production* configs, or
+what it cost the bound. The evidence above is the test suite, whose fixtures are small and
+mostly start from an idle schedule. Every `mw`-labelled number in `docs/` predates this fix,
+so any of them may have been produced by the fallback rather than by MW. They are not wrong
+-- the fallback path was still building cuts from a real dual -- but a comparison that
+*attributes* a result to Pareto selection needs re-running. In particular D42's dominance
+margins, and any claim resting on `test_mw_dominates_the_plain_dual_at_every_core_point`,
+should be re-measured before being quoted as evidence about MW.
+
+### 3. S2 — the intercept was imposed, so the tightness check could not fail
+
+The cut constant was written as `const = Q(y) - sum(dm * y_inc)`. That equals
+`sum_t alpha[t] * R[t]` **only** when the selected dual lies exactly on the optimal face, and
+`OptFace` is deliberately an inequality with `face_tol` of slack, because a float equality
+against a separately computed primal optimum is infeasible for a few ulps of disagreement.
+
+Two consequences:
+
+1. Formal formulation 20.1 -- the cut is tight at its generating incumbent -- **could not
+   fail**, because the code wrote the identity it then verified. 20.1 and 20.3 were
+   unmonitored. The code's own comment said as much and nothing acted on it.
+2. The imposed intercept could sit up to `face_tol` **above** the true dual cut: an
+   overestimate, which is the one direction that can exclude the optimum. Small, but D30 was
+   that defect and it went six months unseen.
+
+`solve_mw_dual` now returns `alpha` alongside the slopes, in one `MWDual` object so a caller
+cannot pair slopes from one solve with alpha from another and pass the check anyway. The
+intercept is `a_d = sum_t alpha_d[t] * R_d[t]`, and `derive_cut_intercepts` raises when it
+disagrees with the imposed form by more than `eps_dual = max(1e-5, 1e-7*|Q(y)|)`.
+
+`eps_dual` must exceed `face_tol = max(1e-6, 1e-9*|Q(y)|)`: a dual legitimately inside the
+face moves the derived intercept by up to that slack, so a tighter tolerance would fire on
+correct behaviour and then be loosened until it fired on nothing.
+
+**The cut is now very slightly weaker and strictly valid** -- `sum alpha R` is at most the
+imposed value -- which is the correct direction to err in.
+
+Both forms are recorded per iteration under `diagnostics["cut_intercept"]`, so a run can be
+audited afterwards rather than only at the moment the check passes.
+
+### 4. Tests
+
+15 new, no solver required (`tests/test_fast_cut_intercept.py`): the intercept equals
+`sum alpha R`; the cut is tight at the incumbent **as a consequence** rather than by
+construction; a perturbed alpha raises; the check is sharp, so it does not fire on 1e-7 of
+float noise; slopes are `S*pi` and non-positive; a missing dual reads as a structural zero;
+slopes broadcast identically across `q` (E1); and the mode table matches the dispatch labels
+exactly.
+
+184 tests pass under the CPLEX-bearing environment, in 52 s.
+
+**Note on the environment, because it nearly hid all of this.** The default `python` on this
+machine is 3.14 without the CPLEX bindings, where `cplex_direct` is unavailable and **14
+tests skip -- the 14 that exercise the cut generator**. The suite prints `OK` and has checked
+none of it. The skip message already says so; heed it. Use `p310`.
+
+---
+
+## D62 — Phase 5 closes: the decomposition reaches the monolith's optimum, and getting there found an inconsistent pair of tolerances
+
+Date: 2026-08-17. The exactness gate the validation ladder was missing (handout section 86
+phase 5). Configs: `configs/phase5/*.yaml`, `configs/milp/phase5_tiny*.yaml`. Test:
+`tests/test_phase5_exactness.py`.
+
+### 1. What was missing, and why an inequality was not enough
+
+Every exactness check in this repository was an **inequality** --
+`LB <= (a known feasible objective)`, asserted against 4183.24. That catches a bound that is
+not a bound, which is the D30 class, and nothing else. It is satisfied by a decomposition
+that converges to the wrong place, by a master missing a constraint the monolith has, and by
+cuts so weak the run never closes. The handout asks for `|z*_Benders - z*_extensive| <= eps`
+and the repository never had it.
+
+### 2. The gate
+
+Two instances, four Benders arms, two monolith arms. Q=1, T=6 (180 min / 30 min slots),
+trip 1 slot, `p_minutes = 56`, single scenario. Everything closes in about two seconds.
+
+| cell | instance | monolith | Benders `dual` | Benders `mw` |
+|---|---|---:|---:|---:|
+| slack | `phase5_tiny.yaml`, 6 pax/direction vs S=15 | **12.02** | LB 12.019999999999989 / UB 12.02 | LB 12.019998999999995 / UB 12.02 |
+| tight | `phase5_tiny_tight.yaml`, 17 OUT in one slot vs S=15 | **36.086666666666667** | 36.086666666666666 both | LB 36.08666566666666 / UB 36.086666666666666 |
+
+All six proved optimality; no master solve stopped on the clock. Three iterations per arm.
+
+**Two cells on purpose.** On the slack cell capacity never binds, and the final cut comes out
+with `nnz = 0` -- measured. A nearly flat cut can still drive a trivial master to the right
+answer, so the slack cell alone would be a gate that passes while testing almost no cut
+geometry. The tight cell binds (23 of 30 served) and `pi` is strictly negative, so the slope
+vector is under test and not only the constant. The suite asserts the tight cell really binds
+by pricing it directly, rather than inferring it from the objective.
+
+**Two cut modes on purpose.** Formal formulation 16.6 says MW changes the *shape* of the cut
+away from the incumbent and not its exactness at the incumbent, so both modes must reach the
+same optimum. Asserting that is what turns 16.6 from a claim into a test. It also makes
+`use_dual_slopes` reachable somewhere in the suite (AUDIT_v4 3.5).
+
+### 3. What building it found: two tolerances that could not both be satisfied
+
+The MW arms **failed** on first run, on the pre-existing check
+`Cut tightness failed at incumbent`. Measured gap: exactly `-1e-06`.
+
+That is `face_tol = max(1e-6, 1e-9*|Q|)`, the slack `solve_mw_dual` deliberately allows on
+the optimal face -- deliberately, because a float equality against a separately computed
+primal optimum is infeasible for a few ulps of disagreement. The tightness check used
+`eps_cut * max(1, |Q|)`, which is `1e-8 * 22.4 = 2.24e-7` on this instance.
+
+**So the code admitted duals that a later check refused.** Nothing had ever noticed, because
+the intercept was IMPOSED as `Q(y) - sum(dm*y_inc)`, which made the tightness check an
+identity that could not fail (D61 section 3). Deriving the intercept from `alpha` exposed the
+inconsistency on the first instance that exercised it.
+
+The two jobs are now separated, in `_tightness_tolerance`:
+
+- `derive_cut_intercepts` checks the **constant** against the duals at `eps_dual`, which is
+  the tolerance that has to admit the face slack.
+- the tightness check verifies the **assembled** cut -- constant plus broadcast slopes -- so
+  its remaining job is catching a bad broadcast, and it inherits `eps_dual` so it cannot fire
+  on a constant already accepted upstream. Its message now says so, and names the broadcast
+  as the thing to look at.
+
+### 4. The 1e-6 is the honest cost of D61, and it is worth naming
+
+The MW lower bound now lands 1e-6 *below* the optimum on the slack cell. Before D61 it
+printed 12.02 exactly -- because the intercept was forced to `Q(y)`, so the bound was asserted
+rather than proven. **S2 costs 1e-6 of lower bound and buys the guarantee that the bound was
+earned.** A gate tolerance tighter than the face slack would fail the honest version and pass
+the dishonest one, which is why `EPS = 1e-5` and not `1e-8`.
+
+### 5. What this gate does and does not establish
+
+It establishes that the **decomposition** is exact with respect to the formulation: master,
+cuts, aggregation, bound bookkeeping and termination all agree with the extensive form at a
+size where both prove optimality, under two cut modes and two dual regimes.
+
+It does **not** establish that the formulation is right. `mobauto2_milp/model.py` is a second
+copy of the first stage that `master_impl.py` also implements, so a defect present in both
+copies is invisible here -- the same limit `baseline_d9_monolith.yaml` already states about
+4183.24. Nor does it say anything about Q>=2 symmetry, multi-scenario aggregation, or the
+minute recourse; it is Q=1, single-scenario, slot recourse by design, because the point is a
+size where the monolith proves optimality in under a second.
+
+196 tests pass under p310 in 50 s.
+
+---
+
+## D63 — The MW core point was outside the master's region, and the (omega,d) recourse proxy now exists
+
+Date: 2026-08-17. S3, S4 and the code half of S5 from the correction plan. No experiment
+here: these are code changes with tests. The measurements they enable -- D11's theta A/B and
+the anchor's re-measurement at the 150-cut basis -- are separate and not run yet.
+
+### 1. S3 -- the core point was a box, and the box is not the region
+
+Magnanti-Wong requires a point in the relative interior of `proj_Y(conv(Z))` (formal
+formulation 16.2). Cut VALIDITY does not depend on it -- that comes from dual feasibility --
+but the Pareto-optimality claim does, and the claim is the only reason to run MW rather than
+the plain dual.
+
+The core point was an exponential moving average clamped to the box `[eps, Q-eps]` per slot,
+which is outside the region on two counts:
+
+1. **Positive `Ybar` on slots the master FIXES to zero.** The master fixes
+   `yOUT = yRET = 0` for `t >= T - trip_slots` and `yOUT = 0` for `t >= T - 2*trip_slots`.
+   MW was being asked which dual best values extra capacity in a slot that can never carry
+   a departure. At T=6/trip=1 that is 3 of 12 coordinates.
+2. **No trip window at all.** A point could assert the whole fleet departs in every slot.
+
+`signature.project_core_point` now enforces three necessary conditions -- zero on fixed
+slots, `sum over any trip_slots-window of (Yout+Yret) <= Q`, and strictly positive elsewhere
+-- and `core_point_violations` reports what a point breaks, by slot. The solver re-checks
+after projecting and raises: the projection is meant to be idempotent, so a violation there
+is a defect in the projection rather than a property of the instance.
+
+**These are necessary conditions, not a description of `proj_Y`** -- battery and per-vehicle
+occupancy are not represented. So the result is a point in a relaxation of the region:
+strictly better than a box point, and still not a proof of relative interiority. It must be
+described as a stabilisation point (16.5 option 4), not asserted to satisfy the MW
+hypothesis.
+
+The window inequality is the cheap form of what `vehicle_dd.window_trip_caps` proves for the
+master, where it is OFF by default because it bought ~1% of LP root for 1-2.2x the master
+time (D49/D50). That cost was master solve time; there is no master solve in a projection.
+
+**Also fixed: the same defect had a second home.** When no core point reaches the
+subproblem, it seeds `Ybar` to all-ones -- which puts mass on fixed slots and ignores the
+window, i.e. exactly what S3 removed from `solver.py`. That path now projects too, and says
+so when it cannot (no fleet size in the subproblem params). A fallback that reintroduces the
+defect the main path just fixed is the two-places-disagree pattern that produced C5/N6.
+
+**The decay is now visible rather than inferable.** The log counts entries sitting on the
+interior floor **over the free coordinates only**. Counting all of them reports structure as
+decay: at T=6/trip=1 that is 3 of 12 before anything has decayed at all.
+
+### 2. S4 -- `theta[omega,d]` exists, and the default did not move
+
+Four shapes now, selected by two booleans:
+
+| `theta_per_scenario` | `theta_by_direction` | shape | proxies |
+|---|---|---|---:|
+| false | false | single | 1 |
+| false | true *(default)* | by_direction | 2 |
+| true | false *(default)* | by_scenario | \|Omega\| |
+| true | true | **by_scenario_direction** | 2\|Omega\| |
+
+The last is the formulation's recommended baseline (12), "the strongest clean baseline".
+Until now it was **inexpressible**: the master computed
+`disagg_dir = False if theta_per_scenario`, so the two disaggregations were mutually
+exclusive by construction and one cell of D11's A/B did not exist.
+
+**`master.theta_by_direction` is new, and it had to be.** The direction split was read
+through `self._p("disaggregate_theta_by_direction", ...)` from a key **no config could
+set**, hardcoded true -- the inert-configuration pattern (AUDIT_v4 3.8) with the sign
+flipped: not a knob that did nothing, but a behaviour with no knob. Exposing it without care
+would have silently switched every existing `theta_per_scenario: true` run from `|Omega|`
+proxies to `2|Omega|`. The default therefore resolves to the pre-S4 value in both branches,
+and a test asserts every shipped config keeps its shape on this commit.
+
+Two smaller things in the same area:
+
+- **The anchor now follows the shape**, with one row per `(scenario, direction, prefix)`
+  using **that scenario's own demand** rather than the weighted mean. Strictly tighter, by
+  Jensen: bounding a weighted sum by the mean's implied unserved cost is weaker than
+  bounding each term by its own. On the shipped multi-scenario instance the two scenarios
+  carry 150 and 103 OUT passengers against a mean of 126.5, so this is not a distinction
+  without a difference. `_recourse_bound_data` now carries the per-scenario vectors
+  alongside the mean; the coarser shapes still read the mean.
+- **`rho` is applied once.** The objective used the raw weights while the anchor divided by
+  their sum, so a config whose weights did not already sum to 1 gave the two different
+  notions of expectation, silently (handout 87, Failure 5). `_scenario_weights` is now the
+  single reader and **refuses** weights that do not sum to 1 rather than renormalising:
+  the cut values the master compares against are built from these same probabilities, so
+  quietly rescaling would make the comparison mean something the config did not say.
+
+A cut carrying no `scenario_index` under this shape now raises rather than picking an
+epigraph arbitrarily.
+
+### 3. S5 -- the code half was already done, and the plan was wrong about it
+
+The correction plan said the recourse anchor was off by default. It is not:
+`config.py` has `recourse_lower_bound: bool = True` and `app.py` sets it on every run. The
+`False` fallback inside `master_impl` applies only to a master constructed directly, without
+`app.py`, which is a test path.
+
+So S5 reduces to its measurement -- re-running the Phase 1 2x2 at the 150-cut budget rather
+than the 10-iteration one D40/D45 withdrew -- and that has NOT been done.
+
+### 4. What is NOT measured
+
+`configs/phase1/theta_sd_smoke.yaml` runs 4 iterations and exists only to prove the cut
+routing attaches each `(omega,d)` cut to its own epigraph. It is not a result config and its
+bounds are not comparable to anything: the run stops on the iteration cap, not the gap.
+
+Specifically, **no claim is made here that any shape is better.** The finer epigraph cannot
+bound worse than the coarser one on the same cut family -- it is the same epigraph with
+fewer variables summed before intersection -- but "cannot bound worse per cut family" is not
+"converges faster", and the two shapes do not produce the same cut family. That is D11's
+A/B, at equal iterations, and it is still open.
+
+233 tests pass under p310 in 51 s; 37 are new (15 core point, 22 theta shape).
+
+---
+
+## D64 — 794.62 was never the LP root, and the theta A/B (partial)
+
+Date: 2026-08-17. Configs: `configs/d64/*.yaml`, all derived from
+`configs/phase1/lp_only_150.yaml` -- Q=3, T=44 (660/15), 4 scenarios, 150 LP iterations,
+MW on. **Pure LP**, so no master solve stops on the clock and every cell is reproducible;
+D26 does not apply. This is the only basis in the repository on which a theta-shape
+comparison is a measurement rather than one draw.
+
+### 1. The headline correction: a truncated bound was published as a root
+
+`README.md` carried **794.624549571966** as "LP root relaxation, 150 cuts (reproducible)".
+It was reproducible. It was **not a root**. Its own log says why:
+
+    [LP-PHASE] it=150 obj=794.625 rel_improve=1.11e-06 stall=80/0 cuts=1
+    [LP-PHASE] off after 150 iteration(s): iteration budget (150)
+
+A cut was still being added on the last iteration. The number is whatever the iteration cap
+happened to catch. Re-measured on the current code:
+
+    [LP-PHASE] it=150 obj=794.78 rel_improve=4.46e-12 stall=97/0 cuts=0
+    [LP-PHASE] off after 150 iteration(s): no cut generated
+
+**The LP root is 794.7795573706986**, reached rather than truncated, and reproducible to the
+last digit over two runs.
+
+### 2. Bisected across four commits
+
+Same config, same instance, one run each, in a worktree per commit:
+
+| commit | LP phase ended on | iters | LP bound |
+|---|---|---:|---:|
+| `01b39e8` merge (pre-S1) | **iteration budget (150)** | 150 | 794.624549571966 |
+| `11768ea` S1+S2 (D61) | **no cut generated** | 147 | 794.779555094372 |
+| `4257a7d` + Phase 5 tolerance (D62) | no cut generated | 147 | 794.779555094372 |
+| `e00c1bc` + S3/S4 (D63) | no cut generated | 150 | 794.7795573706986 |
+
+Three things this pins:
+
+- **D61 is what changed it.** Not D62, not D63.
+- **D62's tolerance change is bit-identical here**, which is the confirmation wanted at the
+  time: it loosened a check that was not firing on this instance.
+- **D63 did not move the root** -- 794.779555094372 vs 794.7795573706986, agreeing to 8
+  significant figures, the cut-tolerance scale. It changed the trajectory (convergence at
+  150 rather than 147) and nothing about the bound.
+
+**Mechanism, consistent with the evidence and not isolated by a separate experiment.** The
+intercept used to be *imposed* as `Q(y) - sum(dm*y_inc)` instead of derived from the duals,
+which let it sit up to `face_tol` above the true dual cut (D61 section 3). A cut could then
+look marginally violated when it was not, and the phase kept adding near-duplicates without
+terminating -- exactly the `cuts=1, rel_improve=1.11e-06` signature above. Deriving the
+intercept from `alpha` removed the manufactured violations. Stated as the explanation that
+fits every number measured; a run that isolates it was not done.
+
+**The +0.155 is not evidence that the cuts got stronger.** It is 0.02% on 794, the scale of
+trajectory divergence, and D61's change makes each individual cut *weaker*, not stronger.
+What improved is termination, not cut quality.
+
+### 3. Reading rule this adds
+
+> Say whether the LP phase **converged or was truncated**, and quote the reason it printed.
+> `no cut generated` is a root; `iteration budget (N)` is a bound the cap happened to catch.
+> Reproducible and truncated are not exclusive -- 794.62 reproduced three times and was
+> still not a root.
+
+### 4. Theta shape A/B (D11) -- partial
+
+Four shapes, anchor OFF in all four so the shape is what differs. Cut aggregation is **not**
+free to vary independently: one cut per scenario on a shared theta bounds `max_s Q_s` while
+the reported UB is the weighted mean, which config load refuses (D15/D16). So `multi_cuts`
+is pinned to the shape, and only the within-pair comparisons are one-variable.
+
+**Read the LP-phase bound at exit, not the run's final `best_lb`.** `lp_only_150.yaml` is
+"pure LP" only when the LP phase uses all 150 iterations. When it converges earlier the
+remaining iterations are MIP solves at ~30 s each, and `best_lb` then mixes an LP root with
+MIP progress -- which is exactly the trap that made the `4257a7d` row in section 2 read as
+1071.31 until its log was checked. Every LP bound below is the `[LP-PHASE]` bound at exit.
+
+| cell | proxies | multi-cuts | LP root | LP iters | ended on |
+|---|---:|---|---:|---:|---|
+| `theta_single` | 1 | no | 757.7869449404787 | 150 | **iteration budget** (truncated) |
+| `theta_by_dir` | 2 | no | **794.7795573706986** | 150 | no cut generated |
+| `theta_by_scen` | 4 | yes | **794.7795553673325** | **91** | no cut generated |
+| `theta_by_scen_dir` | 8 | yes | *not measured* | | |
+
+**The direction split is worth +4.9% of LP bound** (757.79 → 794.78) and is the difference
+between a truncated bound and a converged root: `theta_single` stops on the iteration budget
+where `theta_by_dir` converges. Clean one-variable comparison, and it settles the half of
+D11 the shipped default already assumed.
+
+**The per-scenario split reaches the same root in 91 iterations instead of 150** --
+794.7795553673325 against 794.7795573706986, agreeing to 8 significant figures. So it buys
+**iterations, not bound**, on this instance. Whether that is a win depends on cost per
+iteration, and there it loses: it adds one cut per scenario, so at 4 scenarios the master
+grows 4× faster and by iteration 91 carries 364 cuts against 150. Master time per iteration
+reached 30 s. **Fewer, more expensive iterations to the same root** is the honest summary,
+and it does not support switching the default.
+
+`theta_by_scen_dir` and the anchor pair were **stopped, not run**: their LP phases converge
+early and the loop then spends ~30 s/iteration in a MIP phase whose numbers are single draws
+and not comparable across cells, which is ~80 min of CPU for output that would be discarded.
+The right way to run them is with `total_time_limit_s` capped near 400 s so the LP phase
+completes and the MIP tail is cut short.
+
+### 4b. A defect this surfaced in the multi-scenario aggregation *(pre-existing, fails closed)*
+
+`theta_by_scen` logged, in 2 of 96 iterations:
+
+    mode=mixed(mw+unknown)   lb_valid=invalid
+    [CHECK] Bounds are heuristic only; LB/gap optimality logic disabled for current cut mode.
+
+Cause: when one scenario's θ early-exit fires -- its θ already covers its recourse, so it
+generates no cut -- that scenario's diagnostics carry neither `cut_generation_mode` nor
+`cut_valid_lower_bound`. The aggregate reads the missing mode as `"unknown"`, and the
+conjunctive validity aggregation turns the whole iteration INVALID, so `solver.py` drops the
+lower bound.
+
+That is the wrong mapping. A scenario that produced **no cut** is `CutValidity.NO_CUT`, which
+`benders/types.py` already defines as "no cut this iteration; previously established validity
+is untouched" -- not UNKNOWN. The aggregate should be VALID when every scenario that *did*
+produce a cut was valid.
+
+**It fails closed**, so it costs a bound rather than claiming a false one -- the same class as
+the S1 defect (D61 §1), and not a correctness hazard. It did not touch any number in this
+entry: all 91 LP-phase iterations were `lb_valid=valid`, and it fired only in the MIP phase.
+Not fixed here; recorded so the θ A/B is not re-run on top of it.
+
+### 5. What is NOT established
+
+- The anchor A/B (`anchor_off` / `anchor_on` at this basis) -- pending. The 10-iteration
+  result D40/D45 withdrew (0.299 vs 0.314) is still the only measurement, and it is void.
+- Attribution of the +0.155 to a specific line of D61, as against trajectory divergence.
+- Anything about Q>=4, the minute recourse, or the MIP phase. This is one instance, one
+  budget, LP only.
+
+---
+
+## D65 — D42's Magnanti-Wong dominance margins were an artefact of MW failing, and are withdrawn
+
+Date: 2026-08-17. The re-measurement D61 section 2 said was owed, forced by running the full
+suite after the safety fixes. No new experiment was designed for this: the existing
+`MagnantiWongSelectsANonDominatedCut` fixture produced it as two failures.
+
+### 1. What failed
+
+`test_mw_dominates_the_plain_dual_at_every_core_point` reported MW **dominated by 30.0** at
+core point `all_zeros`, and the vacuity guard reported `margins=[0, 0, -30.0, 0, 3.86e-05]`
+against a documented expectation of `uniform ~21, out_only ~30`.
+
+### 2. The -30 was the test comparing at a point MW never optimised over
+
+An all-zero `Ybar` gives the MW objective `sum (S*Ybar - C) * pi` no direction, so the
+subproblem **seeds** one -- all-ones before S3, the projected point after. The test then
+evaluated dominance at the vector it *passed in*. The Pareto claim is only about the point
+MW actually maximised over, so this compared at a direction MW never saw.
+
+Not a projection bug: the substitution predates S3, which only changed the substituted
+value. The defect is that **the substitution was never reported**. `mw_core_point_used` is
+now in the diagnostics at both dispatch sites, and the test reads it. The -30 disappears.
+
+### 3. The 21 and 30 were measured while MW was silently failing
+
+With the comparison corrected the margins are `[0, 0, 0, 0, 3.86e-05]` -- essentially zero
+everywhere, against a documented 21 and 30.
+
+Bisected: restoring the pre-S1b `use_dual` semantics does **not** bring them back, so today's
+safety fixes are not the cause. What changed is D61: MW's runtime weak-duality check used to
+evaluate a Pyomo expression containing `pi_RET[0]`, a variable the backend never sends (no
+arc reaches tau=0), so it raised and **MW failed on this fixture**. The cut labelled `mw` in
+those measurements was the fallback -- finite differences at the time.
+
+**So D42's margins measured finite-differences against the plain dual and called the
+difference Magnanti-Wong dominance. They are withdrawn.**
+
+### 4. What is true now, measured
+
+| core point | margin | max abs(dm_mw - dm_dual) |
+|---|---:|---:|
+| uniform | 0 | 0 |
+| all_ones | 0 | 15 |
+| all_zeros (seeded) | 0 | 15 |
+| out_only | 0 | 0 |
+| ret_only | 3.86e-05 | 15 |
+
+- **Dominance holds**: no margin is negative. The invariant is intact and is by
+  construction, so this is the assertion worth keeping.
+- **MW selects**: slopes differ by up to `S = 15` at three of five core points, so it is not
+  silently returning the solver's dual.
+- **The selection buys nothing here**: the optimal face is flat in these directions on this
+  fixture. MW is doing what it claims and the claim is worth ~0 on `baseline_d9`.
+
+### 5. The guard changed shape, and why that is not tuning a test to pass
+
+The vacuity guard was `max(margin) > 1e-3`, a threshold encoding the artefact margins.
+Lowering it to fit the new numbers would hide the finding. It is replaced by a guard on the
+same property it was there to protect -- that MW is not vacuously returning the plain dual --
+stated as `max abs(dm_mw - dm_dual) > 0` over the core points. That cannot be satisfied by a
+degenerate MW, and it encodes no magnitude that measurement might withdraw.
+
+### 6. What this does NOT say
+
+Nothing about whether MW helps on instances other than `baseline_d9` at this candidate. The
+fixture is one deliberately non-optimal Q=2 schedule chosen to be degenerate. A flat optimal
+face there is not evidence that MW is worthless in general -- but it is evidence that the
+repository has never had a measurement showing otherwise, since the only one it had was
+measuring the fallback.
+
+248 tests pass under p310 in 57 s, with zero `[MW FAIL]` lines.

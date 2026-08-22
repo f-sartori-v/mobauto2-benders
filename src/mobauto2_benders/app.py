@@ -128,8 +128,22 @@ def _recourse_bound_data(cfg, slot_resolution: int) -> dict | None:
 
         R_out = [0.0] * T
         R_ret = [0.0] * T
+        # Also kept per scenario, for the scenario-direction anchor (S4). There the
+        # proxy is theta_out_s[s], bounded by scenario s's OWN unserved cost:
+        #
+        #   theta_out_s[s] >= p * ( R^s_out_cum[j] - S * Y_out_cum[j+W] )
+        #
+        # which is valid for the same reason the aggregated row is, and strictly
+        # tighter -- bounding a weighted sum by the mean's implied cost is weaker than
+        # bounding each term by its own, by Jensen. The coarser shapes still read the
+        # mean; both live in the same payload so the master picks by shape rather than
+        # the caller having to know which it will build.
+        R_out_by_scenario: list[list[float]] = []
+        R_ret_by_scenario: list[list[float]] = []
         for w, container in zip(wts, scen):
             r_o, r_r = _demand_vectors(container, T, int(slot_resolution))
+            R_out_by_scenario.append([float(r_o[t]) for t in range(T)])
+            R_ret_by_scenario.append([float(r_r[t]) for t in range(T)])
             for t in range(T):
                 R_out[t] += w * float(r_o[t])
                 R_ret[t] += w * float(r_r[t])
@@ -152,7 +166,7 @@ def _recourse_bound_data(cfg, slot_resolution: int) -> dict | None:
         Wmax_slots = wmax_minutes_to_slots(
             float(cfg.subproblem.Wmax_minutes), int(slot_resolution)
         )
-    return {
+    payload = {
         "R_out": [float(x) for x in R_out],
         "R_ret": [float(x) for x in R_ret],
         "p": float(cfg.subproblem.p),
@@ -160,6 +174,10 @@ def _recourse_bound_data(cfg, slot_resolution: int) -> dict | None:
         "W_slots": int(Wmax_slots),
         "num_scenarios": int(len(scen)) if scen else 1,
     }
+    if scen:
+        payload["R_out_by_scenario"] = R_out_by_scenario
+        payload["R_ret_by_scenario"] = R_ret_by_scenario
+    return payload
 
 
 def _energy_params_for_resolution(cfg, slot_resolution: int) -> dict[str, float | int]:
@@ -223,6 +241,20 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     mp["aggregate_cuts_by_tau"] = bool(cfg.master.aggregate_cuts_by_tau)
     mp["cut_coeff_threshold"] = float(cfg.master.cut_coeff_threshold)
     mp["theta_per_scenario"] = bool(cfg.master.theta_per_scenario)
+    # Resolve the direction split so the pre-S4 behaviour is the default in BOTH
+    # branches, and the new scenario-direction shape is opted into rather than arriving
+    # as a side effect.
+    #
+    # Before S4 the master computed `disagg_dir = False if theta_per_scenario else True`,
+    # i.e. the direction split was forced OFF whenever per-scenario thetas were on --
+    # which is exactly why the formulation's recommended shape (12) was inexpressible.
+    # Leaving `theta_by_direction` unset reproduces that, so no existing config changes
+    # shape on this commit. Setting it true alongside `theta_per_scenario: true` is what
+    # asks for the 2*|Omega| shape.
+    if cfg.master.theta_by_direction is None:
+        mp["disaggregate_theta_by_direction"] = not bool(cfg.master.theta_per_scenario)
+    else:
+        mp["disaggregate_theta_by_direction"] = bool(cfg.master.theta_by_direction)
     mp["write_lp_after_cut"] = bool(cfg.master.write_lp_after_cut)
     mp["window_trip_caps"] = bool(cfg.master.window_trip_caps)
     mp["charge_before_idle"] = bool(cfg.master.charge_before_idle)
@@ -262,6 +294,13 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
 
     sp["lp_solver"] = cfg.solver.subproblem_solver
     sp["multi_cuts_by_scenario"] = bool(cfg.subproblem.multi_cuts_by_scenario)
+    # The resolved generator (S1b). config.py collapses cut_mode and the legacy
+    # boolean pair into exactly one of mw / dual / finite_difference, so the
+    # dispatch reads one value instead of guessing a precedence between two flags.
+    sp["cut_mode"] = str(cfg.subproblem.cut_mode)
+    sp["acknowledge_no_lower_bound"] = bool(
+        cfg.subproblem.acknowledge_no_lower_bound
+    )
     sp["use_magnanti_wong"] = bool(cfg.subproblem.use_magnanti_wong)
     sp["mw_core_alpha"] = float(cfg.subproblem.mw_core_alpha)
     sp["mw_core_eps"] = float(getattr(cfg.subproblem, "mw_core_eps", 1e-3))

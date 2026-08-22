@@ -14,8 +14,11 @@ from .types import CutValidity, SolveStatus, SubproblemResult, classify_cut_vali
 from .cplex_log import parse_cplex_log_bounds
 from ..signature import (
     candidate_signature,
+    core_point_violations,
+    departures_are_possible,
     fibre_size,
     is_integral,
+    project_core_point,
     signature_key,
 )
 import pyomo.environ as pyo
@@ -1484,14 +1487,36 @@ class BendersSolver:
                     except Exception:
                         Tn = None
 
+                # Trip length, for the window cap in the projection below. Read from the
+                # master's own params rather than recomputed, so the core point and the
+                # master cannot disagree about how long a trip is.
+                trip_slots_n = None
+                try:
+                    trip_slots_n = int(
+                        getattr(self.master, "params", {}).get("trip_slots") or 0
+                    )
+                except (TypeError, ValueError):
+                    trip_slots_n = None
+                if not trip_slots_n or trip_slots_n < 1:
+                    try:
+                        _mp = getattr(self.master, "params", {}) or {}
+                        trip_slots_n = max(
+                            1,
+                            math.ceil(
+                                float(_mp.get("trip_duration_minutes") or 0)
+                                / max(1.0, float(_mp.get("slot_resolution") or 1))
+                            ),
+                        )
+                    except (TypeError, ValueError):
+                        trip_slots_n = 1
+
                 # Initialize neutral interior core if missing
                 if self._mw_core_out is None or self._mw_core_ret is None:
                     if Qn is not None and Tn is not None:
-                        eps = float(mw_eps)
-                        cap = float(Qn) - eps
-                        seed = min(max(float(Qn) / 2.0, eps), cap)
-                        self._mw_core_out = [seed for _ in range(Tn)]
-                        self._mw_core_ret = [seed for _ in range(Tn)]
+                        seed = float(Qn) / 2.0
+                        self._mw_core_out, self._mw_core_ret = project_core_point(
+                            [seed] * Tn, [seed] * Tn, Qn, trip_slots_n, float(mw_eps)
+                        )
 
                 # Update core from current incumbent (moving average).
                 #
@@ -1515,29 +1540,72 @@ class BendersSolver:
                             self._mw_core_ret[t] = (1.0 - mw_alpha) * float(
                                 self._mw_core_ret[t]
                             ) + mw_alpha * float(cur_ret[t])
-                    # Keep strictly interior
-                    eps = float(mw_eps)
-                    cap = float(Qn) - eps
-                    for t in range(Tn):
-                        self._mw_core_out[t] = min(
-                            max(float(self._mw_core_out[t]), eps), cap
+                    # Project into the master's region, rather than clamping to a box.
+                    #
+                    # The clamp this replaces kept every entry in [eps, Q-eps], which is
+                    # outside proj_Y(conv(Z)) on two counts: it put positive Ybar on slots
+                    # the master FIXES to zero -- all tau >= T - 2*trip_slots for OUT --
+                    # and it ignored the trip window entirely, so a point could claim the
+                    # whole fleet departs in every slot. MW then maximised its selection
+                    # objective along a direction the master cannot move in, which does not
+                    # break validity (that is dual feasibility) but does void the
+                    # Pareto-optimality claim that is the only reason to run MW at all
+                    # (formal formulation 16.2).
+                    self._mw_core_out, self._mw_core_ret = project_core_point(
+                        self._mw_core_out,
+                        self._mw_core_ret,
+                        Qn,
+                        trip_slots_n,
+                        float(mw_eps),
+                    )
+                    bad = core_point_violations(
+                        self._mw_core_out, self._mw_core_ret, Qn, trip_slots_n
+                    )
+                    if bad:
+                        raise RuntimeError(
+                            "the projected Magnanti-Wong core point still violates "
+                            f"{len(bad)} necessary condition(s) of the master region: "
+                            + "; ".join(bad[:4])
+                            + ". project_core_point is meant to be idempotent, so this "
+                            "is a defect in the projection rather than a property of "
+                            "the instance."
                         )
-                        self._mw_core_ret[t] = min(
-                            max(float(self._mw_core_ret[t]), eps), cap
+                    # Count entries sitting on the interior floor, over the FREE
+                    # coordinates only. A core point that decays onto the floor is a
+                    # BOUNDARY point, where MW's Pareto selection degrades -- observed at
+                    # x0.7 per iteration under an EMA pulling toward an all-idle
+                    # incumbent (AUDIT_v4 3.3), and this count is what makes that visible
+                    # rather than inferable.
+                    #
+                    # Slots the master fixes are excluded. They sit at exactly 0 by
+                    # construction, so counting them reports structure as decay: at
+                    # T=6/trip=1 that is 3 of 12 entries before anything has decayed at
+                    # all, and the number a reader wants is the one that starts at zero.
+                    ok_out_n, ok_ret_n = departures_are_possible(Tn, trip_slots_n)
+                    free = [
+                        v
+                        for v, ok in list(zip(self._mw_core_out, ok_out_n))
+                        + list(zip(self._mw_core_ret, ok_ret_n))
+                        if ok
+                    ]
+                    if free:
+                        floor = min(
+                            float(mw_eps), float(Qn) / float(2 * max(1, trip_slots_n))
                         )
-                    try:
-                        vals = list(self._mw_core_out or []) + list(
-                            self._mw_core_ret or []
-                        )
-                        if vals:
-                            vmin = min(vals)
-                            vmax = max(vals)
-                            vmean = sum(vals) / float(len(vals))
-                            _vprint(
-                                f"[MW] core updated (t=0..): min={vmin:.3g} max={vmax:.3g} mean={vmean:.3g}"
+                        on_floor = sum(1 for v in free if v <= floor + 1e-12)
+                        _vprint(
+                            "[MW] core projected: min=%.3g max=%.3g mean=%.3g "
+                            "on_floor=%d/%d free trip_slots=%d fixed=%d"
+                            % (
+                                min(free),
+                                max(free),
+                                sum(free) / float(len(free)),
+                                on_floor,
+                                len(free),
+                                int(trip_slots_n),
+                                2 * Tn - len(free),
                             )
-                    except Exception:
-                        pass
+                        )
 
                 # Attach to subproblem params for MW dual selection
                 try:
