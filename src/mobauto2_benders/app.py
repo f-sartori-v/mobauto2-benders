@@ -35,9 +35,50 @@ def import_problem_impl():
         )
 
 
+def _apply_solver_backend_override(cfg, backend: str | None) -> None:
+    """Point all three solver fields at one backend.
+
+    Every shipped config names a CPLEX plugin, so without this a checkout with no
+    licence can run the test suite (D67) and still not run the solver at all --
+    the one thing the configs are for. `--solver appsi_highs` closes that gap.
+
+    All three fields move together on purpose. A master on one backend and a
+    subproblem on another is a configuration nobody has measured, and the seeding
+    LP phase would not be the one the archived numbers came from. The manifest
+    records `solver.master` and `solver.subproblem`, so an overridden run says so
+    in its own provenance rather than looking like the config it started from.
+
+    `cplex_persistent` is refused here for the same reason `config.py` refuses it
+    as `master.solver_backend`: branch-and-cut builds its own persistent solver for
+    the tree, and repointing the master's would make the cuts the tree starts from
+    different from the ones run 2 seeds it with.
+    """
+    if backend is None:
+        return
+    backend = str(backend).strip()
+    if not backend:
+        return
+    if backend.lower() == "cplex_persistent":
+        raise ValueError(
+            "--solver cplex_persistent is not accepted. Branch-and-cut creates its "
+            "own persistent solver for the tree (master.branch_and_cut); the "
+            "master's own backend stays a non-persistent one so the seeding LP "
+            "phase reproduces run 2 exactly."
+        )
+    cfg.solver.master_solver = backend
+    cfg.solver.subproblem_solver = backend
+    cfg.master.solver_backend = backend
+    if backend != "cplex_direct":
+        # CPXPARAM_* keys are mapped by name for cplex_direct and mean nothing to
+        # another backend. Dropping them is honest; passing them through would let
+        # a run claim options it never applied -- the signature defect (D64 (b)).
+        cfg.master.cplex_options = {}
+
+
 def _apply_run_overrides(cfg, overrides: dict | None) -> None:
     if not overrides:
         return
+    _apply_solver_backend_override(cfg, overrides.get("solver_backend"))
     run_overrides = overrides.get("run") if isinstance(overrides, dict) else None
     if not isinstance(run_overrides, dict):
         return

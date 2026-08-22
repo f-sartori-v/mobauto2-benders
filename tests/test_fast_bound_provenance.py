@@ -144,5 +144,55 @@ class TestTheBackendResolverDoesNotSubstituteSilently(unittest.TestCase):
         )
 
 
+class TestTheSolverOverrideMovesAllThreeFields(unittest.TestCase):
+    """`--solver` exists because every shipped config names a CPLEX plugin, so a
+    checkout without a licence could run the suite (D67) and still not run the
+    solver at all. Same attribution principle as the rest of this file: the
+    override must be total and it must show up in the manifest."""
+
+    def _cfg(self):
+        from mobauto2_benders.config import load_config
+
+        return load_config(_helpers.CONFIGS / "baseline_d9.yaml")
+
+    def test_all_three_fields_move_together(self):
+        """A master on one backend and a subproblem on another is a configuration
+        nobody has measured."""
+        from mobauto2_benders.app import _apply_run_overrides
+
+        cfg = self._cfg()
+        _apply_run_overrides(cfg, {"solver_backend": "appsi_highs"})
+        self.assertEqual(cfg.solver.master_solver, "appsi_highs")
+        self.assertEqual(cfg.solver.subproblem_solver, "appsi_highs")
+        self.assertEqual(cfg.master.solver_backend, "appsi_highs")
+
+    def test_cplex_options_are_dropped_off_cplex(self):
+        """Carrying CPXPARAM_* onto another backend would let a run claim options
+        it never applied -- the signature defect of D64 (b)."""
+        from mobauto2_benders.app import _apply_run_overrides
+
+        cfg = self._cfg()
+        _apply_run_overrides(cfg, {"solver_backend": "appsi_highs"})
+        self.assertEqual(dict(cfg.master.cplex_options or {}), {})
+
+    def test_persistent_is_refused(self):
+        """Same reason config.py refuses it as master.solver_backend: the tree
+        builds its own persistent solver and the seeding LP phase must not move."""
+        from mobauto2_benders.app import _apply_run_overrides
+
+        with self.assertRaises(ValueError) as ctx:
+            _apply_run_overrides(self._cfg(), {"solver_backend": "cplex_persistent"})
+        self.assertIn("cplex_persistent", str(ctx.exception))
+
+    def test_absent_or_empty_override_changes_nothing(self):
+        from mobauto2_benders.app import _apply_run_overrides
+
+        before = self._cfg().solver.master_solver
+        for override in ({}, {"solver_backend": None}, {"solver_backend": "  "}):
+            cfg = self._cfg()
+            _apply_run_overrides(cfg, override)
+            self.assertEqual(cfg.solver.master_solver, before)
+
+
 if __name__ == "__main__":
     unittest.main()

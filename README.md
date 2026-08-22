@@ -64,10 +64,16 @@ Reading rules for the numbers below: [§ Reading rules](#reading-rules).
 Decision log: [`docs/docs_decisions.md`](docs/docs_decisions.md).
 Formulation: [`docs/BENDERS_SPEC_v4.md`](docs/BENDERS_SPEC_v4.md).
 
-**If you are writing about this project from the README alone, read
-[`docs/REPORT_REVIEW_v1.md`](docs/REPORT_REVIEW_v1.md) first.** It records what an outside
-report got wrong doing exactly that, and which of the numbers on this page were already
-withdrawn when it was written (D66).
+> **Start at [`docs/PROJECT_STATE_v6.md`](docs/PROJECT_STATE_v6.md), not here.** It is the
+> current state in one file: where the three claims stand, **every withdrawn number in one
+> table**, the D-number remapping for citations taken from outside this repository, and how
+> to install and run the project locally with or without a CPLEX licence.
+>
+> This README is still accurate, but it is long and it is arranged historically, so a figure
+> on this page can be a live claim or a withdrawn one depending on which paragraph it is in.
+> Two outside reports were written from it six weeks apart and both quoted numbers this
+> repository had already withdrawn (D66, D67 §1). The v6 table exists so that cannot happen
+> again; `docs/REPORT_REVIEW_v1.md` records the first of those two in detail.
 
 ## Requirements
 
@@ -210,7 +216,7 @@ did not move behaviour unintentionally.
 python -m unittest discover -s tests
 ```
 
-258 tests, about 35 seconds (D67). They cover cut soundness invariants, the Phase 5
+268 tests, about 35 seconds (D68). They cover cut soundness invariants, the Phase 5
 exactness gate against the monolith (D62), Magnanti–Wong provenance
 and fallback, symmetry validity, the conditions under which a lower bound may be reported,
 the recourse anchor, the LP phase, and configuration combinations that are refused.

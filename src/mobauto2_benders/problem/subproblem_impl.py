@@ -1083,7 +1083,16 @@ class ProblemSubproblem(Subproblem):
                 R_out = (R_out + [0.0] * T)[:T]
                 R_ret = (R_ret + [0.0] * T)[:T]
 
-                # If using dual slopes, force at least one layer per time to create capacity constraints
+                # Floor the capacity counts at one per slot so every tau carries a
+                # capacity row, and therefore a pi, for the plain-dual generator to read.
+                # This is a MODEL switch -- it changes the LP that is built and solved --
+                # and it is keyed off the RESOLVED cut mode, NOT off the legacy
+                # `use_dual_slopes` boolean. That distinction is the whole point:
+                # `cut_mode: dual` and the legacy pair must build the SAME subproblem, or
+                # two configs naming one generator would be measuring two different
+                # models. The old wording here said "if using dual slopes" and read as if
+                # the legacy key were still the switch; it cost a re-derivation. Pinned by
+                # tests/test_fast_cut_mode_model_switch.py.
                 use_dual = _cut_mode_cfg == "dual"
                 K_out_lp = (
                     [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
@@ -1942,7 +1951,9 @@ class ProblemSubproblem(Subproblem):
             if len(R_ret) != T:
                 R_ret = (R_ret + [0.0] * T)[:T]
 
-            # If using dual slopes, ensure at least one layer to create capacity constraints
+            # The same model switch as on the slot path, keyed off the resolved cut
+            # mode for the same reason: the two config forms that name one generator
+            # must build one subproblem.
             use_dual = _cut_mode_cfg == "dual"
             K_out_lp = [max(1, int(K_out[t])) for t in range(T)] if use_dual else K_out
             K_ret_lp = [max(1, int(K_ret[t])) for t in range(T)] if use_dual else K_ret

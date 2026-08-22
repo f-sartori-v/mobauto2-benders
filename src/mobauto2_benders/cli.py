@@ -50,6 +50,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Core-point mixing factor alpha in (0,1]; default from config or 0.3",
     )
+    run_p.add_argument(
+        "--solver",
+        dest="solver",
+        type=str,
+        default=None,
+        help=(
+            "Override the solver backend for master, subproblem and the seeding LP "
+            "phase, e.g. 'appsi_highs'. Every shipped config names a CPLEX plugin; "
+            "this is what runs them without a licence. Timings from a non-CPLEX "
+            "backend are NOT comparable with anything in docs/."
+        ),
+    )
     sub.add_parser("validate", help="Validate config and problem stubs")
     sub.add_parser("info", help="Show current configuration")
     return p
@@ -71,6 +83,8 @@ def cmd_run(args) -> int:
         overrides.setdefault("subproblem_params", {})["mw_core_alpha"] = float(
             args.mw_alpha
         )
+    if getattr(args, "solver", None):
+        overrides["solver_backend"] = str(args.solver)
     if getattr(args, "multi_res", None):
         seq = _parse_multi_res(args.multi_res)
         if not seq:

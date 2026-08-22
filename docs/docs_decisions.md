@@ -3617,3 +3617,130 @@ coverage**, not performance evidence.
 
 The D60 observation still bounds what a bound-side lever can be worth, and none of the two
 live levers in the write-up (F2, stabilisation) were attempted here.
+
+## D68 — The abandoned branch is adjudicated: no merge, two findings ported, and the comment that misled a re-derivation
+
+Date: 2026-08-22. Follows D67, which established that `week2-lp-only-measurement` carries
+four commits made after PR #10's merge point and never merged. This entry decides their
+disposition, so nobody has to re-open the question.
+
+### 1. Disposition: do not merge
+
+| Commit | Content | Disposition |
+|---|---|---|
+| `1f2febb` | `AUDIT_v5.md`, `BENDERS_SPEC_v5.md`, `docs_decisions_v5.md` | **Superseded.** Dated 2026-08-10; `main`'s v4 documents carry D51–D67 on top of everything in them |
+| `62207ce` | Edits to those three | Superseded with them |
+| `7457e58` | `min_one_capacity_layer` split + `test_capacity_layer_switch.py` | **Superseded by a better fix** — see section 2 |
+| `34a0eeb` | `docs/RESULT.md`, the negative result | **Withdrawn by measurement.** It closes the project on a root of 794.62 and a monolith pair of 1569.44/39 s. All three are withdrawn (D64, D50), and D56/D59/D60 postdate it |
+
+Merging would drag four superseded documents and one superseded code change into a tree that
+already went past them. **What the branch does hold that `main` does not is two negative
+findings**, ported in sections 3 and 4 rather than merged.
+
+### 2. `7457e58` is superseded, and the approach would now be wrong
+
+Its argument was right: `use_dual_slopes` named two unrelated things — the plain-dual cut
+**generator**, and a **model** switch flooring per-slot capacity counts at one so every `τ`
+carries a capacity row and therefore a `π`. One key for both means an A/B on either measures
+them summed.
+
+Its fix was a separate `min_one_capacity_layer` defaulting to *inherit `use_dual_slopes`*.
+**That does not survive S1b.** `cut_mode` resolution leaves the legacy boolean False —
+verified: `cut_mode: dual` gives `use_dual_slopes=False` while the legacy pair gives True —
+so inheriting from it would have silently switched the flooring **off** for every config
+migrated to the new key.
+
+`main` fixed the same coupling by keying the model switch off the **resolved** mode,
+`use_dual = _cut_mode_cfg == "dual"`. Both config forms therefore build the same subproblem.
+Checked directly rather than assumed: at a schedule with 19 of 22 slots empty — where
+`max(1, K)` differs from `K` — the two forms agree on the recourse and on every cut
+coefficient.
+
+**The residual defect was the comment.** Both sites still read *"If using dual slopes, force
+at least one layer…"*, describing the superseded keying. Writing this entry, that wording
+cost a re-derivation and a false alarm: the comment says the legacy boolean is the switch,
+`cut_mode: dual` leaves it False, and the obvious conclusion is a live defect splitting the
+model in two. The conclusion is wrong and the comment is why. Both are rewritten to say what
+the code does, and `tests/test_fast_cut_mode_model_switch.py` pins the invariant on the LP —
+recourse **and** every cut coefficient, since value equality alone is too weak (E1's
+reasoning). The abandoned design is recorded in that file's docstring so it is not
+re-proposed.
+
+### 3. Ported: the per-vehicle trip cap is valid and implied by the LP relaxation
+
+Originally `D48` on the abandoned branch, 2026-08-10, and **not recorded anywhere in this
+register**. Raised as a question by the user; the question is the finding.
+
+The proposal was a valid inequality in `y` alone, derived from the energy block, one row per
+vehicle — per-vehicle being the point, since D33 found the recourse anchor inert at Q=3
+precisely because it bounds the fleet's aggregate.
+
+**It cannot raise the root bound.** Every step of the derivation is a non-negative
+combination of rows the master already holds: `b >= 0`, the `C4_bal` equalities,
+`C4_chg_link`, and `C1a`. A non-negative combination of LP-feasible rows is implied by the
+LP relaxation. The only remaining value is integer rounding, and at the test point every
+number in this repository comes from, the ratio is **exactly 19.0000** — worth zero. Where
+it is fractional it is under one trip per vehicle and **shrinks as the horizon grows** (0.158
+at 24 h), the opposite of what a lever for D6's extension would need.
+
+Not ruled out: a family using integrality or `C5` (`b >= 2L·yOUT`) more aggressively than a
+non-negative row combination can. `C5` is the only row in the energy block the derivation
+never touched and the only one that is not a flow identity. No such family is proposed.
+
+**The method note is the durable part.** The proposal survived two derivations, a numeric
+check at two test points and a written specification, and was killed by one paragraph: *does
+this add anything the relaxation does not already have?* Ask it of every valid inequality
+before specifying one. An earlier error in the same derivation summed to `T` instead of
+`T-2`, and the equal numerators that produced were then offered as evidence the derivation
+was sound — two errors, both late, both in the direction of believing the idea.
+
+### 4. Ported: moving the battery block to the subproblem gains nothing
+
+Originally `D49` on the abandoned branch, same date, also unrecorded here. The correction
+came from the user.
+
+**The reason first given was wrong.** The idea was rejected because `C2d` (`c <= atL`) ties
+charging to a binary, so the coupling would grow from `y` to include `atL`. That holds only
+for the variant where `c` descends into the subproblem. Keep `c` in the master and `C2d`
+never leaves, the coupling is `(y, c)`, and `atL` does not move.
+
+**The real reason is stronger.** With `y` and `c` fixed the battery block has **no degrees of
+freedom**: `gchg == delta_chg·c` is an equality, `b[q,0]` is fixed, and `C4_bal` is a
+recursion. `b` and `gchg` are determined, not chosen, and a second stage with nothing to
+choose is an evaluation. Eliminating them is exact projection by substitution, and `b >= 0`
+becomes, in `(y, c)` alone:
+
+```
+L * sum_{s<t} (yOUT[q,s] + yRET[q,s])  -  delta_chg * sum_{s<t} c[q,s]  <=  binit[q]
+```
+
+one row per `(q,t)`. **The feasibility cuts such a subproblem would generate are exactly
+those rows, one at a time** — same region, same LP relaxation, same bound, and weaker during
+the run until they come back. The variant where `c` does descend has real recourse, but its
+feasibility region in `(y, atL)` is still an exact projection of rows the master holds.
+
+Sibling of section 3: there a proposed inequality was a non-negative combination of existing
+rows; here existing rows would be removed and recovered one at a time.
+
+### 5. The D-register collision, resolved by remapping rather than renumbering
+
+`HANDOUT.md` and the abandoned branch allocated D48–D50 independently of this file. Nothing
+here is renumbered — a register that renumbers itself invalidates every citation ever made
+against it. The mapping is:
+
+| Cited as | On the abandoned branch / HANDOUT | In **this** register |
+|---|---|---|
+| D48 | per-vehicle trip cap implied by the LP relaxation | **D68 §3** (ported). This file's own D48 is the signature/fibre design |
+| D49 | battery block to the subproblem gains nothing | **D68 §4** (ported). This file's own D49 is the window trip caps |
+| D50 | `use_dual_slopes` split into two keys | **D68 §2** (superseded). This file's own D50 is the Q refutation and the monolith's return |
+
+Any D-number cited from a document **outside this repository** must be remapped through this
+table before it is quoted. D-numbers cited against `docs/docs_decisions.md` are unambiguous:
+it is one contiguous register, D1 to D68, with no duplicate allocation (D67 §1).
+
+### 6. Result
+
+**259 passed, 9 skipped.** The ten new tests are the cut-mode model-switch invariant (6)
+and the `--solver` override (4). No
+measurement in this entry is new: sections 3 and 4 are quoted from the branch that produced
+them, and section 2's comparison is a structural check on one fixture, not a benchmark.
