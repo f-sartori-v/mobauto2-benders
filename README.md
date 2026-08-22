@@ -48,11 +48,14 @@ bound cannot lift its own bound — described a symptom of a root relaxation sit
 not a property of the master.
 
 **It is still not competitive.** The monolith solves the same instance to optimality in
-39 s; the run above spent ~1000 s to reach a Benders gap of 46%, and that gap comes from a
-clock-truncated run, so it is a single draw. Adding Benders iterations on top does not move
-the bound — it oscillates in 1064–1090 with no trend, a spread the size of the run-to-run
-noise. The binding constraint has moved from the cut set to **the master solve being
-truncated at ~20% internal gap**.
+**947 s at 1658.86** (D50); the run above spent ~1000 s to reach a lower bound of 1148.65,
+which is **69.2% of that optimum** (D54), and it comes from a clock-truncated run, so it is
+a single draw. The "39 s" and the 46% gap that used to stand here were computed against the
+withdrawn 1569.44 pair and are void — see the correction above the table.
+
+Adding Benders iterations on top does not move the bound — it oscillates in 1064–1090 with
+no trend, a spread the size of the run-to-run noise. The binding constraint has moved from
+the cut set to **the master solve being truncated at ~20% internal gap**.
 
 **Upper bounds were never in doubt**: each is an exhibited feasible schedule. Nothing here
 is a verdict on Q≤2, where the capacity anchor is worth 1662–7737 on the empty master.
@@ -60,6 +63,11 @@ is a verdict on Q≤2, where the capacity anchor is worth 1662–7737 on the emp
 Reading rules for the numbers below: [§ Reading rules](#reading-rules).
 Decision log: [`docs/docs_decisions.md`](docs/docs_decisions.md).
 Formulation: [`docs/BENDERS_SPEC_v4.md`](docs/BENDERS_SPEC_v4.md).
+
+**If you are writing about this project from the README alone, read
+[`docs/REPORT_REVIEW_v1.md`](docs/REPORT_REVIEW_v1.md) first.** It records what an outside
+report got wrong doing exactly that, and which of the numbers on this page were already
+withdrawn when it was written (D66).
 
 ## Requirements
 
@@ -202,7 +210,8 @@ did not move behaviour unintentionally.
 python -m unittest discover -s tests
 ```
 
-98 tests, about 50 seconds. They cover cut soundness invariants, Magnanti–Wong provenance
+248 tests, about 57 seconds (D65). They cover cut soundness invariants, the Phase 5
+exactness gate against the monolith (D62), Magnanti–Wong provenance
 and fallback, symmetry validity, the conditions under which a lower bound may be reported,
 the recourse anchor, the LP phase, and configuration combinations that are refused.
 

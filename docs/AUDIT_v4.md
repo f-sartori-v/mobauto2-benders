@@ -262,7 +262,12 @@ leave a worse best-bound when the solve stops on gap or time.
 > internal gap falling from 0.9994 to ~0.20 and an upper bound appearing for the first time
 > at Q=3. The verdict "structural" is withdrawn: the failure was the cut budget the 30 s
 > ceiling allowed. The competitiveness conclusion stands -- the monolith still solves this
-> instance in 39 s -- but the reason stated here is wrong.
+> instance faster -- but the reason stated here is wrong.
+>
+> **Two later withdrawals apply to this block as well.** The "39 s" monolith reference it
+> originally quoted is void (D50: the reference is 1658.86 in 947 s), and 794.624549571966
+> was never an LP root -- the phase stopped on `iteration budget (150)` with a cut still
+> being generated. The converged root is **794.7795573706986** (D64).
 
 The correctness phase is closed. The ordering below is by value, and the first two items
 are research output rather than code.

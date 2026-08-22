@@ -44,8 +44,9 @@ must be produced on the corrected model.
    nodes explored in those seconds depend on machine load (§0.10, D26). The manifest
    therefore records **whether** a run was reproducible rather than asserting that it
    was: `reproducibility.bit_reproducible` and the count behind it.
-5. Every claim in the paper has a test. **Implemented** — 59 tests,
-   `python -m unittest discover -s tests`.
+5. Every claim in the paper has a test. **Implemented** — 248 tests (D65),
+   `python -m unittest discover -s tests`. The count stood at 59 when this line was
+   written and at 196 at D62; it is restated here rather than left to drift.
 6. Gapped runs never reported as optima without a marker. **Tested**
    (`test_gapped_run_is_not_reported_as_optimal`).
 7. Every reported number states which subproblem mode produced it. **Implemented** — each
@@ -610,7 +611,12 @@ Gates 2–5. D1–D8 and D10–D13 stand as written.
 > internal gap falling from 0.9994 to ~0.20 and an upper bound appearing for the first time
 > at Q=3. The verdict "structural" is withdrawn: the failure was the cut budget the 30 s
 > ceiling allowed. The competitiveness conclusion stands -- the monolith still solves this
-> instance in 39 s -- but the reason stated here is wrong.
+> instance faster -- but the reason stated here is wrong.
+>
+> **Two later withdrawals apply to this block as well.** The "39 s" monolith reference it
+> originally quoted is void (D50: the reference is 1658.86 in 947 s), and 794.624549571966
+> was never an LP root -- the phase stopped on `iteration budget (150)` with a cut still
+> being generated. The converged root is **794.7795573706986** (D64).
 
 The correctness contract above is now enforced by tests. The remaining work is research
 output and performance, ordered in `AUDIT_v4` §3:

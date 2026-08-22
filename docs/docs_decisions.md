@@ -3382,3 +3382,130 @@ repository has never had a measurement showing otherwise, since the only one it 
 measuring the fallback.
 
 248 tests pass under p310 in 57 s, with zero `[MW FAIL]` lines.
+
+---
+
+## D66 — An outside report read the README and inherited four withdrawn numbers, because the README restated one of them after correcting it
+
+Date: 2026-08-22. Trigger: a scientific report on T.5.4, written against `README.md` plus a
+task brief, submitted for review. Its provenance note states that `docs_decisions.md`,
+`BENDERS_SPEC_v4.md` and the design handouts could not be fetched. Review:
+`docs/REPORT_REVIEW_v1.md`.
+
+**No run was executed.** CPLEX and Pyomo are not installed in the environment this was done
+in, so every number below is quoted from the entry that recorded it. Nothing here is a new
+measurement, and the review says so in its own section 8.
+
+### 1. What the report got wrong, and where it got it
+
+Six headline numbers, all of them withdrawn by this log before the report was written:
+794.6245 as an LP root (D64), 1569.44 in 39 s as the monolith reference (D50), the 46%
+Benders gap those two produce (D50/D54), 98 tests (D65 says 248), and Magnanti-Wong cited as
+a working strength when D65 had just withdrawn its only dominance measurement as an artefact
+of MW silently failing.
+
+The report is not careless. It cites the README's own withdrawal of the 0.35 collapse
+narrative correctly, and it flags `a2d9e97`, the 3267 -> 1828 line count and the 85.7% figure
+as unverified rather than asserting them. It had the discipline; it did not have the files.
+
+### 2. The part that is our defect, not theirs
+
+`README.md` corrected 1569.44/39 s to 1658.86/947 s in a block quote under the headline
+table, and then **restated "39 s" three paragraphs later** in the live competitiveness
+verdict. The report read the live sentence.
+
+That is this repository's own reading rule -- *"kept so the claim is not quoted again"* --
+failing at the exact point where an outside reader picks a number up. A correction that a
+later paragraph contradicts is not a correction; it is two claims, and a reader will take the
+one that reads as the verdict.
+
+Four sites carried a withdrawn figure or a stale count. All four fixed here:
+
+| file | was | now |
+|---|---|---|
+| `README.md` competitiveness verdict | "solves the same instance to optimality in 39 s" | 947 s at 1658.86, with the 69.2% from D54, and the void pair named |
+| `README.md` tests | 98 tests, ~50 s | 248 tests, ~57 s (D65) |
+| `BENDERS_SPEC_v4.md` non-negotiable 5 | 59 tests | 248, with the 59 and 196 waypoints kept so it is visibly a drifting count |
+| `BENDERS_SPEC_v4.md` + `AUDIT_v4.md` superseded block | "the monolith still solves this instance in 39 s" | the comparative claim without the number, plus the D50 and D64 withdrawals stated inline |
+
+The two superseded blocks were annotated rather than rewritten: they are kept deliberately so
+the old claim is visible, and editing the history would defeat that. What they lacked was a
+marker that their *replacement* numbers had since been withdrawn too.
+
+### 3. Three of the report's four blockers describe code that does not exist
+
+The report builds its Stage 0 on "N1, N11, N12, N14", called high-severity audit findings.
+`AUDIT_v4.md` has no N11, N12 or N14, and its N1 is a closed duplicate-helper item. The
+numbering came from the brief.
+
+More consequential than the numbering: `grep` over `src/` for `rolling`, `commitment`,
+`carried`, `B8`, `B9`, policy toggles and cut-pool flushing returns only comment prose. There
+is no rolling horizon -- the horizon is frozen at 10 h single-shot (spec 1.1, D6) -- no
+commitment carrying, and no hard/soft capacity switch.
+
+So the report's "per-roll-under-carried-commitments" scoping label would **assert a structure
+the code does not have**, and its cut-pool-flush blocker is not merely unbuilt: a runtime
+hard/soft capacity toggle changes which recourse rows exist as a function of configuration,
+which is the neighbour of the defect that cost this project six months of invalid bounds
+(D30, note v2 section 6). Flushing is the easy half of that problem and the report addresses
+only the easy half.
+
+### 4. Its top-priority recommendation is backwards, and D52 is why
+
+The report makes closing the minute/slot granularity question its number-one blocker, and
+recommends aggregating demand to slots and generating cuts natively there, using the minute
+recourse only as an upper-bound evaluator.
+
+That is the arm D53-D55 measured as **mispricing its own schedules by 28.5% on the objective
+and 66-86% on waiting**, surviving a 10-minute grid. And the dichotomy it poses -- project and
+risk loose cuts, or aggregate and lose exactness -- is false: D52 found the third door. A
+minute recourse whose capacity rows stay indexed by departure slot produces one dual per slot
+natively, so the cut is the same object, the machinery is untouched, and it costs under 1% per
+iteration. What is actually open on that path is **units**, not validity.
+
+Worth recording as a general lesson rather than a complaint about one report: a reader with
+only the README will reconstruct the *problem* correctly and get the *solution* backwards,
+because the README carries results and the reasons live in here.
+
+### 5. What the report could not see, and what it changes
+
+D51-D65 were invisible to it. Four of those matter enough to name:
+
+- **D56** -- the decomposition finds a schedule within 2% of optimal and cannot prove it. The
+  bound is stuck, the schedule is not. This narrows "not competitive" into something
+  actionable: only an attack on the relaxation can work.
+- **D60** -- CPLEX's own root cuts reach 95-96% of the optimum in 9-15 s. The report's Stage 1
+  premise is "a root relaxation sitting near zero", inherited from the withdrawn 0.35 figures.
+  Partial Benders must beat a 96% root, not a zero one. Stating that bar before the experiment
+  is what let stage 3 close readably.
+- **D59** -- the monolith stops closing at Q=5. The report's fallback recommendation is to ship
+  the monolith if it wins at every size the operation needs, "Q <= 5" -- a condition already
+  tested at its own boundary and found false there.
+- **D62** -- the Phase 5 exactness gate. The report lists optimality certification as simply
+  open, without the fact that the decomposition is now proven to reach the extensive form's
+  optimum under both cut modes where both can be solved.
+
+### 6. Two recommendations reversed, one deferred
+
+Recorded here because they are judgements against measurements already in this log, not new
+findings:
+
+- **Branch-and-cut as the default: reversed.** The report adopts it for D46's 18% better upper
+  bound and quotes, without joining, D46's 9.6% cost in *lower* bound. With D56 -- UB within
+  2%, LB stuck -- that trades the scarce quantity for the abundant one.
+- **Papadakos core-point updating: deferred.** D63 moved the core point inside the master's
+  region five days ago and D65 established MW's selection is worth ~0 on the only fixture that
+  exists, while also establishing the repository has never measured MW at scale at all. The
+  prerequisite is one LP-only MW-vs-`dual` measurement, not an accelerator.
+- **Partial Benders: kept**, as the report's best structural item, but at Q=5 rather than Q=3,
+  because D60's Dantzig-Wolfe lift went to +0.0% exactly where the monolith fails.
+
+### 7. What this does NOT establish
+
+Nothing was re-measured, so the corrections are corrections of **provenance**: they establish
+that a number was withdrawn here, not that its replacement is right. The absence claims in
+section 3 rest on `grep` over `src/` plus D6's frozen horizon; a rolling horizon implemented
+under vocabulary not searched for would have been missed. The report's operational context and
+its literature benchmarking were not audited -- they cite sources not fetched here. And D62's
+limit is this entry's limit: `mobauto2_milp/model.py` and `master_impl.py` are two hand-synced
+copies of one first stage, so a defect in both is invisible to every check named above.
