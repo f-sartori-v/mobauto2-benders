@@ -557,7 +557,19 @@ class MagnantiWongSelectsANonDominatedCut(unittest.TestCase):
         cls.mw = {}
         for name, (o, r) in cls.CORE_POINTS.items():
             core = ([o] * T, [r] * T)
-            cls.mw[name] = (evaluate(True, core), core)
+            md, res = evaluate(True, core)
+            # Dominance is a claim about the point MW MAXIMISED OVER, which is not
+            # always the one passed: an all-zero Ybar gives the MW objective no
+            # direction, so the subproblem seeds one, and S3 then projects it into
+            # the master region. Comparing at the passed vector compares at a
+            # direction MW never saw -- measured, that reported MW as "dominated by
+            # 30" at all_zeros while the selection was working correctly.
+            used = (res.diagnostics or {}).get("mw_core_point_used") or {}
+            core_used = (
+                list(used.get("Yout", core[0])),
+                list(used.get("Yret", core[1])),
+            )
+            cls.mw[name] = ((md, res), core_used)
 
         # Neighbouring schedules: flip one slot. The true recourse at each is what
         # the cut has to stay under. Priced once here; the assertions are cheap.
@@ -632,7 +644,12 @@ class MagnantiWongSelectsANonDominatedCut(unittest.TestCase):
         """The invariant. MW maximises the cut's value at Ybar over the optimal
         face and the plain dual is a point on that face, so MW can never be worse.
         A negative margin means the MW objective or a sign convention is wrong; it
-        is not an instance-specific outcome."""
+        is not an instance-specific outcome.
+
+        Evaluated at the core point MW ACTUALLY used (`mw_core_point_used`), which
+        the subproblem now reports. That is the point the Pareto claim is about;
+        the passed vector may have been seeded or projected before use.
+        """
         for name, ((mw_md, _), core) in self.mw.items():
             with self.subTest(core_point=name):
                 mw_val = self._value_at(mw_md, core[0], core[1])
@@ -706,31 +723,50 @@ class MagnantiWongSelectsANonDominatedCut(unittest.TestCase):
                     ),
                 )
 
-    def test_mw_is_strictly_better_on_at_least_one_core_point(self):
-        """Guards the test above against passing vacuously.
+    def test_mw_actually_selects_rather_than_returning_the_plain_dual(self):
+        """Guards the dominance test above against passing vacuously.
 
-        If MW silently degraded to returning whatever dual the solver handed back,
-        every margin would be exactly zero and the dominance assertion would still
-        pass while checking nothing. Measured on this fixture, by core point:
-        all_zeros 0, ret_only 0, all_ones ~2e-4, uniform ~21, out_only ~30. Two
-        exact zeros are expected -- at those core points the MW objective does not
-        separate the face -- so the guard is that a strict win exists somewhere,
-        not at every point.
+        If MW silently degraded to handing back whatever dual the solver produced,
+        every margin would be exactly zero and dominance would still "pass" while
+        checking nothing. So the guard is that MW SELECTS: its slope vector must
+        differ from the plain dual's at at least one core point.
+
+        This replaces a guard on the margin SIZE (`max(margin) > 1e-3`), and the
+        reason is a measurement rather than convenience. That threshold encoded
+        margins this docstring used to record as `uniform ~21, out_only ~30`.
+        Re-measured after D61 they are **0**, and the earlier figures were an
+        artefact: MW's runtime weak-duality check evaluated a Pyomo expression
+        containing `pi_RET[0]`, a variable the backend never sends, so MW was
+        FAILING on this fixture and the "MW" cut being compared was the fallback --
+        finite differences at the time. The old margins measured
+        fdiff-vs-plain-dual and called it dominance.
+
+        With MW actually running: dominance holds everywhere (margins >= 0) and the
+        margins are ~0, because the optimal face is flat in these core-point
+        directions on this fixture. The slopes still differ by up to S, so the
+        selection is real; it just buys nothing here. That is the D42 re-measurement
+        D61 section 2 said was owed, and it withdraws those margins.
         """
-        margins = [
-            self._value_at(mw_md, core[0], core[1])
-            - self._value_at(self.dual_md, core[0], core[1])
-            for (mw_md, _), core in self.mw.values()
-        ]
+        diffs = []
+        for name, ((mw_md, _), _core) in self.mw.items():
+            worst = 0.0
+            for key in ("coeff_yOUT", "coeff_yRET"):
+                mw_c, dual_c = mw_md[key], self.dual_md[key]
+                for t in range(self.T):
+                    worst = max(
+                        worst, abs(mw_c.get((0, t), 0.0) - dual_c.get((0, t), 0.0))
+                    )
+            diffs.append((name, worst))
         self.assertGreater(
-            max(margins),
-            1e-3,
+            max(d for _n, d in diffs),
+            1e-9,
             msg=(
-                "MW never beat the plain dual at any core point. Either MW is not "
-                f"selecting at all, or the LP is not degenerate here. margins={margins}"
+                "MW returned the plain dual's slope vector at every core point, so "
+                "the dominance assertion above is vacuous. Either MW is not "
+                "selecting, or it is falling back while reporting itself as `mw`. "
+                f"per-core-point max|dm_mw - dm_dual| = {diffs}"
             ),
         )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1709,6 +1709,17 @@ class ProblemSubproblem(Subproblem):
                         "timing_cutgen_s": cutgen_time,
                         "cut_generation_mode": cut_mode_used,
                         "mw_core_point_seeded": bool(core_seeded),
+                        # The core point MW ACTUALLY maximised over. An all-zero Ybar gives
+                        # the MW objective no direction, so it is seeded, and S3 then projects
+                        # it into the master region -- either step can make this differ from
+                        # what the caller passed. The Pareto claim is about THIS point;
+                        # comparing dominance at the passed vector compares at a direction MW
+                        # never saw. Reported because a silent substitution is how that goes
+                        # unnoticed for as long as it did.
+                        "mw_core_point_used": {
+                            "Yout": list(Ybar_out),
+                            "Yret": list(Ybar_ret),
+                        },
                         "cut_generation_proxy": proxy_diag,
                         "cut_generation_fallback": fallback_diag,
                         "cut_valid_lower_bound": bool(cut_lb_valid),
@@ -2274,6 +2285,17 @@ class ProblemSubproblem(Subproblem):
                 "timing_cutgen_s": cutgen_time,
                 "cut_generation_mode": cut_mode_used,
                 "mw_core_point_seeded": bool(core_seeded),
+                # The core point MW ACTUALLY maximised over. An all-zero Ybar gives
+                # the MW objective no direction, so it is seeded, and S3 then projects
+                # it into the master region -- either step can make this differ from
+                # what the caller passed. The Pareto claim is about THIS point;
+                # comparing dominance at the passed vector compares at a direction MW
+                # never saw. Reported because a silent substitution is how that goes
+                # unnoticed for as long as it did.
+                "mw_core_point_used": {
+                    "Yout": list(Ybar_out),
+                    "Yret": list(Ybar_ret),
+                },
                 "cut_generation_proxy": proxy_diag,
                 "cut_generation_fallback": fallback_diag,
                 "cut_valid_lower_bound": bool(cut_lb_valid),

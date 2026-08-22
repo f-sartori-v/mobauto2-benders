@@ -3308,3 +3308,77 @@ Not fixed here; recorded so the θ A/B is not re-run on top of it.
 - Attribution of the +0.155 to a specific line of D61, as against trajectory divergence.
 - Anything about Q>=4, the minute recourse, or the MIP phase. This is one instance, one
   budget, LP only.
+
+---
+
+## D65 — D42's Magnanti-Wong dominance margins were an artefact of MW failing, and are withdrawn
+
+Date: 2026-08-17. The re-measurement D61 section 2 said was owed, forced by running the full
+suite after the safety fixes. No new experiment was designed for this: the existing
+`MagnantiWongSelectsANonDominatedCut` fixture produced it as two failures.
+
+### 1. What failed
+
+`test_mw_dominates_the_plain_dual_at_every_core_point` reported MW **dominated by 30.0** at
+core point `all_zeros`, and the vacuity guard reported `margins=[0, 0, -30.0, 0, 3.86e-05]`
+against a documented expectation of `uniform ~21, out_only ~30`.
+
+### 2. The -30 was the test comparing at a point MW never optimised over
+
+An all-zero `Ybar` gives the MW objective `sum (S*Ybar - C) * pi` no direction, so the
+subproblem **seeds** one -- all-ones before S3, the projected point after. The test then
+evaluated dominance at the vector it *passed in*. The Pareto claim is only about the point
+MW actually maximised over, so this compared at a direction MW never saw.
+
+Not a projection bug: the substitution predates S3, which only changed the substituted
+value. The defect is that **the substitution was never reported**. `mw_core_point_used` is
+now in the diagnostics at both dispatch sites, and the test reads it. The -30 disappears.
+
+### 3. The 21 and 30 were measured while MW was silently failing
+
+With the comparison corrected the margins are `[0, 0, 0, 0, 3.86e-05]` -- essentially zero
+everywhere, against a documented 21 and 30.
+
+Bisected: restoring the pre-S1b `use_dual` semantics does **not** bring them back, so today's
+safety fixes are not the cause. What changed is D61: MW's runtime weak-duality check used to
+evaluate a Pyomo expression containing `pi_RET[0]`, a variable the backend never sends (no
+arc reaches tau=0), so it raised and **MW failed on this fixture**. The cut labelled `mw` in
+those measurements was the fallback -- finite differences at the time.
+
+**So D42's margins measured finite-differences against the plain dual and called the
+difference Magnanti-Wong dominance. They are withdrawn.**
+
+### 4. What is true now, measured
+
+| core point | margin | max abs(dm_mw - dm_dual) |
+|---|---:|---:|
+| uniform | 0 | 0 |
+| all_ones | 0 | 15 |
+| all_zeros (seeded) | 0 | 15 |
+| out_only | 0 | 0 |
+| ret_only | 3.86e-05 | 15 |
+
+- **Dominance holds**: no margin is negative. The invariant is intact and is by
+  construction, so this is the assertion worth keeping.
+- **MW selects**: slopes differ by up to `S = 15` at three of five core points, so it is not
+  silently returning the solver's dual.
+- **The selection buys nothing here**: the optimal face is flat in these directions on this
+  fixture. MW is doing what it claims and the claim is worth ~0 on `baseline_d9`.
+
+### 5. The guard changed shape, and why that is not tuning a test to pass
+
+The vacuity guard was `max(margin) > 1e-3`, a threshold encoding the artefact margins.
+Lowering it to fit the new numbers would hide the finding. It is replaced by a guard on the
+same property it was there to protect -- that MW is not vacuously returning the plain dual --
+stated as `max abs(dm_mw - dm_dual) > 0` over the core points. That cannot be satisfied by a
+degenerate MW, and it encodes no magnitude that measurement might withdraw.
+
+### 6. What this does NOT say
+
+Nothing about whether MW helps on instances other than `baseline_d9` at this candidate. The
+fixture is one deliberately non-optimal Q=2 schedule chosen to be degenerate. A flat optimal
+face there is not evidence that MW is worthless in general -- but it is evidence that the
+repository has never had a measurement showing otherwise, since the only one it had was
+measuring the fallback.
+
+248 tests pass under p310 in 57 s, with zero `[MW FAIL]` lines.
