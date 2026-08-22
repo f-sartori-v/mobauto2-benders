@@ -3509,3 +3509,111 @@ under vocabulary not searched for would have been missed. The report's operation
 its literature benchmarking were not audited -- they cite sources not fetched here. And D62's
 limit is this entry's limit: `mobauto2_milp/model.py` and `master_impl.py` are two hand-synced
 copies of one first stage, so a defect in both is invisible to every check named above.
+
+## D67 — The soundness invariants were CPLEX-gated and skipped 63 of themselves; a second backend runs them, and the master had no portable way to report a bound
+
+Date: 2026-08-22. Forced by report v2 of the T.5.4 write-up, which lists S1b, S7, the D64
+`NO_CUT` mapping and the placement convention as outstanding engineering items. All four
+were already done (section 1). Checking that is what surfaced the item that was not.
+
+### 1. Four items reported outstanding are closed, and one document family explains why
+
+v2 ranks `BENDERS_CORRECTION_PLAN.md` first and says it "governs on every conflict". That
+file is **not in this repository**, and neither are `HANDOUT.md`, `HANDLER_CENSUS.md`,
+`SESSION_TOOLING.md`, `MobAuto2_Benders_Formal_Formulation.md` or `docs/RESULT.md`. v1 read
+the repository and not those documents; v2 read those documents and not the repository.
+Neither saw both sides, and the outstanding-item list is what that costs.
+
+| v2 item | State here |
+|---|---|
+| S1b — `cut_mode` enum, `dual` unreachable | Done. `config.py` `_CUT_MODES = ("mw", "dual", "finite_difference")`, one key, the legacy pair rejected when mixed with it |
+| S7 — refuse `finite_difference` at load | Done. Raises unless `acknowledge_no_lower_bound` is set, and the message names the legacy fall-through |
+| D64 `NO_CUT` mapping | Done in `c65f3fa` (`_contributors`/`_abstained`), four tests in `test_fast_safety_fixes` |
+| Placement convention into the manifest | Done. `departure_policy` is validated at load and recorded under `swept_parameters`; all six of the reporting conditions are in the manifest |
+
+Two provenance conflicts v2 could not resolve, resolved here from the git history:
+
+- **Open or closed.** `docs/RESULT.md` exists in exactly one commit, `34a0eeb`, and
+  `git merge-base --is-ancestor 34a0eeb main` is false. PR #10 merged
+  `week2-lp-only-measurement` at `fdcc68a`; four commits were made on that branch **after**
+  the merge point and never merged, the last being RESULT.md. The negative result was
+  written and abandoned, and `main` ran another twelve days past it. The project is open.
+- **The D-register collision.** This file is one contiguous register, D1 to D67, with no
+  duplicate allocation. The collision v2 describes is real but belongs to that same
+  abandoned branch, whose `7457e58` allocates a different D50. `HANDOUT.md` was quoting the
+  dead branch. Bare D-citations against **this** file are unambiguous.
+
+Five of the eleven commit identifiers v2 lists (`dbc01e2`, `1b8fdb3`, `b0ed6bf`, `a423058`,
+`bf504d5`) are not valid objects in any ref here. Six are, with matching dates and subjects.
+
+### 2. The item that was actually outstanding
+
+Every solver gate in `tests/` named `cplex` or `cplex_direct` literally, so a checkout
+without a licence skipped **63 tests** and printed a green suite. What went unchecked was
+not incidental: E1 and E2, cut underestimation at neighbouring schedules, the Phase-5
+equality against the monolith, the two bound-validity invariants, and the regenerability of
+4183.24. This is the same shape as the defect `_require_solvers` was written to end -- "not
+run" reading as "passed" -- one level up, at the gate rather than inside it.
+
+Nothing in those invariants is CPLEX-specific. They are properties of the **formulation**,
+and any backend that solves an LP to optimality and returns duals can check them. HiGHS
+does, and installs as a pip wheel. `_helpers.require_solver_backend` resolves the backend in
+one place, `fixture_for_backend` rewrites only the solver keys a config already has, and
+CPLEX stays first in the preference order so a licensed checkout drives the tracked files
+byte for byte and no archived number moves. A pin (`MOBAUTO2_TEST_SOLVER`) that is not
+installed **raises** rather than skipping: quietly running a different instrument is how a
+result gets attributed to the wrong one.
+
+Branch-and-cut keeps its CPLEX-only gate on purpose. It needs a lazy constraint callback,
+HiGHS has no callback interface, and a substitute that ran the tree without the callback
+would assert the D44 contract against a solver that never registered it.
+
+### 3. What running them found: the master could not report a bound off CPLEX
+
+First run under HiGHS, the two most valuable invariants -- LB <= a known feasible objective,
+and LB <= UB -- **skipped themselves**. `best_lower_bound` was `None`.
+
+The cause is not unsoundness. Every iteration came back `term=optimal status=ok
+lb_valid=valid mode=mw`, and `mp_best_bound=-`. `res.solver.best_bound` is populated by the
+CPLEX plugins and by nothing else; the other two sources in the provenance chain are the
+CPLEX Python API and the CPLEX log. The master solved to proven optimality four times and
+had nowhere to read a bound from. Failing closed there is correct and stays -- it claimed no
+bound rather than a wrong one -- but having no portable source is the defect.
+
+`_bounds_from_problem_section` reads Pyomo's generic `res.problem` section, and is **last**
+in the chain so CPLEX still wins everywhere it can. The dangerous half is the sense: on a
+minimisation the dual bound is `lower_bound`, and reading that same field on a maximisation
+returns the **primal** side and claims a lower bound at or above the optimum. That is the
+one error a lower bound must never make, and it is the shape of both C4 and D30. The sense
+is read off the results object and an unknown sense returns nothing rather than guessing.
+`UndefinedData` and infinities are filtered rather than surviving as bounds. Seven tests in
+`test_fast_bound_provenance` pin all of it, including that the source is labelled
+`problem_section` and sits after the two CPLEX fallbacks in the file.
+
+With it, the fixture run gives **LB 2344.56, UB 4580.74**, LB below the known feasible
+4183.24, and no `[CHECK FAIL]`.
+
+### 4. Result
+
+**249 passed, 9 skipped**, from 185 passed / 63 skipped. The 9 are the seven branch-and-cut
+tests and two that resolve `CPXPARAM_*` names against the real CPLEX API -- CPLEX-specific
+machinery, not a formulation invariant among them.
+
+Two results are worth more than the count. The **Phase-5 exactness gate passes on a second
+solver**: two monoliths and four Benders arms, both sides proving optimality rather than
+stopping on the clock. And **4183.24 regenerates under HiGHS** to two decimal places. That
+reference had only ever been produced by CPLEX, so agreement across two independent
+implementations *and* two independent solvers is a stronger form of claim 1 than the
+repository previously had -- it rules out a CPLEX-specific artefact, which nothing before
+could.
+
+### 5. What this does NOT establish
+
+No competitiveness number here is comparable with any in `docs/`. HiGHS is not CPLEX and the
+runtimes are not the same instrument; the fixture run above is four iterations of a tiny
+gate, not a measurement. Every timing and bound quoted elsewhere in this file stands on the
+CPLEX runs that produced it and is unaffected. What the second backend buys is **soundness
+coverage**, not performance evidence.
+
+The D60 observation still bounds what a bound-side lever can be worth, and none of the two
+live levers in the write-up (F2, stabilisation) were attempted here.

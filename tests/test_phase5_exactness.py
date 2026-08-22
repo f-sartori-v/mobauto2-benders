@@ -38,6 +38,7 @@ from __future__ import annotations
 import unittest
 
 import _helpers  # noqa: F401  (puts src/ on sys.path)
+from _helpers import require_solver_backend
 from _helpers import CONFIGS
 
 BENDERS = {
@@ -81,20 +82,6 @@ def _declared_demand(cell: str) -> float:
     rel = str((load_milp(MONOLITH[cell]).data.scenario_files or [None])[0])
     doc = yaml.safe_load((_helpers.REPO_ROOT / rel).read_text(encoding="utf-8"))
     return float(doc["n"])
-
-
-def _require_solvers(*names: str) -> None:
-    """Skip only when a solver is genuinely absent, never on any other failure.
-
-    Note for whoever sees this skip: the default interpreter on the dev machine is
-    3.10-less and has no `cplex_direct`, and a suite that skips here has verified NONE
-    of the exactness this file exists to check. Use p310.
-    """
-    import pyomo.environ as pyo
-
-    for name in names:
-        if not pyo.SolverFactory(name).available(exception_flag=False):
-            raise unittest.SkipTest(f"solver {name!r} not available")
 
 
 class TestTheArmsDescribeTheSameInstance(unittest.TestCase):
@@ -186,11 +173,11 @@ class TestTheArmsDescribeTheSameInstance(unittest.TestCase):
 
 
 class TestBendersReachesTheMonolithOptimum(unittest.TestCase):
-    """REQUIRES CPLEX. Six solves: two monoliths and four Benders arms."""
+    """REQUIRES AN LP/MIP BACKEND. Six solves: two monoliths and four Benders arms."""
 
     @classmethod
     def setUpClass(cls):
-        _require_solvers("cplex", "cplex_direct")
+        require_solver_backend()
         import os
 
         from mobauto2_benders.app import run as benders_run
@@ -208,7 +195,7 @@ class TestBendersReachesTheMonolithOptimum(unittest.TestCase):
         cls.mono = {}
         cls.all_unserved = {}
         for cell, path in MONOLITH.items():
-            cfg = load_milp(path)
+            cfg = load_milp(_helpers.fixture_for_backend(path))
             mp, sp = milp_params(cfg, {})
             cls.mono[cell] = MonolithSolver(MobautoMilpModel, cfg, mp, sp).run()
             # All-unserved cost, for the non-degeneracy bracket. `p` is in slot units
@@ -225,7 +212,9 @@ class TestBendersReachesTheMonolithOptimum(unittest.TestCase):
         cls.bd = {}
         for cell, modes in BENDERS.items():
             for mode, rel in modes.items():
-                cls.bd[(cell, mode)] = benders_run(str(CONFIGS / rel), {})
+                cls.bd[(cell, mode)] = benders_run(
+                    str(_helpers.fixture_for_backend(CONFIGS / rel)), {}
+                )
 
     @classmethod
     def tearDownClass(cls):
@@ -378,7 +367,7 @@ class TestBendersReachesTheMonolithOptimum(unittest.TestCase):
             T=T,
             Wmax_slots=W,
             p=float(sp["p"]),
-            lp_solver="cplex_direct",
+            lp_solver=require_solver_backend(),
             S=S,
             K_out=[1 if c > 0 else 0 for c in C_out],
             K_ret=[1 if c > 0 else 0 for c in C_ret],

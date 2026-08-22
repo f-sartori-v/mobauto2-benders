@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 
 import _helpers  # noqa: F401  (puts src/ on sys.path)
+from _helpers import fixture_for_backend, require_solver_backend
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "soundness.yaml"
 
@@ -45,36 +46,20 @@ KNOWN_FEASIBLE_UB = 4183.24
 _CACHE: tuple | None = None
 _FAILURE: BaseException | None = None
 
-# The solvers the fixture names. Kept next to FIXTURE so the two cannot drift.
-_REQUIRED_SOLVERS = ("cplex", "cplex_direct")
-
-
-def _require_solvers(*names: str) -> None:
-    """Skip only when a solver is genuinely absent.
-
-    This exists because the three entry points below used to wrap their work in
-    `except Exception: raise SkipTest("solver unavailable")`. That turned EVERY
-    failure into a skip with a label blaming the environment -- a config error, a
-    RuntimeError from the D39 validity guards, an AssertionError, a bug in this
-    file. The class whose tests each correspond to a defect that was once live
-    would switch itself off and report the machine's fault.
-
-    Asking the question directly separates the two states: "the solver is not
-    installed" is an environment fact worth skipping on, and everything else is a
-    failure worth seeing. `SolverFactory` returns an UnknownSolver for a name it
-    does not recognise rather than raising, so no exception handling is needed
-    here either.
-    """
-    import pyomo.environ as pyo
-
-    missing = [n for n in names if not pyo.SolverFactory(n).available(exception_flag=False)]
-    if missing:
-        raise unittest.SkipTest(
-            "not run: solver(s) unavailable: "
-            + ", ".join(missing)
-            + ". These are end-to-end soundness invariants; a green suite without "
-            "them has not checked any of them."
-        )
+# Which backend these invariants run on is resolved in one place
+# (_helpers.require_solver_backend), not pinned per file. The fixture still NAMES
+# cplex, and a licensed checkout still drives the tracked file byte for byte; on a
+# checkout without a licence `fixture_for_backend` rewrites the three solver keys
+# so the invariants run rather than reporting a green suite that checked none.
+#
+# The distinction the old gate existed to preserve is unchanged and still matters:
+# the three entry points below used to wrap their work in
+# `except Exception: raise SkipTest("solver unavailable")`, which turned EVERY
+# failure into a skip blaming the environment -- a config error, a RuntimeError
+# from the D39 validity guards, an AssertionError, a bug in this file. The class
+# whose tests each correspond to a defect that was once live would switch itself
+# off and report the machine's fault. "No backend is installed" is an environment
+# fact worth skipping on; everything else is a failure worth seeing.
 
 
 def _run_once():
@@ -102,7 +87,7 @@ def _run_once():
     try:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            result = app_run(FIXTURE, {"emit_cli_output": True})
+            result = app_run(fixture_for_backend(FIXTURE), {"emit_cli_output": True})
         _CACHE = (result, buf.getvalue())
     except BaseException as exc:
         _FAILURE = exc
@@ -120,7 +105,7 @@ class SoundnessTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _require_solvers(*_REQUIRED_SOLVERS)
+        require_solver_backend()
         cls.result, cls.output = _run_once()
 
     # -- Magnanti-Wong actually runs ------------------------------------
@@ -233,7 +218,7 @@ class ManifestTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _require_solvers(*_REQUIRED_SOLVERS)
+        require_solver_backend()
         cls.result, cls.output = _run_once()
 
     def test_result_carries_cut_provenance(self):
@@ -344,6 +329,7 @@ class RecourseMatchesTheMonolith(unittest.TestCase):
         from mobauto2_benders.problem.subproblem_impl import ProblemSubproblem
 
         cfg = load_config(str(FIXTURE))
+        _helpers.repoint_solvers(cfg)
         mp, sp = _prepare_params(cfg, {})
         T = int(mp.get("T") or (int(mp["T_minutes"]) // int(mp["slot_resolution"])))
         sp["T"] = T
@@ -364,7 +350,7 @@ class RecourseMatchesTheMonolith(unittest.TestCase):
         # THIS codebase's subproblem, must reproduce the MILP objective. Wrapping
         # it in a broad catch meant a subproblem that had stopped working was
         # reported as a missing solver.
-        _require_solvers(*_REQUIRED_SOLVERS)
+        require_solver_backend()
         res = ProblemSubproblem(sp).evaluate(candidate)
 
         total = (
@@ -397,7 +383,7 @@ class TestDemandOutsideHorizonIsReported(unittest.TestCase):
         # Builds and solves an LP through `lp_solver: cplex_direct` below. Without
         # this the class raised instead of skipping on a machine without CPLEX --
         # the inverse of the defect `_require_solvers` was written to end.
-        _require_solvers("cplex_direct")
+        require_solver_backend()
 
     def _evaluate_with_requests(self, requests, T_minutes=60, slot_resolution=30):
         from mobauto2_benders.problem.subproblem_impl import ProblemSubproblem
@@ -416,7 +402,7 @@ class TestDemandOutsideHorizonIsReported(unittest.TestCase):
                 "delta_chg": 35.0,
                 "Wmax_minutes": slot_resolution,
                 "p": 50.0,
-                "lp_solver": "cplex_direct",
+                "lp_solver": require_solver_backend(),
                 "scenarios": [{"requests": requests}],
                 "use_magnanti_wong": False,
                 "eps_cut": 1e-8,
@@ -460,7 +446,7 @@ class TestClockTruncationIsReported(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # Calls _run_once(), i.e. a full solve. Same reason as the class above.
-        _require_solvers(*_REQUIRED_SOLVERS)
+        require_solver_backend()
 
     def test_converged_reference_run_is_not_clock_truncated(self):
         result, _ = _run_once()
@@ -519,13 +505,14 @@ class MagnantiWongSelectsANonDominatedCut(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _require_solvers("cplex_direct")
+        require_solver_backend()
 
         from mobauto2_benders.config import load_config
         from mobauto2_benders.app import _prepare_params
         from mobauto2_benders.problem.subproblem_impl import ProblemSubproblem
 
         cfg = load_config(str(FIXTURE))
+        _helpers.repoint_solvers(cfg)
         mp, sp = _prepare_params(cfg, {})
         T = int(mp.get("T") or (int(mp["T_minutes"]) // int(mp["slot_resolution"])))
         sp["T"] = T

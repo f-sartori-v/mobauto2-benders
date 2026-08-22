@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Optional
 from datetime import datetime
 from pathlib import Path
 
 import pyomo.environ as pyo
+from pyomo.opt.results.container import UndefinedData
 
 from ..benders.master import MasterProblem
 from ..benders.solver import add_benders_cut  # shared cut filtering
@@ -89,6 +91,64 @@ def _validate_cplex_options(options: dict, backend: str) -> None:
                     "Under solver_backend=cplex_direct these are applied as "
                     "cplex.Cplex().parameters.<dotted path>."
                 )
+
+
+def _bounds_from_problem_section(res) -> dict[str, float]:
+    """Dual and primal bounds as Pyomo's GENERIC results object reports them.
+
+    `res.solver.best_bound` is populated by the CPLEX plugins and by nothing else,
+    so on any other backend the master could solve to proven optimality and still
+    report no bound at all. Measured on `appsi_highs` against the soundness
+    fixture: every iteration came back `term=optimal status=ok lb_valid=valid`
+    with `mp_best_bound=-`, the run ended `best_lower_bound=None`, and the two
+    bound-validity invariants in test_solver_soundness -- LB <= a known feasible
+    objective, and LB <= UB -- SKIPPED THEMSELVES for want of a bound to check.
+    Failing closed there is correct and stays; having no portable source for the
+    bound is the defect.
+
+    `res.problem.lower_bound` / `upper_bound` are the generic locations, and which
+    one is the DUAL bound depends on the sense. On a minimisation the dual bound is
+    the lower one; reading the same field on a maximisation would hand back the
+    PRIMAL side and claim a lower bound at or above the optimum -- the one error a
+    lower bound must never make, and exactly the shape of C4 and D30. So the sense
+    is read off the results object and an unknown sense returns nothing rather than
+    guessing.
+
+    Returns only the keys it could establish. `UndefinedData` is Pyomo's "not set"
+    sentinel and is not a number, so it is filtered here rather than surviving as a
+    bound that fails to float() somewhere further down.
+    """
+    out: dict[str, float] = {}
+    problem = getattr(res, "problem", None)
+    if problem is None:
+        return out
+
+    def _num(value) -> Optional[float]:
+        if value is None or isinstance(value, UndefinedData):
+            return None
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return None
+        # An unbounded section reports +/-inf, which is not a bound anyone can use
+        # and would poison a gap computation downstream.
+        return f if math.isfinite(f) else None
+
+    lower = _num(getattr(problem, "lower_bound", None))
+    upper = _num(getattr(problem, "upper_bound", None))
+    sense = getattr(problem, "sense", None)
+
+    if sense == pyo.minimize:
+        if lower is not None:
+            out["best_bound"] = lower
+        if upper is not None:
+            out["incumbent"] = upper
+    elif sense == pyo.maximize:
+        if upper is not None:
+            out["best_bound"] = upper
+        if lower is not None:
+            out["incumbent"] = lower
+    return out
 
 
 class ProblemMaster(MasterProblem):
@@ -1355,6 +1415,18 @@ class ProblemMaster(MasterProblem):
             sources["gap"] = (
                 f"cplex_log:{parsed_source}" if parsed_source else "cplex_log"
             )
+
+        # Last in the chain, and the only backend-independent link in it: every
+        # source above is CPLEX-specific, so this is what a non-CPLEX master falls
+        # back to. It is last so that a licensed run resolves exactly as it did
+        # before and no archived number can move; `best_bound_source` names it
+        # explicitly, because a bound whose origin is not recorded is the defect
+        # this whole provenance block exists to prevent.
+        generic = _bounds_from_problem_section(res)
+        for _k in ("best_bound", "incumbent"):
+            if stats.get(_k) is None and generic.get(_k) is not None:
+                stats[_k] = generic[_k]
+                sources[_k] = "problem_section"
 
         if (
             stats.get("gap") is None

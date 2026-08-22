@@ -210,10 +210,19 @@ did not move behaviour unintentionally.
 python -m unittest discover -s tests
 ```
 
-248 tests, about 57 seconds (D65). They cover cut soundness invariants, the Phase 5
+258 tests, about 35 seconds (D67). They cover cut soundness invariants, the Phase 5
 exactness gate against the monolith (D62), Magnanti–Wong provenance
 and fallback, symmetry validity, the conditions under which a lower bound may be reported,
 the recourse anchor, the LP phase, and configuration combinations that are refused.
+
+**A CPLEX licence is no longer needed to run them.** Every gate used to name `cplex`
+literally, so a checkout without one skipped 63 tests — including E1/E2, cut
+underestimation, the Phase-5 gate and both bound-validity invariants — and still printed
+green. `pip install highspy` runs all of them; CPLEX is still preferred when present, so a
+licensed checkout measures exactly what it measured before. `MOBAUTO2_TEST_SOLVER` pins a
+backend, and raises rather than skipping if it is absent. What stays CPLEX-only is 9 tests
+of CPLEX-specific machinery — the branch-and-cut callback and `CPXPARAM_*` name resolution
+— and no formulation invariant is among them (D67).
 
 ## Configuration
 

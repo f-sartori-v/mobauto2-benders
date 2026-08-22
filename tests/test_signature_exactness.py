@@ -1,4 +1,4 @@
-"""Exactness conditions E1 and E2 (DESIGN_DD_v1, D48). REQUIRES CPLEX.
+"""Exactness conditions E1 and E2 (DESIGN_DD_v1, D48). REQUIRES AN LP BACKEND.
 
 E1 -- the recourse depends on `y` only through the signature `Y_d[tau] = sum_q y_d[q,tau]`.
 E2 -- `y` enters the subproblem in the right-hand side only.
@@ -22,19 +22,11 @@ import unittest
 from pathlib import Path
 
 import _helpers  # noqa: F401  (puts src/ on sys.path)
+from _helpers import require_solver_backend
 
 from mobauto2_benders.signature import candidate_signature
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "soundness.yaml"
-
-
-def _require_solvers(*names: str) -> None:
-    """Skip only when a solver is genuinely absent, never on any other failure."""
-    import pyomo.environ as pyo
-
-    for name in names:
-        if not pyo.SolverFactory(name).available(exception_flag=False):
-            raise unittest.SkipTest(f"solver {name!r} not available")
 
 
 def _setup():
@@ -42,6 +34,7 @@ def _setup():
     from mobauto2_benders.app import _prepare_params
 
     cfg = load_config(str(FIXTURE))
+    _helpers.repoint_solvers(cfg)
     mp, sp = _prepare_params(cfg, {})
     T = int(mp.get("T") or (int(mp["T_minutes"]) // int(mp["slot_resolution"])))
     sp["T"] = T
@@ -82,7 +75,7 @@ class TestE1RecourseDependsOnlyOnTheSignature(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _require_solvers("cplex_direct")
+        require_solver_backend()
         cls.sp, cls.T, cls.Q = _setup()
         if cls.Q < 2:
             raise unittest.SkipTest("E1 needs at least two vehicles to permute")
@@ -169,7 +162,7 @@ class TestE2YEntersTheRightHandSideOnly(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _require_solvers("cplex_direct")
+        require_solver_backend()
         cls.sp, cls.T, cls.Q = _setup()
         T, Q = cls.T, cls.Q
 

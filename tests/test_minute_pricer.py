@@ -1,4 +1,4 @@
-"""The minute-level pricer. REQUIRES CPLEX; a couple of seconds.
+"""The minute-level pricer. REQUIRES AN LP BACKEND; a couple of seconds.
 
 This module is a measuring instrument -- the number it produces is the evidence for or
 against the whole multi-resolution premise -- so its arithmetic is pinned against cases
@@ -13,29 +13,37 @@ from __future__ import annotations
 import unittest
 
 import _helpers  # noqa: F401  (puts src/ on sys.path)
+from _helpers import require_solver_backend
+from mobauto2_benders import minute_pricer as _minute_pricer
 from mobauto2_benders.minute_pricer import (
     departure_minutes,
     load_request_minutes,
-    price_direction_at_minutes,
-    price_schedule_at_minutes,
     slot_objective_in_minutes,
 )
 
 P_MIN = 1500.0
 
 
-def _require_solvers(*names: str) -> None:
-    import pyomo.environ as pyo
+# The pricer's two solving entry points default to `cplex_direct` in their own
+# signatures, which is right for production and wrong for a test: it would pin the
+# assertions to a backend the checkout may not have, which is how these tests came
+# to be skipped wholesale. Route them through the resolved backend instead. Every
+# call below passes `lp_solver` by keyword or not at all, so setdefault cannot
+# shadow an explicit choice.
+def price_direction_at_minutes(*args, **kwargs):
+    kwargs.setdefault("lp_solver", require_solver_backend())
+    return _minute_pricer.price_direction_at_minutes(*args, **kwargs)
 
-    for name in names:
-        if not pyo.SolverFactory(name).available(exception_flag=False):
-            raise unittest.SkipTest(f"solver {name!r} not available")
+
+def price_schedule_at_minutes(*args, **kwargs):
+    kwargs.setdefault("lp_solver", require_solver_backend())
+    return _minute_pricer.price_schedule_at_minutes(*args, **kwargs)
 
 
 class TestPricingArithmetic(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _require_solvers("cplex_direct")
+        require_solver_backend()
 
     def test_everyone_boards_the_single_departure(self):
         """Arrivals at 0, 10, 20; departure at 30; seats to spare.
@@ -82,7 +90,7 @@ class TestPlacementPolicy(unittest.TestCase):
         """The slot abstraction's own artifact, in one assertion: two slots is 60
         minutes under `start` and 75 under `midpoint`, against a stated cap of 60.
         This is why the pricer enforces the cap in minutes."""
-        _require_solvers("cplex_direct")
+        require_solver_backend()
         for policy, expect_served in (("start", 1.0), ("midpoint", 0.0)):
             with self.subTest(policy=policy):
                 deps = departure_minutes([2], 30, policy)
@@ -126,7 +134,7 @@ class TestDecomposedMinuteRecourse(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _require_solvers("cplex_direct")
+        require_solver_backend()
 
     def _case(self):
         T, delta, S, wmax, p_slots = 6, 30, 15.0, 60.0, 50.0
@@ -143,7 +151,8 @@ class TestDecomposedMinuteRecourse(unittest.TestCase):
 
         T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
         duals, obj_slot_units = solve_minute_recourse(
-            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint"
+            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint",
+            lp_solver=require_solver_backend(),
         )
         priced = price_schedule_at_minutes(
             {"OUT": [2, 4], "RET": []}, reqs, delta, S, wmax, p_slots * delta,
@@ -162,7 +171,8 @@ class TestDecomposedMinuteRecourse(unittest.TestCase):
 
         T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
         duals, _ = solve_minute_recourse(
-            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint"
+            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint",
+            lp_solver=require_solver_backend(),
         )
         self.assertEqual(set(duals["pi_OUT"]), set(range(T)))
         self.assertEqual(set(duals["pi_RET"]), set(range(T)))
@@ -176,12 +186,14 @@ class TestDecomposedMinuteRecourse(unittest.TestCase):
 
         T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
         _, base = solve_minute_recourse(
-            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint"
+            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint",
+            lp_solver=require_solver_backend(),
         )
         richer = list(C_out)
         richer[2] += S
         _, more = solve_minute_recourse(
-            T, delta, wmax, p_slots, richer, C_ret, reqs, policy="midpoint"
+            T, delta, wmax, p_slots, richer, C_ret, reqs, policy="midpoint",
+            lp_solver=require_solver_backend(),
         )
         self.assertLessEqual(more, base + 1e-9)
 
@@ -191,7 +203,7 @@ class TestDecomposedMinuteRecourse(unittest.TestCase):
         from mobauto2_benders.problem.subproblem_impl import SPParams, solve_subproblem
 
         P = SPParams(
-            T=6, Wmax_slots=2, p=50.0, lp_solver="cplex_direct", S=15.0,
+            T=6, Wmax_slots=2, p=50.0, lp_solver=require_solver_backend(), S=15.0,
             K_out=[0] * 6, K_ret=[0] * 6, slot_resolution=30,
             recourse_resolution="minute", Wmax_minutes=60.0, request_minutes=None,
         )

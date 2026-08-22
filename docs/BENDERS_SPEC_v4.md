@@ -44,9 +44,11 @@ must be produced on the corrected model.
    nodes explored in those seconds depend on machine load (§0.10, D26). The manifest
    therefore records **whether** a run was reproducible rather than asserting that it
    was: `reproducibility.bit_reproducible` and the count behind it.
-5. Every claim in the paper has a test. **Implemented** — 248 tests (D65),
+5. Every claim in the paper has a test. **Implemented** — 258 tests (D67),
    `python -m unittest discover -s tests`. The count stood at 59 when this line was
-   written and at 196 at D62; it is restated here rather than left to drift.
+   written, at 196 at D62 and at 248 at D65; it is restated here rather than left to
+   drift. Of those, 63 were CPLEX-gated and skipped themselves on any checkout without
+   a licence; since D67 they run on HiGHS too, and 9 CPLEX-specific tests remain gated.
 6. Gapped runs never reported as optima without a marker. **Tested**
    (`test_gapped_run_is_not_reported_as_optimal`).
 7. Every reported number states which subproblem mode produced it. **Implemented** — each
