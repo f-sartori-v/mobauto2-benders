@@ -18,6 +18,7 @@ close.
 | Document | Status | What it is for |
 |---|---|---|
 | **this file** | current | Where the project stands, what is dead, how to run it |
+| `FORWARD_PLAN_v1.md` | current | Commit-sized backlog derived from the report's forward-work and open-directions sections. Nothing in it is measured; a D-number is earned when an item lands in `docs_decisions.md`, not by appearing there |
 | `docs_decisions.md` | current, authoritative | The register, D1–D69, one contiguous allocation. **The only file whose D-numbers need no remapping** |
 | `BENDERS_SPEC_v4.md` | current | The model as implemented, and the eight non-negotiables |
 | `RESEARCH_NOTE_v2.md` | current | The multi-resolution contribution (claim 3), measured |
