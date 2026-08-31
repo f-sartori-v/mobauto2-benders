@@ -3991,3 +3991,71 @@ chasing peaks) — the departure counts above are consistent with that reading (
 either way, no wild swings) but a departure-pattern comparison was not made part of this run and
 is not claimed. Both left for a follow-up if the qualitative claim is wanted verbatim rather than
 inferred.
+
+## D73 — Sweeping p_minutes and Wmax jointly finds a cliff: below p_minutes ~30 the model serves nobody, whatever Wmax is
+
+Date: 2026-08-30. Closes forward-plan item A2 (`docs/FORWARD_PLAN_v1.md`). Branch
+`penalty-window-sweep-a2`, cut from `main` after D70 and D71 merged, before D72 merged — the
+same merge-order note as D71/D72: **this entry assumes D72 lands before it; if the merge order
+differs, this is the one to renumber.**
+
+**Why swept.** `p_minutes ~ 56` and `Wmax = 60` min are both stated in the report as policy
+assumptions, not elicited preferences (Section res-penalty). The report's own next step names
+sweeping them jointly and publishing the frontier "in front of whoever will operate the
+service." Neither had been swept, let alone jointly, before this.
+
+**Instrument.** `scripts/sweep_penalty_window.py`, new in this commit. Base config
+`configs/milp/baseline_d9_p56_monolith.yaml` (Q=2, T=22, slot=30, single-scenario `base.yaml`,
+300 requests), one monolithic CPLEX solve per cell, every cell re-priced at minute fidelity
+(`minute_pricer.price_schedule_at_minutes`, `midpoint` policy) rather than read off the slot
+objective — the slot figure is known to overstate cost by 28.5% and waiting alone by 66-86%
+(D51), and a frontier meant to be read by an operator is exactly the table that error must not
+enter.
+
+**The grid**, `p_minutes` in `{14, 28, 56, 112, 224}` x `Wmax` in `{30, 45, 60, 90, 120}` min,
+served (of 300):
+
+| Wmax \\ p_minutes | 14 | 28 | 56 | 112 | 224 |
+|---:|---:|---:|---:|---:|---:|
+| 30 | 0 | 0 | 171 | 171 | 171 |
+| 45 | 0 | 0 | 184 | 196 | 196 |
+| 60 | 0 | 0 | 187 | 220 | 221 |
+| 90 | 0 | 0 | 188 | 227 | 233 |
+| 120 | 0 | 0 | 187 | 229 | 238 |
+
+**The headline: at `p_minutes` 14 and 28, served is zero at every `Wmax` tested.** The
+cost-minimising schedule runs no departures at all and pays the flat unmet-demand penalty for
+every one of the 300 requests (`300 x 14 = 4200`, `300 x 28 = 8400` — both total-cost columns
+match exactly). This is not a bug: nothing in the objective rewards serving a passenger beyond
+avoiding the penalty, so whenever the aggregate waiting cost of running any service exceeds
+what the penalty would have cost, the optimum is to run nothing. Service is not gradual in the
+penalty; it turns on past a threshold.
+
+**The threshold, pinned down.** A refinement sweep at `Wmax = 60` only, `p_minutes` in
+`{28, 35, 42, 49}`, found the crossover between 28 and 35: 0 served at 28, 173/300 at 35,
+179/300 at 42, 183/300 at 49. Not narrowed further than that bracket — the point was to locate
+the cliff, not its last decimal.
+
+**What this means for the operator's own value.** `p_minutes ~ 56` sits just above the
+threshold, not comfortably inside the region where more service is worth it. A small downward
+revision of the indifference statement (Section res-penalty) could cross back into the
+zero-service regime; the sweep is what makes that risk visible rather than latent in a single
+point estimate.
+
+**Two more readings of the grid, secondary to the cliff.** At `Wmax = 30` served is flat at 171
+across `p_minutes` 56/112/224 — the waiting cap, not the penalty, is what binds there, so
+raising the penalty further buys nothing until `Wmax` is loosened. And average wait among
+served climbs with both `p_minutes` and `Wmax` (13.3 to 28.7 min across the grid) — a higher
+penalty buys more passengers served partly by tolerating longer waits for them, exactly the
+order-of-service mechanism Section meth-priority describes.
+
+**Artefacts.** `data/measurements.json` gets a `penalty_window_frontier` entry (the full 5x5
+grid plus the refinement sweep); `scripts/report_figures/fig_penalty_window.py` plots served
+share and average wait against `p_minutes` (log axis), one line per `Wmax`, with the cliff and
+the operator's value marked.
+
+**What this does not do.** It does not revise the operator's stated indifference of ~56 --
+that figure came from an explicit tradeoff statement (Section res-penalty), not from this
+sweep, and the sweep's job is to show its consequences, not to replace it. It does not sweep
+jointly with anything else (fleet size, demand scenario) -- one instance, one scenario, as
+scoped by A2.
