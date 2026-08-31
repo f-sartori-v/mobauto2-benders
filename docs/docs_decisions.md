@@ -3880,3 +3880,50 @@ Sources: <https://pubsonline.informs.org/doi/10.1287/opre.2017.1624>,
 <https://link.springer.com/article/10.1007/BF02591859>,
 <https://arxiv.org/abs/2510.09357>,
 <https://arxiv.org/abs/2402.01265>.
+
+## D71 — Comparison A gets its runtime split and time-to-first-feasible as data, not printed text
+
+Date: 2026-08-30. Closes forward-plan item A4a (`docs/FORWARD_PLAN_v1.md`). Written on branch
+`runtime-split-instrumentation-d71`, cut from `main` before D70 (branch
+`stochastic-robustness-d70`) was merged — **this entry assumes D70 lands first.** If the two
+branches merge in the other order, this is the one to renumber; nothing in its content depends
+on the number.
+
+**The gap.** `docs/PROJECT_STATE_v6.md` §3 already records that the earlier "master ≈ 85.7% of
+runtime" figure was withdrawn as "not reproduced." Reading the code explains why: the runtime
+split (master / recourse-solve / cut-generation / cut-add time, as percentages of wall time) was
+computed correctly, but only as **text printed at one of four independently-maintained exit
+points** in the Benders loop (`src/mobauto2_benders/benders/solver.py`) — never returned as a
+field, never in the manifest. Four copies of the same arithmetic is how a fix in one and not the
+other three produces a number nobody can explain later. Same story for "time to first feasible
+solution": `mobauto2_milp/monolith.py` already reports it for the monolith
+(`first_incumbent_time_s`, parsed from the CPLEX log); the Benders loop had no equivalent.
+
+**What changed.** `BendersRunResult` gains seven fields, computed once in the loop's single
+`_make_result` closure (all four exit points already funnel through it, so this did not need
+touching four places): `time_to_first_feasible_s`, `total_wall_time_s`,
+`total_master_time_s`, `total_sp_solve_time_s`, `total_cutgen_time_s`, `total_cutadd_time_s`,
+`model_management_overhead_s` (the last is `total_wall_time_s` minus the sum of the four tracked
+totals, clamped at zero, so the split always reconciles to the wall time it is a split of).
+`time_to_first_feasible_s` is set once, the first time the loop has any upper bound at all
+(excluding the LP phase, whose candidate is fractional and not a schedule). `build_manifest`
+(`src/mobauto2_benders/manifest.py`) gets a new `"runtime"` section carrying all seven, so this
+is now a manifest field per README §6.5's "the check is mechanical rather than a matter of
+memory," not a number read off a log.
+
+**Tests.** Four new, all in `tests/test_solver_soundness.py`, reusing the module's memoised
+solve (`_run_once()`) so this cost no extra solver time in the suite: the manifest carries all
+seven runtime keys and none are negative; `time_to_first_feasible_s` is within
+`[0, total_wall_time_s]`; the three tracked totals do not exceed `total_wall_time_s`; and the
+split plus `model_management_overhead_s` reconciles to `total_wall_time_s` to `1e-6`. Full suite
+re-run clean: **272 tests, 263 passed, 9 skipped** (was 268/259/9) — `README.md`,
+`docs/PROJECT_STATE_v6.md` and `docs/BENDERS_SPEC_v4.md` updated to the new count.
+
+**What this does not do.** It does not re-derive the withdrawn 85.7% figure, correct or refute
+it, or produce any new percentage to quote — no run was made for this entry beyond the existing
+suite fixture. It is instrumentation: the next time Comparison A is run for a number that goes
+in a table, `result.total_master_time_s / result.total_wall_time_s` (etc.) is what to read,
+not a log. A4a's other named gap, "time to a solution within fixed thresholds of the optimum"
+(report meth-protocol-engines, item 5), is not covered here and is not implemented — it needs a
+reference optimum to measure distance against and is left for whoever runs Comparison A with
+one in hand.

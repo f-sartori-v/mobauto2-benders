@@ -79,10 +79,13 @@ than being a failed experiment to hide.
 Four independently commit-sized sub-items; the report already states exactly which parts of
 the protocol are unmet.
 
-- **A4a — instrument time-to-first-feasible and the runtime split** (master solve / recourse
-  solve / cut selection / model-management overhead) for Comparison A. This is a logging change
-  to the Benders loop, not a new experiment — the earlier runtime-split figure was withdrawn
-  (`docs/PROJECT_STATE_v6.md` §3) and needs a reproducible replacement, not a re-quote.
+- **A4a — instrument time-to-first-feasible and the runtime split** — ✅ done, D71.
+  `BendersRunResult` and the manifest now carry `time_to_first_feasible_s`,
+  `total_wall_time_s`, `total_master_time_s`, `total_sp_solve_time_s`, `total_cutgen_time_s`,
+  `total_cutadd_time_s`, `model_management_overhead_s`. See `docs_decisions.md` D71 for what it
+  does and does not cover — it does not re-derive or refute the withdrawn 85.7% figure, and
+  "time to a solution within fixed thresholds of the optimum" is still open, needing a
+  reference optimum to measure against.
 - **A4b — run the unrestricted continuous-time CP configuration through the common minute-level
   validator** (Comparison B). The CP side already exists and has been run; what's missing is
   routing its output through the same validator the MILP and Benders schedules go through.

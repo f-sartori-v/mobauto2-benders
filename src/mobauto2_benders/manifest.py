@@ -196,6 +196,25 @@ def build_manifest(
             "pax_served": getattr(result, "pax_served", None),
             "pax_total": getattr(result, "pax_total", None),
         },
+        # Comparison A (forward-plan A4a, report meth-protocol-engines). Previously
+        # this existed only as text printed once at the end of a run, from four
+        # independently-maintained print blocks -- exactly the kind of number a
+        # manifest exists to make mechanical instead of eyeballed (README section
+        # 6.5). total_master_time_s + total_sp_solve_time_s + total_cutgen_time_s +
+        # model_management_overhead_s sums to total_wall_time_s by construction.
+        "runtime": {
+            "time_to_first_feasible_s": getattr(
+                result, "time_to_first_feasible_s", None
+            ),
+            "total_wall_time_s": getattr(result, "total_wall_time_s", None),
+            "total_master_time_s": getattr(result, "total_master_time_s", None),
+            "total_sp_solve_time_s": getattr(result, "total_sp_solve_time_s", None),
+            "total_cutgen_time_s": getattr(result, "total_cutgen_time_s", None),
+            "total_cutadd_time_s": getattr(result, "total_cutadd_time_s", None),
+            "model_management_overhead_s": getattr(
+                result, "model_management_overhead_s", None
+            ),
+        },
     }
 
 
