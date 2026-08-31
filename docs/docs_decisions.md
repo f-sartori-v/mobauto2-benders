@@ -3991,3 +3991,47 @@ chasing peaks) — the departure counts above are consistent with that reading (
 either way, no wild swings) but a departure-pattern comparison was not made part of this run and
 is not claimed. Both left for a follow-up if the qualitative claim is wanted verbatim rather than
 inferred.
+
+## D72 — The minute-level validator accepts departures already in minutes: the blocking piece for report Comparison C
+
+Date: 2026-08-30. Closes forward-plan item A4c (`docs/FORWARD_PLAN_v1.md`). Branch
+`minute-departure-validator-d72`, cut from `main` after D70 and D71 both merged (PR #14, #15),
+so this one carries no merge-order caveat of its own.
+
+**The gap, as the report states it (meth-protocol-engines, coverage note).** "The minute-level
+validator prices schedules given as departure *slots*, so evaluating an unrestricted
+continuous-time schedule requires it to accept departure minutes directly, which is a small
+extension and is not yet made." The continuous-time CP model (`sec:meth-cp`) places a trip's
+departure at any minute — it is not confined to a slot grid at all, let alone to
+`tau*delta + offset` under any of the three placement policies. `price_schedule_at_minutes`
+(`src/mobauto2_benders/minute_pricer.py`) could not price that schedule: it takes departure
+*slot indices* and runs them through `departure_minutes()`, which would silently reinterpret a
+minute value as a slot index and multiply it by `delta` again — the exact silent-unit-confusion
+shape as the `p` / `p_minutes` defect this project has already paid for once
+(`docs/PROJECT_STATE_v6.md` §3).
+
+**What changed.** A new function, `price_schedule_given_departure_minutes`, not a new argument
+on the old one — deliberately, so a caller cannot pass minute-valued departures through the slot
+path by forgetting a flag. It is `price_schedule_at_minutes` with the slot-to-minute conversion
+step removed: same LP (`price_direction_at_minutes`), same units, and identical numbers to the
+existing path when fed minutes produced by the module's own `departure_minutes()` — that
+equivalence is a test, not an assertion in a docstring.
+
+**What it is validated against**, all in `tests/test_minute_pricer.py`:
+- **Arithmetic**, restated in minutes, against `TestPricingArithmetic`'s existing hand-checked
+  case.
+- **Regression**: a slot-based schedule, converted once through `departure_minutes()`, prices
+  identically through the new path and the old one — to the cent, on total cost, waiting and
+  unserved.
+- **The actual capability gained**: departures at 37.5 and 82.25 minutes — values no slot grid
+  at any of the three placement policies could produce — are accepted and priced, which the old
+  function had no way to even express as an input.
+- **Both directions counted** in `departures_used`.
+
+Full suite re-run clean: **276 tests, 267 passed, 9 skipped** (was 272/263/9). `README.md`,
+`docs/PROJECT_STATE_v6.md` and `docs/BENDERS_SPEC_v4.md` updated to the new count.
+
+**What this does not do.** It does not run Comparison C. That still needs an actual schedule
+from the continuous-time CP model, which lives outside this repository. This closes the
+validator-side half of the blocker the report names; the other half is producing the CP
+schedule to feed it, which is A4b/A4d's CP leg and is not this repository's to run.

@@ -290,6 +290,62 @@ def price_schedule_at_minutes(
     )
 
 
+def price_schedule_given_departure_minutes(
+    departures_minutes: dict[str, Sequence[float]],
+    requests: dict[str, Sequence[int]],
+    seats: float,
+    wmax_minutes: float,
+    p_minutes: float,
+    lp_solver: str = "cplex_direct",
+) -> MinutePricingResult:
+    """Price a schedule whose departures are already minute-valued -- not a slot list.
+
+    A4c (docs/FORWARD_PLAN_v1.md), the blocking piece for report Comparison C. The
+    continuous-time CP model (S:meth-cp) places a trip's departure at ANY minute; it
+    is not confined to `tau*delta + offset` for any placement policy, because it is
+    not confined to a slot grid at all. `price_schedule_at_minutes` cannot price that
+    schedule -- it takes departure SLOTS and applies `departure_minutes()` to them,
+    which would silently reinterpret a minute value as a slot index and multiply it
+    by `delta` again. This function is `price_schedule_at_minutes` with that one
+    conversion removed: same LP (`price_direction_at_minutes`), same units, same
+    result on a schedule that happens to be slot-aligned -- see
+    `TestGivenDepartureMinutes.test_agrees_with_the_slot_path_when_slot_aligned` in
+    tests/test_minute_pricer.py. Existing callers are unaffected; this is a new
+    function, not a new argument on the old one, precisely so a caller cannot pass
+    minute-valued departures through the slot path by forgetting a flag -- the same
+    silent-unit-confusion failure mode `p` vs `p_minutes` already cost this project
+    (docs/PROJECT_STATE_v6.md section 3).
+    """
+    waiting = 0.0
+    unserved = 0.0
+    served = 0.0
+    used = 0
+    for direction in (OUT, RET):
+        dep_minutes = [float(m) for m in departures_minutes.get(direction, [])]
+        used += len(dep_minutes)
+        w, u, s = price_direction_at_minutes(
+            list(requests.get(direction, [])),
+            dep_minutes,
+            seats,
+            wmax_minutes,
+            p_minutes,
+            lp_solver,
+        )
+        waiting += w
+        unserved += u
+        served += s
+    total_pax = served + unserved
+    return MinutePricingResult(
+        total_cost=waiting + float(p_minutes) * unserved,
+        waiting_minutes=waiting,
+        unserved_passengers=unserved,
+        served_passengers=served,
+        total_passengers=total_pax,
+        departures_used=used,
+        policy="given_minutes",
+    )
+
+
 def slot_objective_in_minutes(
     slot_waiting_cost: float, slot_unserved: float, slot_resolution: int, p_slots: float
 ) -> float:

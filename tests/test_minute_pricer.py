@@ -40,6 +40,11 @@ def price_schedule_at_minutes(*args, **kwargs):
     return _minute_pricer.price_schedule_at_minutes(*args, **kwargs)
 
 
+def price_schedule_given_departure_minutes(*args, **kwargs):
+    kwargs.setdefault("lp_solver", require_solver_backend())
+    return _minute_pricer.price_schedule_given_departure_minutes(*args, **kwargs)
+
+
 class TestPricingArithmetic(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -97,6 +102,87 @@ class TestPlacementPolicy(unittest.TestCase):
                 _w, u, s = price_direction_at_minutes([0], deps, 15, 60, P_MIN)
                 self.assertEqual(s, expect_served)
                 self.assertEqual(u, 1.0 - expect_served)
+
+
+class TestGivenDepartureMinutes(unittest.TestCase):
+    """A4c: the validator accepts departures already expressed in minutes -- the
+    piece Comparison C needs, because the continuous-time CP model does not place
+    departures on any slot grid at all."""
+
+    @classmethod
+    def setUpClass(cls):
+        require_solver_backend()
+
+    def test_same_arithmetic_as_the_slot_path_on_a_slot_aligned_schedule(self):
+        """A departure at slot 1 under `midpoint`, delta=30, lands at minute 15 --
+        exactly `test_everyone_boards_the_single_departure`'s scenario restated in
+        minutes. Both paths must agree to the cent: this function is that test's
+        LP with the slot-to-minute conversion done by the caller instead of inside
+        it, not a different calculation."""
+        w, u, s = price_direction_at_minutes([0, 10, 20], [15.0], 15, 60, P_MIN)
+        result = price_schedule_given_departure_minutes(
+            {"OUT": [15.0], "RET": []},
+            {"OUT": [0, 10, 20], "RET": []},
+            15,
+            60,
+            P_MIN,
+        )
+        self.assertAlmostEqual(result.waiting_minutes, w, places=6)
+        self.assertAlmostEqual(result.unserved_passengers, u, places=6)
+        self.assertAlmostEqual(result.served_passengers, s, places=6)
+
+    def test_agrees_with_the_slot_path_when_fed_the_same_converted_minutes(self):
+        """Build a schedule the ordinary way (slots + a placement policy), convert
+        it once with the module's own `departure_minutes()`, and confirm this
+        function reproduces `price_schedule_at_minutes`'s result exactly. This is
+        the regression guard: existing slot-based results must not move."""
+        departures_slots = {"OUT": [0, 2, 4], "RET": [1, 3]}
+        requests = {"OUT": [5, 20, 65, 95, 130], "RET": [10, 50, 80]}
+        via_slots = price_schedule_at_minutes(
+            departures_slots, requests, 30, 15, 60, P_MIN, policy="midpoint"
+        )
+        given_minutes = {
+            d: departure_minutes(taus, 30, "midpoint")
+            for d, taus in departures_slots.items()
+        }
+        via_minutes = price_schedule_given_departure_minutes(
+            given_minutes, requests, 15, 60, P_MIN
+        )
+        self.assertAlmostEqual(via_minutes.total_cost, via_slots.total_cost, places=6)
+        self.assertAlmostEqual(
+            via_minutes.waiting_minutes, via_slots.waiting_minutes, places=6
+        )
+        self.assertAlmostEqual(
+            via_minutes.unserved_passengers, via_slots.unserved_passengers, places=6
+        )
+
+    def test_accepts_departures_no_slot_grid_would_ever_produce(self):
+        """The actual capability gained. 37.5 and 82.25 are not `tau*30 + offset`
+        for any integer tau and any of the three placement policies -- a schedule
+        only a continuous-time model like the CP engine could produce. The old
+        slot-only path had no way to even express this input."""
+        result = price_schedule_given_departure_minutes(
+            {"OUT": [37.5, 82.25], "RET": []},
+            {"OUT": [10, 40, 70], "RET": []},
+            15,
+            60,
+            P_MIN,
+        )
+        self.assertEqual(result.unserved_passengers, 0.0)
+        self.assertEqual(result.served_passengers, 3.0)
+        # 10 -> 37.5 (27.5), 40 -> 82.25 wins over 37.5 is infeasible (82.25-40=42.25
+        # <= 60, 37.5-40 < 0 infeasible); solver picks the cheapest feasible pairing.
+        self.assertGreater(result.waiting_minutes, 0.0)
+
+    def test_departures_used_counts_both_directions(self):
+        result = price_schedule_given_departure_minutes(
+            {"OUT": [10.0, 20.0], "RET": [15.0]},
+            {"OUT": [], "RET": []},
+            15,
+            60,
+            P_MIN,
+        )
+        self.assertEqual(result.departures_used, 3)
 
 
 class TestUnitConversion(unittest.TestCase):

@@ -52,9 +52,10 @@ contribution is the third, and it needs the first but not the second.
   under it** to two decimals. Agreement across two independent implementations *and* two
   independent solvers rules out a CPLEX-specific artefact.
 - Exactness conditions **E1–E4 are tests, not assumptions**.
-- **263 passed, 9 skipped** (D71 added 4 for the runtime-split instrumentation below). The 9
-  are CPLEX-specific machinery (the branch-and-cut callback, `CPXPARAM_*` name resolution); no
-  formulation invariant is among them.
+- **267 passed, 9 skipped** (D71 added 4 for the runtime-split instrumentation below; D72
+  added 4 more for the minute-departure validator). The 9 are CPLEX-specific machinery (the
+  branch-and-cut callback, `CPXPARAM_*` name resolution); no formulation invariant is among
+  them.
 
 *Caveats that must travel with claim 1:* every `mw`-labelled number written before D61
 predates the Magnanti–Wong guard fix; D42's dominance margins are withdrawn and unreplaced
@@ -176,7 +177,7 @@ in `docs/`, in a draft, in a slide — it is dead, whatever surrounds it.
 | reference optimum **4190.74** | **4183.24** — 4190.74 was a log-parsing artefact of a Benders run of this same code, so the guard was circular | D50 |
 | **"best bound 0.35"**, internal gap 99.9%, "the failure is structural" | Measured with 14–19 cuts because `lp_phase_max_iters: 10` sampled the flattest point of the curve. Root is 794.78; CPLEX's own root reaches 95–96% | D40, D45, D60 |
 | **46% of the monolith's optimum** and every "% of optimum" against 1569.44 | 1148.65 is **69.2%** of 1658.86. The 46% figure is the master's *internal* LB/UB gap, not a distance to the optimum — the two were conflated | D54 |
-| **98 tests** / 49 / 169 / 196 / 233 / 248 / 268 (259 passed, 9 skipped) | **272** (263 passed, 9 skipped) | D67, D68, D71 |
+| **98 tests** / 49 / 169 / 196 / 233 / 248 / 268 (259 passed, 9 skipped) / 272 (263 passed, 9 skipped) | **276** (267 passed, 9 skipped) | D67, D68, D71, D72 |
 | Magnanti–Wong **dominance margins** (D42), "uniform ~21, out_only ~30" | **Withdrawn and unreplaced.** MW had been silently declining whenever no RET capacity existed in slot 0, while reporting its mode as `mw` throughout | D61, D65 |
 | master ≈ **85.7% of runtime**, "so buy master seconds" | Not reproduced and not meaningful for current code. The lever it motivated (M1) was **measured and rejected**: master phase 18.2 s → 49 s, bound *worse* | AUDIT_v4 §4 |
 | `except Exception` count **165** | **231** (225 + 6). Only **3** have a correctness argument | HANDLER_CENSUS (outside this repo) |
@@ -312,8 +313,8 @@ python -c "import pyomo.environ as pyo; print('cplex_direct', pyo.SolverFactory(
 python -m pytest tests/ -q
 ```
 
-Expect **263 passed, 9 skipped** on HiGHS in about a minute; the 9 skips are branch-and-cut
-and `CPXPARAM_*` name resolution. On CPLEX, all 272 run.
+Expect **267 passed, 9 skipped** on HiGHS in about a minute; the 9 skips are branch-and-cut
+and `CPXPARAM_*` name resolution. On CPLEX, all 276 run.
 
 CPLEX is preferred automatically when installed, so a licensed machine measures exactly what
 it measured before. To force one:

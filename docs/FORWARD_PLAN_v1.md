@@ -96,13 +96,15 @@ the protocol are unmet.
 - **A4b — run the unrestricted continuous-time CP configuration through the common minute-level
   validator** (Comparison B). The CP side already exists and has been run; what's missing is
   routing its output through the same validator the MILP and Benders schedules go through.
-- **A4c — extend the minute-level validator to accept departure minutes directly.** It
-  currently prices schedules given as departure *slots*. This is the blocking piece for
-  Comparison C and is named in the report as "a small extension" not yet made.
+- **A4c — extend the minute-level validator to accept departure minutes directly** — ✅ done,
+  D72. `price_schedule_given_departure_minutes()` in `minute_pricer.py`. This closes the
+  validator-side half of the Comparison-C blocker; the other half is a schedule from the
+  continuous-time CP model, which lives in `20_MobAuto2_CP_LBBD` and is not this repo's to run.
 - **A4d — run the `δ × Q` factorial**, `δ ∈ {30, 15, 10} min`, `Q ∈ {2, 3, 4, 5}`, across
   smooth/peaked/sub-slot demand shapes, reporting the four effects separately (grid refinement,
-  minute-level valuation, continuous departure placement, multi-scenario). Gated on A4c for the
-  Comparison-C leg; the rest can run against the existing MILP/Benders/CP outputs. This is the
+  minute-level valuation, continuous departure placement, multi-scenario). The Comparison-C leg
+  is now unblocked on the validator side (A4c/D72) but still needs a CP schedule to feed it; the
+  rest can run against the existing MILP/Benders outputs. This is the
   largest compute item on this list — budget and ask before running the full grid, not just one
   cell.
 
