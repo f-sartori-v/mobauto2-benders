@@ -581,6 +581,7 @@ def solve_minute_recourse(
     lp_solver: str = "cplex_direct",
     solver_options: dict | None = None,
     solve_time_limit_s: float | None = None,
+    placement_offsets: Sequence[float] | None = None,
 ) -> tuple[dict[str, Any], float]:
     """A minute-level recourse LP with the SAME dual interface as the slot one.
 
@@ -603,8 +604,27 @@ def solve_minute_recourse(
     `slot_resolution` and quietly change how ties between schedules are broken.
 
     E2 HOLDS BY CONSTRUCTION: the arc set is a function of
-    `(T, slot_resolution, wmax_minutes, policy)` and the demand, never of the schedule.
-    `y` reaches this LP only as the capacity right-hand side.
+    `(T, slot_resolution, wmax_minutes, policy, placement_offsets)` and the demand, never
+    of the schedule. `y` reaches this LP only as the capacity right-hand side.
+
+    PLACEMENT FREEDOM (F2, docs/PROJECT_STATE_v6.md section 5, DESIGN_DD_v1 section 6).
+    `placement_offsets`, when given, is a fixed offset grid `O subset [0, delta]` -- a
+    constant, chosen once at load, not a decision variable. A passenger may then board the
+    departure of slot `tau` at ANY candidate minute `tau*delta + o` for `o` in `O`, not only
+    at the single instant `policy` implies. This is a RELAXATION, not a refinement: two
+    passengers on the SAME physical departure may be priced as boarding it at different
+    candidate minutes, which cannot happen on the real vehicle. So `Q_relaxed <= Q_true`,
+    and a cut derived from it is a valid lower bound on `Q_true` -- but the schedule this
+    recourse prices as an UPPER bound must not be trusted as one; only the master's cut-based
+    lower bound may be read from a run using this.
+
+    The capacity row stays ONE PER SLOT regardless of `len(placement_offsets)`: an arc now
+    carries an extra offset index, but capacity constraints sum over that index before
+    comparing to `S*Y_d[tau]`, so the row count, right-hand side and dual object are all
+    identical to the single-offset case -- E2's condition on the interface, not merely on the
+    arc set. `placement_offsets=None` (the default) is exactly today's single-offset LP: the
+    internal representation always carries the extra offset index, with exactly one value in
+    it, so the two code paths cannot silently diverge.
     """
     import time as _time
 
@@ -612,9 +632,19 @@ def solve_minute_recourse(
 
     t_build0 = _time.perf_counter()
     delta = float(slot_resolution)
-    offset = placement_offset(policy, delta)
+    offsets = (
+        [float(o) for o in placement_offsets]
+        if placement_offsets
+        else [placement_offset(policy, delta)]
+    )
+    if any(o < 0.0 or o > delta for o in offsets):
+        raise ValueError(
+            f"placement_offsets must lie in [0, slot_resolution] = [0, {delta}], "
+            f"got {offsets!r}"
+        )
     taus = list(range(int(T)))
-    dep_minute = {t: float(t) * delta + offset for t in taus}
+    ks = list(range(len(offsets)))
+    dep_minute = {(t, k): float(t) * delta + offsets[k] for t in taus for k in ks}
 
     pools: dict[str, dict[int, int]] = {}
     for d in (OUT, RET):
@@ -626,29 +656,30 @@ def solve_minute_recourse(
     caps = {OUT: list(C_out), RET: list(C_ret)}
     arcs = {
         d: [
-            (m, t)
+            (m, t, k)
             for m in sorted(pools[d])
             for t in taus
-            if 0.0 <= dep_minute[t] - float(m) <= float(wmax_minutes)
+            for k in ks
+            if 0.0 <= dep_minute[(t, k)] - float(m) <= float(wmax_minutes)
         ]
         for d in (OUT, RET)
     }
 
     mdl = pyo.ConcreteModel()
     mdl.name = "subproblem_minutes"
-    mdl.ArcsOut = pyo.Set(initialize=arcs[OUT], dimen=2, ordered=False)
-    mdl.ArcsRet = pyo.Set(initialize=arcs[RET], dimen=2, ordered=False)
+    mdl.ArcsOut = pyo.Set(initialize=arcs[OUT], dimen=3, ordered=False)
+    mdl.ArcsRet = pyo.Set(initialize=arcs[RET], dimen=3, ordered=False)
     mdl.x_OUT = pyo.Var(mdl.ArcsOut, within=pyo.NonNegativeReals)
     mdl.x_RET = pyo.Var(mdl.ArcsRet, within=pyo.NonNegativeReals)
     mdl.u_OUT = pyo.Var(sorted(pools[OUT]), within=pyo.NonNegativeReals)
     mdl.u_RET = pyo.Var(sorted(pools[RET]), within=pyo.NonNegativeReals)
 
-    def _wait(m: int, t: int) -> float:
-        return (dep_minute[t] - float(m)) / delta
+    def _wait(m: int, t: int, k: int) -> float:
+        return (dep_minute[(t, k)] - float(m)) / delta
 
     mdl.obj = pyo.Objective(
-        expr=sum(_wait(m, t) * mdl.x_OUT[m, t] for (m, t) in arcs[OUT])
-        + sum(_wait(m, t) * mdl.x_RET[m, t] for (m, t) in arcs[RET])
+        expr=sum(_wait(m, t, k) * mdl.x_OUT[m, t, k] for (m, t, k) in arcs[OUT])
+        + sum(_wait(m, t, k) * mdl.x_RET[m, t, k] for (m, t, k) in arcs[RET])
         + float(p_slots)
         * (
             sum(mdl.u_OUT[m] for m in sorted(pools[OUT]))
@@ -661,6 +692,9 @@ def solve_minute_recourse(
         d: {m: [a for a in arcs[d] if a[0] == m] for m in sorted(pools[d])}
         for d in (OUT, RET)
     }
+    # Grouped by SLOT ONLY, summing over every offset k -- this is the one line that
+    # makes F2 a relaxation of capacity-per-slot rather than a finer-grained model:
+    # the row count and right-hand side below are identical to the single-offset case.
     by_tau = {
         d: {t: [a for a in arcs[d] if a[1] == t] for t in taus} for d in (OUT, RET)
     }
@@ -747,14 +781,14 @@ def solve_minute_recourse(
     served_out = [0.0] * int(T)
     served_ret = [0.0] * int(T)
     wait_out = wait_ret = 0.0
-    for (m, t) in arcs[OUT]:
-        v = float(pyo.value(mdl.x_OUT[m, t]))
+    for (m, t, k) in arcs[OUT]:
+        v = float(pyo.value(mdl.x_OUT[m, t, k]))
         served_out[t] += v
-        wait_out += _wait(m, t) * v
-    for (m, t) in arcs[RET]:
-        v = float(pyo.value(mdl.x_RET[m, t]))
+        wait_out += _wait(m, t, k) * v
+    for (m, t, k) in arcs[RET]:
+        v = float(pyo.value(mdl.x_RET[m, t, k]))
         served_ret[t] += v
-        wait_ret += _wait(m, t) * v
+        wait_ret += _wait(m, t, k) * v
     unmet_out = sum(float(pyo.value(mdl.u_OUT[m])) for m in sorted(pools[OUT]))
     unmet_ret = sum(float(pyo.value(mdl.u_RET[m])) for m in sorted(pools[RET]))
     t_extract1 = _time.perf_counter()
@@ -785,6 +819,10 @@ def solve_minute_recourse(
         "is_feasible": True,
         "recourse_resolution": "minute",
         "departure_policy": str(policy),
+        # F2. len(offsets) == 1 and offsets[0] == placement_offset(policy, delta) is
+        # today's model exactly; anything else is the placement-freedom relaxation, and
+        # any run using it must not report its upper bound as the schedule's true cost.
+        "placement_offsets": list(offsets),
         "timing_build_s": float(t_build1 - t_build0),
         "timing_solve_s": float(t_solve1 - t_solve0),
         "timing_extract_s": float(t_extract1 - t_extract0),

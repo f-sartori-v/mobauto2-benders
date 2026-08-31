@@ -1144,6 +1144,7 @@ class ProblemSubproblem(Subproblem):
                     departure_policy=str(
                         params.get("departure_policy", "midpoint")
                     ),
+                    placement_offsets=params.get("placement_offsets"),
                     request_minutes=_minutes_for(s),
                 )
                 t_solve0 = time.perf_counter()
@@ -1997,6 +1998,7 @@ class ProblemSubproblem(Subproblem):
                 recourse_resolution=str(params.get("recourse_resolution", "slot")),
                 Wmax_minutes=params.get("Wmax_minutes"),
                 departure_policy=str(params.get("departure_policy", "midpoint")),
+                placement_offsets=params.get("placement_offsets"),
                 request_minutes=_minutes_for(single_demand_source),
             )
             t_solve0 = time.perf_counter()
@@ -2647,6 +2649,8 @@ class SPParams:
     recourse_resolution: str = "slot"
     Wmax_minutes: float | None = None
     departure_policy: str = "midpoint"
+    # F2 (docs/PROJECT_STATE_v6.md section 5). None keeps today's single-offset model.
+    placement_offsets: list[float] | None = None
     request_minutes: dict | None = None
 
 
@@ -2694,6 +2698,7 @@ def solve_subproblem(
             lp_solver=P.lp_solver,
             solver_options=P.solver_options,
             solve_time_limit_s=P.solve_time_limit_s,
+            placement_offsets=P.placement_offsets,
         )
 
     t_build0 = time.perf_counter()

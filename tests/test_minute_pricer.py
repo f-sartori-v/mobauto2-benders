@@ -197,6 +197,96 @@ class TestDecomposedMinuteRecourse(unittest.TestCase):
         )
         self.assertLessEqual(more, base + 1e-9)
 
+    def test_placement_offsets_none_matches_todays_single_offset_model(self):
+        """F2's whole safety argument in one test: the default must be numerically
+        IDENTICAL to a singleton grid holding exactly the policy's own offset, not
+        merely 'close'. If these ever drift apart, F2 has silently changed the
+        model everyone else's numbers were produced under."""
+        from mobauto2_benders.minute_pricer import placement_offset, solve_minute_recourse
+
+        T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
+        duals_default, obj_default = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint",
+            lp_solver=require_solver_backend(),
+        )
+        duals_explicit, obj_explicit = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint",
+            lp_solver=require_solver_backend(),
+            placement_offsets=[placement_offset("midpoint", delta)],
+        )
+        self.assertAlmostEqual(obj_default, obj_explicit, places=9)
+        self.assertEqual(duals_default["pi_OUT"], duals_explicit["pi_OUT"])
+        self.assertEqual(duals_default["pi_RET"], duals_explicit["pi_RET"])
+        self.assertEqual(duals_explicit["placement_offsets"], [15.0])
+
+    def test_placement_freedom_is_a_relaxation_never_worse_than_either_offset_alone(self):
+        """F2's central claim: a richer offset grid can only lower or match the
+        recourse, never raise it, because every single-offset arc set is a subset
+        of the multi-offset one. Q_relaxed <= Q_true in the direction that matters
+        for a lower bound."""
+        from mobauto2_benders.minute_pricer import solve_minute_recourse
+
+        T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
+        _, obj_start = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs,
+            lp_solver=require_solver_backend(), placement_offsets=[0.0],
+        )
+        _, obj_end = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs,
+            lp_solver=require_solver_backend(), placement_offsets=[delta],
+        )
+        _, obj_both = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs,
+            lp_solver=require_solver_backend(), placement_offsets=[0.0, delta],
+        )
+        self.assertLessEqual(obj_both, min(obj_start, obj_end) + 1e-9)
+
+    def test_capacity_row_stays_one_per_slot_under_a_multi_offset_grid(self):
+        """The interface condition F2 depends on: however many offsets are in the
+        grid, capacity is still indexed by slot alone, so the cut the master
+        receives is the same object it always was."""
+        from mobauto2_benders.minute_pricer import solve_minute_recourse
+
+        T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
+        duals, _ = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs,
+            lp_solver=require_solver_backend(), placement_offsets=[0.0, 10.0, 20.0, 30.0],
+        )
+        self.assertEqual(set(duals["pi_OUT"]), set(range(T)))
+        self.assertEqual(set(duals["pi_RET"]), set(range(T)))
+        for t, v in duals["pi_OUT"].items():
+            self.assertLessEqual(v, 1e-9, f"pi_OUT[{t}] is positive: {v}")
+
+    def test_placement_offsets_outside_the_slot_are_refused(self):
+        from mobauto2_benders.minute_pricer import solve_minute_recourse
+
+        T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
+        with self.assertRaises(ValueError):
+            solve_minute_recourse(
+                T, delta, wmax, p_slots, C_out, C_ret, reqs,
+                lp_solver=require_solver_backend(), placement_offsets=[-5.0],
+            )
+        with self.assertRaises(ValueError):
+            solve_minute_recourse(
+                T, delta, wmax, p_slots, C_out, C_ret, reqs,
+                lp_solver=require_solver_backend(), placement_offsets=[delta + 1.0],
+            )
+
+    def test_reaches_solve_subproblem_through_sp_params(self):
+        """End-to-end through the same dispatch the Benders loop uses, not just the
+        library function directly."""
+        from mobauto2_benders.problem.subproblem_impl import SPParams, solve_subproblem
+
+        T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
+        P = SPParams(
+            T=T, Wmax_slots=2, p=p_slots, lp_solver=require_solver_backend(), S=S,
+            K_out=[0] * T, K_ret=[0] * T, slot_resolution=delta,
+            recourse_resolution="minute", Wmax_minutes=wmax, request_minutes=reqs,
+            placement_offsets=[0.0, delta],
+        )
+        duals, obj = solve_subproblem(P, C_out, C_ret, [0.0] * T, [0.0] * T)
+        self.assertEqual(duals["placement_offsets"], [0.0, delta])
+
     def test_minute_mode_refuses_to_run_without_arrival_minutes(self):
         """Falling back to the slot model here would report a multi-resolution run
         that never happened."""

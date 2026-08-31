@@ -352,6 +352,7 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     sp["p"] = cfg.subproblem.p
     sp["recourse_resolution"] = cfg.subproblem.recourse_resolution
     sp["departure_policy"] = cfg.subproblem.departure_policy
+    _set_if_not_none(sp, "placement_offsets", cfg.subproblem.placement_offsets)
     sp["degenerate_cut_probe_top_k"] = int(cfg.subproblem.degenerate_cut_probe_top_k)
     _set_if_not_none(
         sp,
