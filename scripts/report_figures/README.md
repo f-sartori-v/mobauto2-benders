@@ -18,6 +18,7 @@ than importing the model, so they run in a checkout with no solver installed.
 | `fig_bound_interval.py` | the bound interval on the `Q = 3` minute-recourse instance | `data/measurements.json` |
 | `fig_valuation_decomposition.py` | reporting error and decision error, in passenger-minutes | `data/measurements.json` |
 | `fig_multiresolution_gain.py` | decision gain by shape, resolution and placement | `data/measurements.json` |
+| `fig_penalty_window.py` | the `p_minutes` x `Wmax` frontier, and the zero-service cliff | `data/measurements.json` |
 
 `data/measurements.json` holds the measured values and, for each block, the
 decision-register entry that recorded it. Editing a value there changes the

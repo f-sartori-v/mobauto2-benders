@@ -50,7 +50,14 @@ doesn't survive, that is a finding to report, not a bug to fix.
 Solver runs: cap at 120 s per run unless the converged number is the actual deliverable, and
 say so before running to full convergence. Ask before starting.
 
-### A2. Sweep `p_minutes` and `W^max` jointly; publish the frontier
+### A2. Sweep `p_minutes` and `W^max` jointly; publish the frontier — ✅ done, D73
+
+The sweep found more than a frontier: **at `p_minutes` 14 and 28 the model serves zero
+passengers at every `Wmax` tested** — running no service at all costs less than running any.
+The crossover to positive service sits between `p_minutes` 28 and 35, and the operator's own
+value (~56) is just above that cliff, not comfortably inside the region where more service is
+worth it. See `docs_decisions.md` D73 for the full grid, the refinement sweep, and the figure
+(`scripts/report_figures/fig_penalty_window.py`).
 
 **What.** A two-dimensional sweep over the penalty and the maximum waiting time, on the
 baseline instance, reporting served/unserved counts and waiting at each cell.

@@ -21,6 +21,7 @@ SCRIPTS = (
     "fig_bound_interval.py",
     "fig_valuation_decomposition.py",
     "fig_multiresolution_gain.py",
+    "fig_penalty_window.py",
 )
 
 
