@@ -290,6 +290,213 @@ def price_schedule_at_minutes(
     )
 
 
+def _offset_grid(slot_resolution: int, offsets: Sequence[float] | None) -> list[float]:
+    """Candidate departure instants inside a slot, as minutes from the slot's start.
+
+    Default is every whole minute in `[0, delta]` INCLUSIVE, which is the same closed
+    range `placement_offset` maps the three conventions into (`start` -> 0,
+    `midpoint` -> delta/2, `end` -> delta). Inclusive on both ends matters: it is what
+    makes `start` and `end` members of the default grid, so the identity tests below
+    have something to be identical to.
+    """
+    delta = float(slot_resolution)
+    if offsets is not None:
+        grid = [float(o) for o in offsets]
+        for o in grid:
+            if not (0.0 <= o <= delta):
+                raise ValueError(
+                    f"placement offset {o} is outside its slot [0, {delta}]"
+                )
+        return sorted(set(grid))
+    return [float(k) for k in range(int(delta) + 1)]
+
+
+def price_direction_optimal_placement(
+    arrival_minutes: Sequence[int],
+    departure_slots: Sequence[int],
+    slot_resolution: int,
+    seats: float,
+    wmax_minutes: float,
+    p_minutes: float,
+    offsets: Sequence[float] | None = None,
+    mip_solver: str = "cplex_direct",
+) -> tuple[float, float, float, list[float]]:
+    """Cheapest cost when the DEPARTURE INSTANT is chosen, not assumed.
+
+    Returns ``(waiting_minutes, unserved_passengers, served_passengers,
+    chosen_minutes)``.
+
+    THE DIFFERENCE FROM `price_direction_at_minutes`. There, the departure instant is a
+    constant supplied by a `DeparturePolicy` and only the passenger assignment is
+    optimised. Here the instant is a decision: each departure picks ONE offset from the
+    grid, every passenger boarding that departure boards at that same instant, and the
+    assignment is optimised jointly with the choice.
+
+    WHY THIS IS A MIP AND NOT AN LP -- the fact that shapes this whole direction. With
+    both the departure instant `d_t` and the assignment `x[m,t]` free, the waiting cost
+    `sum_m x[m,t] * (d_t - m)` is BILINEAR. Discretising `d_t` over a grid and selecting
+    with a binary `z[t,k]` linearises it, at the cost of integrality. F2
+    (`solve_minute_recourse(placement_offsets=...)`, D74) avoids the binary by letting
+    every passenger pick its own offset independently, which decouples the product and
+    yields a RELAXATION: physically impossible (one bus, one departure time), and
+    strictly cheaper. The two therefore bracket the truth:
+
+        Q_relaxed(O)  <=  Q_optimal(O)  <=  min over policies of Q_fixed
+
+    NOT A CUT GENERATOR, AND NOT E2. `z` enters the capacity constraint's right-hand
+    side, so this model does not satisfy the E2 condition the Benders subproblem relies
+    on, and it returns no duals worth the name. It exists to VALUE placement freedom at
+    a given schedule, not to generate cuts from it. A cut built from this function would
+    over-estimate the recourse of the fixed-placement model and be invalid there; a cut
+    valid for the optimal-placement model has to come from something at or below
+    `Q_optimal`, which is what the F2 relaxation provides.
+
+    NOT YET AN UPPER BOUND ON AN IMPLEMENTABLE SCHEDULE. `departures` here is aggregated
+    across the fleet -- the per-vehicle assignment is not in the schedule
+    representation this module receives -- so nothing here can check that shifting a
+    departure later still leaves its vehicle able to return in time for its next
+    committed activity. Shifting is therefore unconstrained by vehicle feasibility,
+    which can only make the answer cheaper. Read this as a LOWER bound on what optimal
+    placement could achieve, not as an achievable cost. Making it an upper bound needs
+    the per-vehicle schedule and the precedence chain `d_next >= d_prev + duration`.
+    """
+    import pyomo.environ as pyo
+
+    if not arrival_minutes or not departure_slots:
+        return 0.0, float(len(arrival_minutes)), 0.0, []
+
+    counts: dict[int, int] = {}
+    for m in arrival_minutes:
+        counts[int(m)] = counts.get(int(m), 0) + 1
+    arrivals = sorted(counts)
+
+    delta = float(slot_resolution)
+    grid = _offset_grid(slot_resolution, offsets)
+    deps = list(range(len(departure_slots)))
+    ks = list(range(len(grid)))
+    dep_minute = {
+        (j, k): float(departure_slots[j]) * delta + grid[k] for j in deps for k in ks
+    }
+
+    arcs = [
+        (m, j, k)
+        for m in arrivals
+        for j in deps
+        for k in ks
+        if 0.0 <= dep_minute[(j, k)] - float(m) <= float(wmax_minutes)
+    ]
+
+    mdl = pyo.ConcreteModel()
+    mdl.Arcs = pyo.Set(initialize=arcs, dimen=3, ordered=False)
+    mdl.Sel = pyo.Set(initialize=[(j, k) for j in deps for k in ks], dimen=2, ordered=False)
+    mdl.x = pyo.Var(mdl.Arcs, within=pyo.NonNegativeReals)
+    mdl.u = pyo.Var(arrivals, within=pyo.NonNegativeReals)
+    mdl.z = pyo.Var(mdl.Sel, within=pyo.Binary)
+
+    mdl.obj = pyo.Objective(
+        expr=sum(
+            (dep_minute[(j, k)] - float(m)) * mdl.x[m, j, k] for (m, j, k) in arcs
+        )
+        + float(p_minutes) * sum(mdl.u[m] for m in arrivals),
+        sense=pyo.minimize,
+    )
+
+    mdl.Demand = pyo.Constraint(
+        arrivals,
+        rule=lambda mm, m: sum(mm.x[a, j, k] for (a, j, k) in arcs if a == m) + mm.u[m]
+        == float(counts[m]),
+    )
+    # One instant per departure. This single row is the whole difference from F2:
+    # drop it and each passenger may board the same bus at a different minute.
+    mdl.OneInstant = pyo.Constraint(
+        deps, rule=lambda mm, j: sum(mm.z[j, k] for k in ks) == 1
+    )
+    # Capacity does double duty: caps the load at S, and forces x to zero on every
+    # instant this departure did not select.
+    mdl.Capacity = pyo.Constraint(
+        mdl.Sel,
+        rule=lambda mm, j, k: (
+            sum(mm.x[a, jj, kk] for (a, jj, kk) in arcs if jj == j and kk == k)
+            <= float(seats) * mm.z[j, k]
+            if any(jj == j and kk == k for (_a, jj, kk) in arcs)
+            else pyo.Constraint.Skip
+        ),
+    )
+
+    solver = pyo.SolverFactory(mip_solver)
+    res = solver.solve(mdl, tee=False, load_solutions=False)
+    term = getattr(res.solver, "termination_condition", None)
+    if term != pyo.TerminationCondition.optimal:
+        raise RuntimeError(
+            f"optimal-placement MIP did not solve to optimality: termination={term}. "
+            "Like the pricing LP it is always feasible -- unserved demand is absorbed "
+            "by u at price p_minutes -- so a non-optimal termination is a defect."
+        )
+    mdl.solutions.load_from(res)
+
+    waiting = sum(
+        (dep_minute[(j, k)] - float(m)) * float(pyo.value(mdl.x[m, j, k]))
+        for (m, j, k) in arcs
+    )
+    unserved = sum(float(pyo.value(mdl.u[m])) for m in arrivals)
+    served = float(sum(counts.values())) - unserved
+    chosen = [
+        dep_minute[(j, k)]
+        for j in deps
+        for k in ks
+        if float(pyo.value(mdl.z[j, k])) > 0.5
+    ]
+    return float(waiting), float(unserved), float(served), chosen
+
+
+def price_schedule_optimal_placement(
+    departures: dict[str, Sequence[int]],
+    requests: dict[str, Sequence[int]],
+    slot_resolution: int,
+    seats: float,
+    wmax_minutes: float,
+    p_minutes: float,
+    offsets: Sequence[float] | None = None,
+    mip_solver: str = "cplex_direct",
+) -> MinutePricingResult:
+    """Price a whole schedule with the departure instant chosen, not assumed.
+
+    The optimal-placement counterpart to `price_schedule_at_minutes`. See
+    `price_direction_optimal_placement` for what this is and, more importantly, what it
+    is not: not a cut generator, and not yet an upper bound on an implementable
+    schedule.
+    """
+    waiting = 0.0
+    unserved = 0.0
+    served = 0.0
+    used = 0
+    for direction in (OUT, RET):
+        slots = list(departures.get(direction, []))
+        used += len(slots)
+        w, u, s, _chosen = price_direction_optimal_placement(
+            list(requests.get(direction, [])),
+            slots,
+            slot_resolution,
+            seats,
+            wmax_minutes,
+            p_minutes,
+            offsets,
+            mip_solver,
+        )
+        waiting += w
+        unserved += u
+        served += s
+    return MinutePricingResult(
+        total_cost=waiting + float(p_minutes) * unserved,
+        waiting_minutes=waiting,
+        unserved_passengers=unserved,
+        served_passengers=served,
+        total_passengers=served + unserved,
+        departures_used=used,
+        policy="optimal",
+    )
+
+
 def slot_objective_in_minutes(
     slot_waiting_cost: float, slot_unserved: float, slot_resolution: int, p_slots: float
 ) -> float:

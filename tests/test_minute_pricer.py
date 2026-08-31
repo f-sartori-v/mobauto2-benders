@@ -300,3 +300,132 @@ class TestDecomposedMinuteRecourse(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             solve_subproblem(P, [0.0] * 6, [0.0] * 6, [0.0] * 6, [0.0] * 6)
         self.assertIn("request_minutes", str(ctx.exception))
+
+
+class TestOptimalPlacement(unittest.TestCase):
+    """`price_schedule_optimal_placement` chooses the departure INSTANT instead of
+    assuming it. It is the newest component here and the one most likely to be wrong,
+    so it is pinned three independent ways: against the fixed-policy pricer when the
+    choice is removed, against brute-force enumeration when the instance is small
+    enough to enumerate, and against the F2 relaxation, which must lower-bound it.
+
+    The sandwich those last two establish
+
+        Q_relaxed  <=  Q_optimal  <=  min over policies of Q_fixed
+
+    is not only the measurement of what placement freedom is worth -- it is a standing
+    consistency check on all three implementations. If the ordering ever inverts, one
+    of them is broken, and the test says which side.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        require_solver_backend()
+
+    def _price_opt(self, *args, **kwargs):
+        kwargs.setdefault("mip_solver", require_solver_backend())
+        return _minute_pricer.price_schedule_optimal_placement(*args, **kwargs)
+
+    def _case(self):
+        # delta=4 keeps the default offset grid at five candidates {0,1,2,3,4}, small
+        # enough for the enumeration test below to be exhaustive rather than sampled.
+        delta, S, wmax, p_min = 4, 3.0, 10.0, 100.0
+        sched = {"OUT": [1, 3], "RET": []}
+        reqs = {"OUT": [2, 3, 5, 6, 11, 13], "RET": []}
+        return delta, S, wmax, p_min, sched, reqs
+
+    def test_a_single_offset_reproduces_that_fixed_policy_exactly(self):
+        """With one candidate instant there is no choice left to make, so the MIP must
+        return precisely what the fixed-policy LP returns. This is the identity that
+        keeps the two code paths from silently diverging."""
+        from mobauto2_benders.minute_pricer import placement_offset
+
+        delta, S, wmax, p_min, sched, reqs = self._case()
+        for policy in ("start", "midpoint", "end"):
+            with self.subTest(policy=policy):
+                fixed = price_schedule_at_minutes(
+                    sched, reqs, delta, S, wmax, p_min, policy=policy
+                )
+                opt = self._price_opt(
+                    sched, reqs, delta, S, wmax, p_min,
+                    offsets=[placement_offset(policy, float(delta))],
+                )
+                self.assertAlmostEqual(opt.total_cost, fixed.total_cost, places=9)
+                self.assertAlmostEqual(
+                    opt.unserved_passengers, fixed.unserved_passengers, places=9
+                )
+
+    def test_optimal_placement_is_never_worse_than_any_fixed_policy(self):
+        """The upper side of the sandwich. Every fixed convention is one point in the
+        space the MIP minimises over, so none of them can beat it."""
+        delta, S, wmax, p_min, sched, reqs = self._case()
+        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min)
+        for policy in ("start", "midpoint", "end"):
+            fixed = price_schedule_at_minutes(
+                sched, reqs, delta, S, wmax, p_min, policy=policy
+            )
+            self.assertLessEqual(opt.total_cost, fixed.total_cost + 1e-9, policy)
+
+    def test_the_f2_relaxation_lower_bounds_optimal_placement(self):
+        """The lower side of the sandwich, and the reason F2 is the only one of the
+        three that may generate a cut for the optimal-placement model: it is the only
+        one guaranteed to sit at or below the truth."""
+        from mobauto2_benders.minute_pricer import solve_minute_recourse
+
+        T, delta, S, wmax, p_slots = 6, 4, 3.0, 10.0, 25.0
+        p_min = p_slots * delta
+        grid = [0.0, 2.0, 4.0]
+        sched = {"OUT": [1, 3], "RET": []}
+        reqs = {"OUT": [2, 3, 5, 6, 11, 13], "RET": []}
+        C_out = [0.0] * T
+        C_out[1] = S
+        C_out[3] = S
+
+        _duals, obj_slot_units = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, [0.0] * T, reqs,
+            policy="midpoint", lp_solver=require_solver_backend(),
+            placement_offsets=grid,
+        )
+        relaxed_cost = obj_slot_units * delta
+        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min, offsets=grid)
+        self.assertLessEqual(relaxed_cost, opt.total_cost + 1e-9)
+
+    def test_it_matches_brute_force_enumeration(self):
+        """The MIP is checked against the definition of what it claims to compute:
+        enumerate every assignment of instants to departures, price each one with the
+        independent fixed-minutes pricer, and take the minimum."""
+        import itertools
+
+        delta, S, wmax, p_min, sched, reqs = self._case()
+        slots = sched["OUT"]
+        grid = [float(k) for k in range(delta + 1)]
+
+        best = float("inf")
+        for combo in itertools.product(grid, repeat=len(slots)):
+            dep_minutes = [
+                float(t) * float(delta) + off for t, off in zip(slots, combo)
+            ]
+            w, u, _s = price_direction_at_minutes(
+                reqs["OUT"], dep_minutes, S, wmax, p_min
+            )
+            best = min(best, w + p_min * u)
+
+        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min)
+        self.assertAlmostEqual(opt.total_cost, best, places=6)
+
+    def test_a_hand_checkable_case(self):
+        """One departure in slot 1 (minutes 10..20 at delta=10), two passengers at
+        minutes 12 and 18, seats enough for both, Wmax generous. Any instant before 18
+        strands the 18 or makes it wait negatively (not allowed); the cheapest legal
+        instant is 18 itself, costing (18-12) + (18-18) = 6 passenger-minutes."""
+        delta, S, wmax, p_min = 10, 5.0, 60.0, 500.0
+        sched = {"OUT": [1], "RET": []}
+        reqs = {"OUT": [12, 18], "RET": []}
+        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min)
+        self.assertAlmostEqual(opt.total_cost, 6.0, places=6)
+        self.assertAlmostEqual(opt.unserved_passengers, 0.0, places=9)
+
+    def test_offsets_outside_the_slot_are_refused(self):
+        delta, S, wmax, p_min, sched, reqs = self._case()
+        with self.assertRaises(ValueError):
+            self._price_opt(sched, reqs, delta, S, wmax, p_min, offsets=[0.0, delta + 1.0])
