@@ -91,6 +91,16 @@ manifests/
 Report/
 aux_py/
 
+# The bare `data/` pattern above matches at any depth, same gotcha as the
+# bare `handout.md` pattern documented in the project's own memory. It was
+# silently excluding scripts/report_figures/data/measurements.json since the
+# figure scripts were first committed (D-less commit "feat(report-figures)"),
+# so a fresh clone could not run make_all.py at all -- every fig_*.py in that
+# folder reads this file. Un-ignore it explicitly; it is an input the figure
+# scripts need, not run output.
+!scripts/report_figures/data/
+!scripts/report_figures/data/measurements.json
+
 # Sweep and experiment scratch: scripts/sweep.py writes both of these, and the
 # tables they produced are quoted in docs/ with their provenance.
 configs/sweep/

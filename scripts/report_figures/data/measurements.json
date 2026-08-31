@@ -1,0 +1,133 @@
+{
+  "_comment": [
+    "Measured values printed by the T.5.4 report figures. One entry per figure.",
+    "Each carries the decision-register entry that recorded it, so a figure can be",
+    "traced back without opening the plotting code. Editing a number here changes",
+    "the figure and nothing else; the scripts hold no numbers of their own."
+  ],
+  "bound_interval": {
+    "source": "docs/PROJECT_STATE_v6.md section 2, claim 2 (D56)",
+    "instance": "Q = 3, minute recourse, single-threaded, p_minutes = 56",
+    "lower_bound": 219.74,
+    "upper_bound": 299.37,
+    "optimum": 293.37,
+    "iterations": 34,
+    "decomposition_seconds": 301.4,
+    "monolith_seconds": 0.8
+  },
+  "valuation_decomposition": {
+    "source": "docs/RESEARCH_NOTE_v2.md section 2.1 (D51, D53)",
+    "instance": "baseline, Q = 2, T = 22, 30-minute slots, p_minutes = 56",
+    "unit": "passenger-minutes",
+    "claimed_cost_of_slot_schedule": 11990,
+    "true_cost_of_slot_schedule": 9326,
+    "true_cost_of_best_schedule": 8794,
+    "reporting_error_pct": 28.5,
+    "decision_error_pct": 6.0,
+    "waiting_reported_min": 38.24,
+    "waiting_true_min_range": [
+      20.4,
+      23.2
+    ]
+  },
+  "multiresolution_gain": {
+    "source": "docs/RESEARCH_NOTE_v2.md section 2.2 (D54, D55)",
+    "instance": "Q = 2, p_minutes = 56, de-aligned generated shapes, every solve proven optimal",
+    "unit": "per cent",
+    "resolutions": [
+      30,
+      15,
+      10
+    ],
+    "midpoint": {
+      "flat": [
+        12.43,
+        5.52,
+        11.08
+      ],
+      "commuter": [
+        10.48,
+        2.45,
+        3.07
+      ],
+      "bimodal": [
+        8.19,
+        4.26,
+        6.07
+      ],
+      "burst": [
+        50.09,
+        19.62,
+        20.74
+      ],
+      "spiky": [
+        25.23,
+        18.52,
+        22.39
+      ]
+    },
+    "end": {
+      "flat": [
+        12.53,
+        16.6,
+        16.23
+      ],
+      "commuter": [
+        6.26,
+        10.07,
+        7.84
+      ],
+      "bimodal": [
+        14.02,
+        7.43,
+        10.22
+      ],
+      "burst": [
+        46.22,
+        44.62,
+        37.62
+      ],
+      "spiky": [
+        19.06,
+        41.33,
+        36.78
+      ]
+    },
+    "multi_scenario_gain": 3.84
+  },
+  "penalty_window_frontier": {
+    "source": "docs/docs_decisions.md D73, scripts/sweep_penalty_window.py",
+    "instance": "setups/base.yaml, Q = 2, T = 22, 30-minute slots, midpoint policy, 300 requests",
+    "unit": "passenger-minutes / passengers, every solve proven optimal, minute-honest pricing",
+    "p_minutes_grid": [14, 28, 56, 112, 224],
+    "wmax_grid": [30, 45, 60, 90, 120],
+    "served": {
+      "30":  [0, 0, 171, 171, 171],
+      "45":  [0, 0, 184, 196, 196],
+      "60":  [0, 0, 187, 220, 221],
+      "90":  [0, 0, 188, 227, 233],
+      "120": [0, 0, 187, 229, 238]
+    },
+    "avg_wait_min": {
+      "30":  [0.0, 0.0, 13.3, 13.3, 13.3],
+      "45":  [0.0, 0.0, 15.2, 18.1, 18.1],
+      "60":  [0.0, 0.0, 16.0, 20.8, 23.2],
+      "90":  [0.0, 0.0, 15.9, 22.4, 26.5],
+      "120": [0.0, 0.0, 16.0, 23.1, 28.7]
+    },
+    "total_cost": {
+      "30":  [4200, 8400, 9494, 16718, 31166],
+      "45":  [4200, 8400, 9287, 15189, 26837],
+      "60":  [4200, 8400, 9326, 13525, 22816],
+      "90":  [4200, 8400, 9268, 13260, 21193],
+      "120": [4200, 8400, 9326, 13242, 20712]
+    },
+    "zero_service_threshold": {
+      "wmax_minutes": 60,
+      "comment": "Refinement sweep at Wmax=60 only, not part of the 5x5 grid above.",
+      "p_minutes": [28, 35, 42, 49],
+      "served": [0, 173, 179, 183],
+      "bracket": "crosses from zero to positive service between p_minutes=28 and 35"
+    }
+  }
+}
