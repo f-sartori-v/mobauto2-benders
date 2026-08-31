@@ -4059,3 +4059,57 @@ that figure came from an explicit tradeoff statement (Section res-penalty), not 
 sweep, and the sweep's job is to show its consequences, not to replace it. It does not sweep
 jointly with anything else (fleet size, demand scenario) -- one instance, one scenario, as
 scoped by A2.
+
+## D75 — At the declared trial scale, no tested fleet size meets both halves of the service level at once, and the arithmetic says why
+
+Date: 2026-08-31. Closes forward-plan item A3 (`docs/FORWARD_PLAN_v1.md`). Branch
+`a3-target-scale-validation`, cut from `main` after D73 merged, before D72 and D74 merged --
+the same merge-order note as before: **this entry assumes D72 and D74 land first; if the
+order differs, this is the one to renumber.**
+
+**Why.** The trial's a-priori safety evaluation (deliverable 1.4.3, report Section
+intro-corridor) declares a service level of "up to 450 passengers per day over up to 30 trips
+per day." Every instance this project has reported runs 300-400 requests. This is the first
+run at the declared scale.
+
+**Instance.** `setups/base_scale450.yaml`, new in this commit --
+`scripts/scale_baseline_demand.py` bootstrap-resamples 450 arrival minutes (225 OUT, 225 RET,
+seed 450) with replacement from `setups/base.yaml`'s own empirical distribution, so the
+documented profile (the 08:00 OUT peak, the 16:00 RET peak, the midday valley) is unchanged
+and only the volume moves, 300 -> 450. `configs/milp/target_scale450_monolith.yaml`,
+`p_minutes = 56`, otherwise the same regime as `baseline_d9_p56_monolith`.
+
+**What ran.** `scripts/sweep_target_scale.py`, Q in {2, 3, 4}, each capped at 300 s -- all
+three terminated on the gap, not the clock, well inside the budget:
+
+| Q | status | served / 450 | trips | <=30 trips? | pax/trip |
+|---:|---|---:|---:|:---:|---:|
+| 2 | OPTIMAL | 215 (47.8%) | 24 | **yes** | 8.96 |
+| 3 | OPTIMAL | 298 (66.2%) | 36 | no | 8.28 |
+| 4 | OPTIMAL | 371 (82.4%) | 48 | no | 7.73 |
+
+**The headline: no Q tested serves the declared 450 passengers within the declared 30-trip
+ceiling, and the reason is arithmetic, not a modelling artefact.** `450 / 30 = 15.0`, exactly
+`S`, the vehicle's seat count -- meeting both halves of the declared service level at once
+would require every one of 30 trips to run at 100% capacity, with zero slack for the temporal
+mismatch between when passengers arrive and when a vehicle happens to be there. Every tested
+Q falls well short of that: 51.6-59.7% of capacity per trip, and *falling* as Q grows, because
+each additional vehicle absorbs progressively more marginal, harder-to-match demand than the
+last. The regularity behind the trip counts: every vehicle in every cell ran exactly 12 trips
+(6 round trips) over the horizon regardless of Q, so trips scales as `12*Q` on this instance
+-- which is also why Q=2 is the *largest* fleet that fits the 30-trip ceiling at all (`12*2=24`
+fits, `12*3=36` does not), and it is the one that serves under half the declared passenger
+target.
+
+**What this does and does not settle.** It settles that the two halves of the declared
+service level are in tension on this demand profile at `p_minutes = 56`: pick the trip
+ceiling and serve under half the passenger target, or serve most of it and roughly double the
+trip ceiling. It does not test Q=1 or Q >= 5 (the qualitative picture is already clear from
+three points spanning the ceiling), does not test whether a different demand *shape* at 450
+total requests would ease the tension (this reuses `base.yaml`'s own profile, not a
+generated one), and does not connect this to Claim 2 -- every cell here proved optimal well
+inside its budget, so there is no competitiveness result to report at this Q range. If Q >= 5
+is wanted, note `configs/milp/target_scale450_monolith.yaml`'s `initial_battery` /
+`initial_actions` lists have length 1 and are padded by repeating the last entry (matching
+the homogeneous-fleet convention elsewhere in this project); no config change is needed to
+extend the sweep.
