@@ -357,6 +357,22 @@ class BendersRunResult:
     # requirement; measured, a binding limit moved the LB by 8% between two runs of
     # one config while a non-binding one reproduced to the last digit.
     clock_truncated_master_solves: Optional[int] = None
+    # Comparison-A instrumentation (forward-plan A4a). Before this, the runtime
+    # split existed only as text printed at the end of a run -- from four
+    # independently-maintained print blocks that could (and, per the withdrawn
+    # "master ~85.7% of runtime" figure, did) drift apart. These are the same
+    # totals, computed once in _make_result and returned as data so a caller does
+    # not have to scrape a log to get them.
+    time_to_first_feasible_s: Optional[float] = None
+    total_wall_time_s: Optional[float] = None
+    total_master_time_s: Optional[float] = None
+    total_sp_solve_time_s: Optional[float] = None
+    total_cutgen_time_s: Optional[float] = None
+    total_cutadd_time_s: Optional[float] = None
+    # total_wall_time_s minus the four tracked totals above. Whatever this loop
+    # spends building models, formatting reports and bookkeeping between phases --
+    # not zero, and previously invisible because nothing summed to compare against.
+    model_management_overhead_s: Optional[float] = None
 
 
 @dataclass(slots=True)
@@ -445,6 +461,12 @@ class BendersSolver:
 
     def run(self) -> BendersRunResult:
         t0 = time.time()
+        # perf_counter, not the wall-clock t0 above: monotonic and unaffected by
+        # system clock adjustments, which matters for a duration nobody checks
+        # against a budget (t0 already does that) but that gets subtracted from
+        # itself later (A4a: time-to-first-feasible, total_wall_time_s).
+        t0_perf = time.perf_counter()
+        first_feasible_wall_s: Optional[float] = None
         set_cut_tolerances(self.cfg.tolerances.eps_cut, self.cfg.tolerances.eps_hash)
         report_mode = str(self.cfg.run.log_level).upper() == "REPORT"
 
@@ -930,6 +952,8 @@ class BendersSolver:
             _mode = (
                 _diag.get("cut_generation_mode") if isinstance(_diag, dict) else None
             )
+            _total_wall = time.perf_counter() - t0_perf
+            _tracked = total_master_time + total_sp_solve_time + total_cutgen_time
             return BendersRunResult(
                 cut_generation_mode=_mode,
                 cut_valid_lower_bound=bool(lower_bound_semantics_valid),
@@ -951,6 +975,13 @@ class BendersSolver:
                 sp_total_demand=extra.get("sp_total_demand"),
                 sp_slot_resolution=extra.get("sp_slot_resolution"),
                 clock_truncated_master_solves=int(clock_truncated_master_solves),
+                time_to_first_feasible_s=first_feasible_wall_s,
+                total_wall_time_s=_total_wall,
+                total_master_time_s=total_master_time,
+                total_sp_solve_time_s=total_sp_solve_time,
+                total_cutgen_time_s=total_cutgen_time,
+                total_cutadd_time_s=total_cutadd_time,
+                model_management_overhead_s=max(0.0, _total_wall - _tracked),
             )
 
         # --- Fibre diagnostic (D48, DESIGN_DD_v1 stage 0) ---
@@ -1725,6 +1756,13 @@ class BendersSolver:
                     best_ub = (
                         sp_total_obj if best_ub is None else min(best_ub, sp_total_obj)
                     )
+                    if prev_ub is None and first_feasible_wall_s is None:
+                        # The first integer-feasible schedule this run priced: not the
+                        # LP phase (excluded above), and not necessarily the final
+                        # incumbent -- just the first time there was any upper bound
+                        # at all. Mirrors what monolith.py's first_incumbent_time_s
+                        # reports for the monolithic solve, for Comparison A (A4a).
+                        first_feasible_wall_s = time.perf_counter() - t0_perf
             # Keep last diagnostics for end-of-run reporting
             try:
                 last_diag = dict(getattr(sres, "diagnostics", {}) or {})

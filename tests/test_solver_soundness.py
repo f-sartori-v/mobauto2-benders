@@ -285,6 +285,78 @@ class ManifestTests(unittest.TestCase):
         self.assertIsNotNone(m["solver"]["per_iteration_time_limit_s"])
         self.assertIsNotNone(m["solver"]["total_time_limit_s"])
 
+    def test_manifest_records_the_runtime_split(self):
+        """A4a. The runtime split used to exist only as text printed once at the
+        end of a run, from four independently-maintained print blocks -- exactly
+        the situation that produced the withdrawn "master ~85.7% of runtime"
+        figure. It must now be a manifest field, not something read off a log."""
+        from pathlib import Path as _P
+        from mobauto2_benders.config import load_config
+        from mobauto2_benders.manifest import build_manifest
+
+        cfg = load_config(FIXTURE)
+        m = build_manifest(
+            cfg, _P(FIXTURE), self.result, _P(__file__).resolve().parents[1], {}
+        )
+        rt = m["runtime"]
+        for key in (
+            "time_to_first_feasible_s",
+            "total_wall_time_s",
+            "total_master_time_s",
+            "total_sp_solve_time_s",
+            "total_cutgen_time_s",
+            "total_cutadd_time_s",
+            "model_management_overhead_s",
+        ):
+            self.assertIsNotNone(rt[key], f"runtime.{key} was not populated")
+            self.assertGreaterEqual(rt[key], 0.0, f"runtime.{key} is negative")
+
+
+class RuntimeInstrumentationTests(unittest.TestCase):
+    """A4a (docs/FORWARD_PLAN_v1.md): time-to-first-feasible and the runtime
+    split, as fields on BendersRunResult rather than text scraped from a log.
+    Reuses the module's cached solve -- no extra solver time."""
+
+    @classmethod
+    def setUpClass(cls):
+        require_solver_backend()
+        cls.result, cls.output = _run_once()
+
+    def test_time_to_first_feasible_is_reported_and_within_the_run(self):
+        t = self.result.time_to_first_feasible_s
+        self.assertIsNotNone(t, "no feasible schedule was ever priced")
+        self.assertGreaterEqual(t, 0.0)
+        self.assertLessEqual(
+            t,
+            self.result.total_wall_time_s + 1e-6,
+            "first-feasible timestamp falls after the run's own total wall time",
+        )
+
+    def test_the_tracked_split_does_not_exceed_the_wall_time(self):
+        """The four tracked components are parts of the wall time, not an
+        independent measurement -- summed, they cannot exceed it."""
+        tracked = (
+            self.result.total_master_time_s
+            + self.result.total_sp_solve_time_s
+            + self.result.total_cutgen_time_s
+        )
+        self.assertLessEqual(tracked, self.result.total_wall_time_s + 1e-6)
+
+    def test_overhead_reconciles_the_split_to_the_wall_time(self):
+        """model_management_overhead_s exists so the split always sums to the
+        wall time -- silently dropping it is how a runtime table stops adding
+        up to the number quoted beside it."""
+        tracked = (
+            self.result.total_master_time_s
+            + self.result.total_sp_solve_time_s
+            + self.result.total_cutgen_time_s
+        )
+        self.assertAlmostEqual(
+            tracked + self.result.model_management_overhead_s,
+            self.result.total_wall_time_s,
+            delta=1e-6,
+        )
+
     def test_manifest_marks_a_clock_truncated_run_as_not_reproducible(self):
         """The flag must follow the run, not the config."""
         from pathlib import Path as _P
