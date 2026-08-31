@@ -150,6 +150,18 @@ is the one D69's search covers least well.
 **Residual, and it no longer blocks:** read both DDD papers in full before writing the
 related-work paragraph, and confirm neither confines refinement to the recourse.
 
+### The stochastic-robustness result set is regenerated (D70)
+
+A related but separate question, outside this repository until now: what does it cost to run
+**one** schedule against four demand scenarios instead of solving each scenario's own
+deterministic optimum? A conference-era answer to that question exists and is void — it
+predates both the `p_minutes` correction and minute-level valuation. **D70 regenerates it:
+hedging costs 0.9% in passenger-minutes**, at `p_minutes=56`, minute fidelity, weighted equally
+across `base`, `temporal_noise`, `return_peak_advanced` and `midday_surge`. A caveat travels
+with it — the per-scenario "oracle" is itself only slot-optimal, not minute-optimal, so on two
+of the four scenarios the hedged schedule outperforms its own scenario's oracle once both are
+priced honestly. See D70 for the full table and `scripts/stochastic_robustness.py`.
+
 ---
 
 ## 3. The withdrawn register — every dead number in one place

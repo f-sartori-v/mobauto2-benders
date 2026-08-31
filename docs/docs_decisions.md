@@ -3927,3 +3927,67 @@ not a log. A4a's other named gap, "time to a solution within fixed thresholds of
 (report meth-protocol-engines, item 5), is not covered here and is not implemented — it needs a
 reference optimum to measure distance against and is left for whoever runs Comparison A with
 one in hand.
+## D70 — The stochastic-robustness result set is regenerated at p_minutes=56, minute-level valuation: hedging costs 0.9%, not the withdrawn conference figure
+
+Date: 2026-08-30. Closes forward-plan item A1 (`docs/FORWARD_PLAN_v1.md`), the report's
+highest-ranked forward-work item: the conference-era comparison between one schedule serving
+four demand scenarios and the four per-scenario deterministic optima predates both the
+`p_minutes` correction (D53) and the minute-level valuation correction (D51), and its numbers
+were withdrawn as unquotable. This regenerates it.
+
+**Instrument.** `scripts/stochastic_robustness.py`, new in this commit. Base config
+`configs/milp/baseline_d9_p56_monolith.yaml` (Q=2, slot=30min, p_minutes=56), CPLEX backend,
+single-threaded, every solve terminated on the MIP gap rather than the clock.
+
+**The four scenarios**, weight 0.25 each, exactly the set `configs/default.example.yaml` lists
+and the T.5.4 report's Results section describes:
+
+| Name | File | What it is |
+|---|---|---|
+| `base` | `setups/base.yaml` | the baseline demand day |
+| `temporal_noise` | `setups/base_vol20_pm60.yaml` | 20% of requests shifted ±60 min |
+| `return_peak_advanced` | `setups/base_ret_peak_adv.yaml` | the RET peak moved 2h earlier |
+| `midday_surge` | `setups/base_plus100_out_noon.yaml` | +100 OUT requests, 11:00–13:00 |
+
+**What was run.** Five monolithic solves, all proven optimal on the MIP gap: one **hedged**
+schedule against all four scenarios jointly (12 OUT + 12 RET departures), and one **oracle**
+schedule per scenario alone (12+12 for `base`, `temporal_noise`, `midday_surge`; 11+11 for
+`return_peak_advanced`). All five are slot-optimal by construction — the same recourse the
+project runs today, not the minute recourse. Every one of the five schedules is then priced,
+at **minute** fidelity (`minute_pricer.price_schedule_at_minutes`, `midpoint` policy), against
+each scenario's actual arrival minutes.
+
+| Scenario | hedged (pax-min) | oracle (pax-min) | gap | hedged unserved | oracle unserved |
+|---|---:|---:|---:|---:|---:|
+| base | 9 088 | 9 326 | −2.6% | 102 | 113 |
+| temporal_noise | 9 226 | 9 311 | −0.9% | 104 | 97 |
+| return_peak_advanced | 10 149 | 9 824 | +3.3% | 126 | 129 |
+| midday_surge | 13 190 | 12 836 | +2.8% | 169 | 172 |
+| **AVERAGED (weight 0.25 each)** | **10 413** | **10 324** | **+0.9%** | | |
+
+**The headline number: hedging costs 0.9% in passenger-minutes at p_minutes=56**, measured
+honestly at minute fidelity — not the conference-era figure, which is void and stays void
+(PROJECT_STATE_v6 §3). Read the AVERAGED row; per-scenario cells are diagnostic only, for the
+same reason D54/D55's per-shape cells are (scenario averaging attenuates sharply — RESEARCH_NOTE_v2
+§3, falsifier 3).
+
+**A caveat that must travel with this number, and is not a defect.** On two of the four
+scenarios (`base`, `temporal_noise`) the hedged schedule *outperforms* the scenario's own
+oracle once both are priced at minute fidelity. This is not hedging paying off by magic: every
+oracle here is a **slot**-optimal schedule for its scenario, and Section res-fidelity's whole
+point is that slot-optimal is not minute-optimal for the *same* scenario, let alone across
+scenarios. So the oracle carries its own unmeasured decision error, and on two of the four
+draws the hedged schedule's departure placement happens to land closer to the true arrival
+minutes than the scenario's own slot optimum does. The AVERAGED gap still means what it says —
+it is the honest cost of running one schedule instead of four — but it is a comparison against
+an imperfect baseline, and a tighter number would require a genuinely minute-optimal
+per-scenario oracle (attach the minute recourse per scenario, as `multiscenario_check.py`
+already does for a different question). Not built here; flagged rather than smoothed over.
+
+**What this does and does not settle.** It settles the number: 0.9%, at the corrected penalty,
+at minute fidelity, replacing a withdrawn figure with no valid replacement until now. It does
+not re-derive the conference-era qualitative claim (that hedging spreads departures rather than
+chasing peaks) — the departure counts above are consistent with that reading (11–12 departures
+either way, no wild swings) but a departure-pattern comparison was not made part of this run and
+is not claimed. Both left for a follow-up if the qualitative claim is wanted verbatim rather than
+inferred.
