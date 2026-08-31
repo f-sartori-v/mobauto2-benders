@@ -73,7 +73,7 @@ def main() -> int:
     args = ap.parse_args()
 
     from mobauto2_milp.config import load_config
-    from mobauto2_milp.app import _prepare_params
+    from mobauto2_milp.app import _prepare_params, _energy_params_for_resolution
     from mobauto2_milp.model import MobautoMilpModel
     from mobauto2_milp.monolith import MonolithSolver
     from mobauto2_benders.minute_pricer import (
@@ -103,6 +103,11 @@ def main() -> int:
     sp["p"] = p_min / float(delta)
     mp["slot_resolution"] = delta
     sp["slot_resolution"] = delta
+    # BUG FIX: recompute delta_chg (energy/charging-slot) for the OVERRIDDEN
+    # resolution -- _prepare_params bakes it in at the config's own slot_resolution
+    # (30), and leaving it there means charging at 35x the real rate at delta=1.
+    mp.update(_energy_params_for_resolution(cfg, delta))
+    sp.update(_energy_params_for_resolution(cfg, delta))
     mp["Q"] = Q
     mp["solve_time_limit_s"] = args.time_limit
     mp.pop("T", None)

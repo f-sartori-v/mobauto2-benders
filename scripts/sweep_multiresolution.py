@@ -80,7 +80,7 @@ def main() -> int:
     args = ap.parse_args()
 
     from mobauto2_milp.config import load_config
-    from mobauto2_milp.app import _prepare_params
+    from mobauto2_milp.app import _prepare_params, _energy_params_for_resolution
     from mobauto2_milp.model import MobautoMilpModel
     from mobauto2_milp.monolith import MonolithSolver
     from mobauto2_benders.minute_pricer import (
@@ -128,6 +128,15 @@ def main() -> int:
                     sp["demand_file"] = demand
                     mp["slot_resolution"] = delta
                     sp["slot_resolution"] = delta
+                    # BUG FIX (found while investigating the delta=1 Benders-vs-monolith
+                    # comparison): delta_chg (energy gained per charging slot) is baked
+                    # into mp/sp by _prepare_params() at the CONFIG's own slot_resolution
+                    # (30). Overriding slot_resolution above without recomputing this left
+                    # every delta != 30 cell charging at the 30-minute rate regardless of
+                    # its actual slot width -- 2x too fast at delta=15, 3x at delta=10.
+                    # This is the same recompute app.py's own multi_res path performs.
+                    mp.update(_energy_params_for_resolution(cfg, delta))
+                    sp.update(_energy_params_for_resolution(cfg, delta))
                     mp["Q"] = Q
                     mp.pop("T", None)
                     if args.time_limit is not None:
