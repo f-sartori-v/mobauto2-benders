@@ -21,7 +21,14 @@ any item below.
 Ranked by the report's own "expected value to the project" ordering, restricted to the items
 that are code-and-measurement work in this repo.
 
-### A1. Regenerate the stochastic-robustness result set at `p_minutes ≈ 56`, minute-level valuation
+### A1. Regenerate the stochastic-robustness result set at `p_minutes ≈ 56`, minute-level valuation — ✅ done, D70
+
+Hedging costs **0.9%** in passenger-minutes (weighted average across the four scenarios),
+against the withdrawn conference-era figure. See `docs_decisions.md` D70 for the full table,
+the script (`scripts/stochastic_robustness.py`), and a caveat about the per-scenario oracle
+that must travel with the number. Left open by D70, not part of A1's original scope: a
+departure-pattern comparison to re-derive the qualitative "spreads departures" claim verbatim,
+and a genuinely minute-optimal per-scenario oracle (would tighten, not overturn, the 0.9%).
 
 **What.** Re-run the four-scenario comparison — one schedule serving all four demand scenarios
 against the per-scenario deterministic optima — under the corrected penalty
