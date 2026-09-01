@@ -4059,3 +4059,82 @@ that figure came from an explicit tradeoff statement (Section res-penalty), not 
 sweep, and the sweep's job is to show its consequences, not to replace it. It does not sweep
 jointly with anything else (fleet size, demand scenario) -- one instance, one scenario, as
 scoped by A2.
+
+## D74 — F2 (placement freedom) is implemented, measured against its own falsifier, and refuted -- more sharply than "no improvement"
+
+Date: 2026-08-31. Closes the F2 lever in `docs/PROJECT_STATE_v6.md` §5, one of the two live
+bound-side levers on the open list. Branch `f2-placement-freedom`, cut from `main` after D73
+merged, before D72 merged -- the same merge-order note as before: **this entry assumes D72
+lands first; if the order differs, this is the one to renumber.**
+
+**What F2 is, exactly as designed in §5.** A fixed offset grid `O ⊂ [0, δ]`, chosen once at
+load, so a departure of slot `tau` is reachable at any minute `tau*delta + o` for `o in O`,
+not only at `departure_policy`'s single instant. A relaxation, not a refinement: two
+passengers on the same physical departure may be priced as boarding it at different candidate
+minutes, so `Q_relaxed(Y) <= Q_true(Y)` for any fixed `Y`, and a cut derived from the relaxed
+LP is a valid lower bound on the true one.
+
+**Implementation.** `solve_minute_recourse` (`src/mobauto2_benders/minute_pricer.py`) takes a
+new `placement_offsets: Sequence[float] | None` parameter. Internally, every arc now carries
+an offset index `k` in addition to `(m, t)`; the capacity constraint sums over `k` before
+comparing to `S*Y_d[tau]`, so the row count, right-hand side and dual object are byte-for-byte
+identical to the single-offset case regardless of `len(O)` -- E2 holds by construction, not
+merely by argument. `placement_offsets=None` (the default) is the same internal code path with
+exactly one offset in it, so the two cases cannot silently diverge; a test
+(`test_placement_offsets_none_matches_todays_single_offset_model`) pins that identity to 9
+decimal places. Wired through `SPParams.placement_offsets` →
+`subproblem.placement_offsets` in the config schema (validated: only meaningful under
+`recourse_resolution: minute`, must be non-negative). 5 new tests in `tests/test_minute_pricer.py`
+cover the identity above, the relaxation property (`Q_both <= min(Q_start, Q_end)`), the
+one-row-per-slot invariant under a 4-offset grid, out-of-range validation, and the path
+through `solve_subproblem` end to end. Full suite: **277 tests** (was 272; D72, still
+unmerged at time of writing, would add 4 more elsewhere).
+
+**The falsifier, stated in `docs/PROJECT_STATE_v6.md` §5 before this ran:** "F2 is refuted if
+cut strength at a fixed budget does not improve beyond run-to-run noise."
+
+**The measurement.** `scripts/f2_placement_freedom_check.py`, two new configs
+(`configs/f2/check_baseline.yaml`, `configs/f2/check_offsets.yaml`) identical except for one
+key. Both iteration-budgeted (15 iterations, `total_time_limit_s` non-binding, single-threaded
+CPLEX) rather than wall-clock-budgeted, per `BENDERS_SPEC_v4` §0.10 -- which is what makes
+`clock_truncated_master_solves == 0` on both arms mean the comparison has **no run-to-run
+noise to attribute a gap to.** Instance: `rq5_benders_minute_p56` (slot first stage, minute
+recourse, `p_minutes = 56`, Q=2). Offsets tested: `{0, 15, 30}` against the baseline's single
+`{15}` (midpoint on `delta=30`) -- a proper superset, so the relaxation property is engaged at
+every candidate `Y`, not vacuously.
+
+| Iteration | baseline LB | F2 LB (offsets {0,15,30}) |
+|---:|---:|---:|
+| 3 | 40.22 | 1.88 |
+| 6 | 146.10 | 88.30 |
+| 9 | 168.26 | 120.86 |
+| 12 | 189.01 | 138.05 |
+| 15 | **193.12** | **143.09** |
+
+**The result: F2's lower bound is 25.9% WORSE than the baseline's at the same 15-iteration
+budget (143.09 vs 193.12), and it trails at every single iteration from #3 onward** -- not a
+noisy tie at the cutoff, a persistent, widening gap across the whole trajectory. Both runs
+proved `clock_truncated_master_solves == 0`. **F2 is settled negatively, and more decisively
+than its own falsifier asked for**: it does not merely fail to improve, it actively hurts the
+bound at this budget.
+
+**A likely mechanism -- stated as a hypothesis, not independently confirmed.** Both arms ran
+under `cut_mode: dual` (plain capacity duals), the only cut mode this repository has for
+minute-level recourse -- Magnanti–Wong selection is implemented for the slot primal only
+(RQ5's own config note: "`solve_mw_dual` mirrors the SLOT primal and would select duals for an
+LP that is not the one being solved"). Adding offsets to a slot's arc set gives the recourse
+LP more ways to attain the same optimum, which is exactly the condition Magnanti–Wong exists
+to correct (`docs/BENDERS_SPEC_v4.md`, "Selection"): more degeneracy, without a Pareto-optimal
+selection to counteract it, plausibly explains why the plain dual comes out weaker more often
+as the grid grows. **This was not measured separately in this entry** -- no degeneracy count,
+no comparison under a hypothetical MW-for-minutes. It is the mechanism consistent with the
+evidence in hand, not a demonstrated one.
+
+**What this settles, and what it leaves open.** It settles that placement freedom, as designed
+in §5 and tested here, is not a usable lever on this instance at `cut_mode: dual` -- closed by
+measurement, joining the list `docs/PROJECT_STATE_v6.md` §5 already keeps. It does not settle
+whether the mechanism hypothesis is right, whether a different offset grid (finer, coarser, or
+not containing the baseline's own offset) behaves differently, or whether extending
+Magnanti–Wong to minute-level recourse would recover the lever. None of those were in scope
+for the falsifier this entry closes; if F2 is revisited, MW-for-minutes is the natural
+prerequisite, not a bigger grid on the current cut mode.

@@ -262,6 +262,13 @@ class SubproblemSection:
     # to move the answer by ~4% of the objective on baseline_d9, so it is an explicit
     # knob rather than a constant buried in the pricer.
     departure_policy: str = "midpoint"
+    # F2 (docs/PROJECT_STATE_v6.md section 5): a fixed offset grid O subset [0, delta],
+    # chosen once at load, letting the minute recourse treat a departure as reachable at
+    # any minute in O rather than only at departure_policy's single instant. A RELAXATION
+    # -- Q_relaxed <= Q_true -- so a run using it may report a valid LOWER bound and must
+    # not report its upper bound as the schedule's true cost. None (default) is today's
+    # single-offset model exactly. Only meaningful under recourse_resolution == "minute".
+    placement_offsets: list[float] | None = None
     degenerate_cut_probe_top_k: int = 6
     degenerate_cut_probe_top_k_out: int | None = None
     degenerate_cut_probe_top_k_ret: int | None = None
@@ -616,6 +623,7 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
             "p": sub_params.get("p"),
             "recourse_resolution": sub_params.get("recourse_resolution", "slot"),
             "departure_policy": sub_params.get("departure_policy", "midpoint"),
+            "placement_offsets": sub_params.get("placement_offsets"),
             "degenerate_cut_probe_top_k": sub_params.get(
                 "degenerate_cut_probe_top_k", 6
             ),
@@ -1140,6 +1148,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "p_minutes",
             "recourse_resolution",
             "departure_policy",
+            "placement_offsets",
             "degenerate_cut_probe_top_k",
             "degenerate_cut_probe_top_k_out",
             "degenerate_cut_probe_top_k_ret",
@@ -1189,6 +1198,35 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "cannot substitute: a slot window is not an exact number of minutes, which "
             "is the entire point of evaluating at minute resolution (D51)."
         )
+    # F2 (docs/PROJECT_STATE_v6.md section 5). Only meaningful when the recourse can
+    # already see minutes -- the offset grid refines WHICH minute within a slot a
+    # departure is reachable at, and the slot recourse has no minute axis to refine.
+    _placement_offsets_raw = sub_raw.get("placement_offsets")
+    _placement_offsets: list[float] | None = None
+    if _placement_offsets_raw is not None:
+        if _recourse_resolution != "minute":
+            raise ValueError(
+                "subproblem.placement_offsets is only meaningful under "
+                "recourse_resolution='minute'; got "
+                f"recourse_resolution={_recourse_resolution!r}"
+            )
+        if not isinstance(_placement_offsets_raw, list) or not _placement_offsets_raw:
+            raise ValueError(
+                "subproblem.placement_offsets must be a non-empty list of minute "
+                f"offsets, got {_placement_offsets_raw!r}"
+            )
+        try:
+            _placement_offsets = [float(o) for o in _placement_offsets_raw]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "subproblem.placement_offsets must be numeric, got "
+                f"{_placement_offsets_raw!r}"
+            ) from exc
+        if any(o < 0.0 for o in _placement_offsets):
+            raise ValueError(
+                "subproblem.placement_offsets must be non-negative, got "
+                f"{_placement_offsets!r}"
+            )
     # Resolve the cut generator (S1b).
     #
     # `cut_mode` is the one key. The legacy pair `use_magnanti_wong` / `use_dual_slopes`
@@ -1340,6 +1378,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         p_minutes=_p_minutes_val,
         recourse_resolution=_recourse_resolution,
         departure_policy=_departure_policy,
+        placement_offsets=_placement_offsets,
         degenerate_cut_probe_top_k=_ensure_int(
             _disallow_expr(
                 sub_raw.get("degenerate_cut_probe_top_k", 6),
