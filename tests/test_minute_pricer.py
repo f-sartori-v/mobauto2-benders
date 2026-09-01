@@ -429,3 +429,108 @@ class TestOptimalPlacement(unittest.TestCase):
         delta, S, wmax, p_min, sched, reqs = self._case()
         with self.assertRaises(ValueError):
             self._price_opt(sched, reqs, delta, S, wmax, p_min, offsets=[0.0, delta + 1.0])
+
+
+class TestOptimalPlacementWithChain(unittest.TestCase):
+    """`price_schedule_optimal_placement_with_chain` is the version a vehicle can
+    actually fly: departures still choose their instant, but a vehicle's trips must
+    follow one another and no trip may eat into a slot its vehicle spends charging.
+
+    It closes the sandwich at four terms rather than three:
+
+        Q_relaxed <= Q_optimal(free) <= Q_optimal(chain) <= Q_fixed[start]
+
+    The right-hand end holds because `start` -- every departure at its slot boundary --
+    is always chain-feasible whenever the master's own slot schedule was: a trip that
+    fills exactly the slots allocated to it encroaches on nothing and delays nothing.
+    That makes `start` the witness that the chain-constrained problem is feasible at
+    all, and the reason an infeasible result here would indict the master, not this
+    model.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        require_solver_backend()
+
+    def _chain(self, *args, **kwargs):
+        kwargs.setdefault("mip_solver", require_solver_backend())
+        return _minute_pricer.price_schedule_optimal_placement_with_chain(*args, **kwargs)
+
+    def _free(self, *args, **kwargs):
+        kwargs.setdefault("mip_solver", require_solver_backend())
+        return _minute_pricer.price_schedule_optimal_placement(*args, **kwargs)
+
+    def test_one_trip_per_vehicle_and_no_charging_matches_free_shifting(self):
+        """With nothing to chain to and nothing to encroach on, the two constraints
+        are vacuous and the chain model must reduce to the free one exactly."""
+        delta, S, wmax, p_min, dur = 4, 3.0, 10.0, 100.0, 4.0
+        reqs = {"OUT": [2, 3, 5, 6, 11, 13], "RET": []}
+        # Two vehicles, one trip each -> no precedence pair exists.
+        veh = {0: [(1, "OUT")], 1: [(3, "OUT")]}
+        chain, _minutes = self._chain(
+            veh, {}, reqs, delta, S, wmax, p_min, dur
+        )
+        free = self._free({"OUT": [1, 3], "RET": []}, reqs, delta, S, wmax, p_min)
+        self.assertAlmostEqual(chain.total_cost, free.total_cost, places=6)
+
+    def test_precedence_is_respected_by_the_chosen_minutes(self):
+        """The constraint is checked where it is easiest to check honestly: on the
+        departure instants the model actually returns."""
+        delta, S, wmax, p_min, dur = 10, 5.0, 60.0, 200.0, 10.0
+        reqs = {"OUT": [11, 14, 19], "RET": [25, 28, 33]}
+        veh = {0: [(1, "OUT"), (2, "RET")]}
+        _res, minutes = self._chain(veh, {}, reqs, delta, S, wmax, p_min, dur)
+        d_out = minutes[(0, 1, "OUT")]
+        d_ret = minutes[(0, 2, "RET")]
+        self.assertGreaterEqual(d_ret + 1e-9, d_out + dur)
+
+    def test_a_charging_slot_pins_the_trip_before_it_to_its_slot_boundary(self):
+        """When a trip fills its slot exactly, any positive shift spills into the next
+        slot. If the vehicle is charging there, the shift is refused and the departure
+        is pinned to offset 0 -- which is what `start` already assumes."""
+        delta, S, wmax, p_min, dur = 10, 5.0, 60.0, 200.0, 10.0
+        reqs = {"OUT": [11, 14, 19], "RET": []}
+        veh = {0: [(1, "OUT")]}
+        pinned, minutes = self._chain(
+            veh, {0: [2]}, reqs, delta, S, wmax, p_min, dur
+        )
+        self.assertAlmostEqual(minutes[(0, 1, "OUT")], 10.0, places=9)
+        at_start = price_schedule_at_minutes(
+            {"OUT": [1], "RET": []}, reqs, delta, S, wmax, p_min, policy="start"
+        )
+        self.assertAlmostEqual(pinned.total_cost, at_start.total_cost, places=6)
+
+        # And without the charging slot the same instance is free to do better.
+        free_to_shift, _m = self._chain(veh, {}, reqs, delta, S, wmax, p_min, dur)
+        self.assertLess(free_to_shift.total_cost, pinned.total_cost)
+
+    def test_the_four_term_sandwich_holds(self):
+        """Every ordering the module claims, asserted end to end on one instance."""
+        from mobauto2_benders.minute_pricer import solve_minute_recourse
+
+        T, delta, S, wmax, p_slots, dur = 8, 10, 5.0, 60.0, 20.0, 10.0
+        p_min = p_slots * delta
+        reqs = {"OUT": [11, 14, 19, 22, 27], "RET": [35, 41, 44]}
+        veh = {0: [(1, "OUT"), (3, "RET")], 1: [(2, "OUT")]}
+        sched = {"OUT": [1, 2], "RET": [3]}
+
+        C_out = [0.0] * T
+        C_out[1] = S
+        C_out[2] = S
+        C_ret = [0.0] * T
+        C_ret[3] = S
+        grid = [float(k) for k in range(delta + 1)]
+        _d, obj_slots = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint",
+            lp_solver=require_solver_backend(), placement_offsets=grid,
+        )
+        relaxed = obj_slots * delta
+        free = self._free(sched, reqs, delta, S, wmax, p_min)
+        chain, _m = self._chain(veh, {}, reqs, delta, S, wmax, p_min, dur)
+        at_start = price_schedule_at_minutes(
+            sched, reqs, delta, S, wmax, p_min, policy="start"
+        )
+
+        self.assertLessEqual(relaxed, free.total_cost + 1e-6)
+        self.assertLessEqual(free.total_cost, chain.total_cost + 1e-6)
+        self.assertLessEqual(chain.total_cost, at_start.total_cost + 1e-6)

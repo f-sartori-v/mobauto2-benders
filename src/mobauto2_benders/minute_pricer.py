@@ -497,6 +497,214 @@ def price_schedule_optimal_placement(
     )
 
 
+def price_schedule_optimal_placement_with_chain(
+    vehicle_trips: dict[int, Sequence[tuple[int, str]]],
+    charging_slots: dict[int, Sequence[int]],
+    requests: dict[str, Sequence[int]],
+    slot_resolution: int,
+    seats: float,
+    wmax_minutes: float,
+    p_minutes: float,
+    trip_duration_minutes: float,
+    offsets: Sequence[float] | None = None,
+    mip_solver: str = "cplex_direct",
+) -> tuple[MinutePricingResult, dict[tuple[int, int, str], float]]:
+    """Optimal placement that a vehicle can actually perform. Returns (result, minutes).
+
+    THE DIFFERENCE FROM `price_schedule_optimal_placement`. That one shifts departures
+    freely, because the schedule it receives is aggregated across the fleet and carries
+    no way to tell which vehicle flies which trip. Free shifting is cheaper than
+    reality, so it yields a LOWER bound on optimal placement -- useful for bracketing
+    the prize, useless as a bound on an implementable schedule. This one takes the
+    per-vehicle schedule and enforces what a vehicle can physically do, so its answer
+    IS achievable: an upper bound, and the one that may serve as theta_opt.
+
+    THE TWO COUPLINGS, both of which you get for free from a fixed-placement model and
+    have to pay for the moment placement becomes a decision:
+
+    1. PRECEDENCE. A vehicle's trips are ordered. Delaying one delays the return, which
+       delays everything after it: `d_next >= d_prev + trip_duration`. The slack that
+       absorbs a delay is whatever idle time the master's own schedule already left.
+
+    2. CHARGING. The slot model credits `delta_chg` energy for a whole CHR slot. A trip
+       that runs late enough to spill into a charging slot leaves less than a slot's
+       worth of charging time, so the energy the master counted on is not there. Rather
+       than re-derive the battery trajectory in minutes -- which would mean rebuilding
+       the master's energy model here -- this refuses the encroachment outright: a trip
+       may not overlap any slot its own vehicle spends charging. That is CONSERVATIVE.
+       It forbids some shifts that a proportional-charging model would allow, so the
+       cost it returns is attainable but possibly not the cheapest attainable. An upper
+       bound that is honestly an upper bound, in the direction that cannot mislead.
+
+    Note what constraint 2 implies when a trip fills its slot exactly
+    (`trip_duration == slot_resolution`, the baseline's own case): a trip immediately
+    followed by a charging slot cannot shift at all, and is pinned to offset 0. Much of
+    the freedom the free-shifting evaluator reports may be unavailable for exactly this
+    reason, which is the entire point of measuring rather than assuming.
+
+    `vehicle_trips` maps a vehicle to its trips as ordered `(slot, direction)` pairs;
+    `charging_slots` maps a vehicle to the slots it charges in.
+    """
+    import pyomo.environ as pyo
+
+    delta = float(slot_resolution)
+    dur = float(trip_duration_minutes)
+    grid = _offset_grid(slot_resolution, offsets)
+    ks = list(range(len(grid)))
+
+    trips: list[tuple[int, int, str]] = []
+    for q in sorted(vehicle_trips):
+        for (slot, direction) in vehicle_trips[q]:
+            trips.append((int(q), int(slot), str(direction)))
+    if not trips:
+        total = float(sum(len(list(requests.get(d, []))) for d in (OUT, RET)))
+        return (
+            MinutePricingResult(
+                total_cost=float(p_minutes) * total, waiting_minutes=0.0,
+                unserved_passengers=total, served_passengers=0.0,
+                total_passengers=total, departures_used=0, policy="optimal+chain",
+            ),
+            {},
+        )
+
+    dep_minute = {
+        (i, k): float(trips[i][1]) * delta + grid[k]
+        for i in range(len(trips))
+        for k in ks
+    }
+
+    counts: dict[str, dict[int, int]] = {}
+    for direction in (OUT, RET):
+        c: dict[int, int] = {}
+        for m in requests.get(direction, []):
+            c[int(m)] = c.get(int(m), 0) + 1
+        counts[direction] = c
+
+    arcs = [
+        (m, i, k)
+        for i in range(len(trips))
+        for k in ks
+        for m in sorted(counts[trips[i][2]])
+        if 0.0 <= dep_minute[(i, k)] - float(m) <= float(wmax_minutes)
+    ]
+
+    mdl = pyo.ConcreteModel()
+    mdl.Arcs = pyo.Set(initialize=arcs, dimen=3, ordered=False)
+    mdl.Sel = pyo.Set(
+        initialize=[(i, k) for i in range(len(trips)) for k in ks], dimen=2, ordered=False
+    )
+    mdl.x = pyo.Var(mdl.Arcs, within=pyo.NonNegativeReals)
+    mdl.z = pyo.Var(mdl.Sel, within=pyo.Binary)
+    unserved_index = [
+        (direction, m) for direction in (OUT, RET) for m in sorted(counts[direction])
+    ]
+    mdl.u = pyo.Var(unserved_index, within=pyo.NonNegativeReals)
+
+    mdl.obj = pyo.Objective(
+        expr=sum((dep_minute[(i, k)] - float(m)) * mdl.x[m, i, k] for (m, i, k) in arcs)
+        + float(p_minutes) * sum(mdl.u[d, m] for (d, m) in unserved_index),
+        sense=pyo.minimize,
+    )
+
+    def _demand(mm, direction, m):
+        served = sum(
+            mm.x[a, i, k]
+            for (a, i, k) in arcs
+            if a == m and trips[i][2] == direction
+        )
+        return served + mm.u[direction, m] == float(counts[direction][m])
+
+    mdl.Demand = pyo.Constraint(unserved_index, rule=_demand)
+    mdl.OneInstant = pyo.Constraint(
+        range(len(trips)), rule=lambda mm, i: sum(mm.z[i, k] for k in ks) == 1
+    )
+    mdl.Capacity = pyo.Constraint(
+        mdl.Sel,
+        rule=lambda mm, i, k: (
+            sum(mm.x[a, ii, kk] for (a, ii, kk) in arcs if ii == i and kk == k)
+            <= float(seats) * mm.z[i, k]
+            if any(ii == i and kk == k for (_a, ii, kk) in arcs)
+            else pyo.Constraint.Skip
+        ),
+    )
+
+    # (1) Precedence, per vehicle, between consecutive trips in slot order.
+    by_vehicle: dict[int, list[int]] = {}
+    for i, (q, slot, _d) in enumerate(trips):
+        by_vehicle.setdefault(q, []).append(i)
+    for q in by_vehicle:
+        by_vehicle[q].sort(key=lambda i: trips[i][1])
+
+    precedence_pairs = [
+        (by_vehicle[q][n], by_vehicle[q][n + 1])
+        for q in sorted(by_vehicle)
+        for n in range(len(by_vehicle[q]) - 1)
+    ]
+
+    def _precedence(mm, i, j):
+        d_i = sum(dep_minute[(i, k)] * mm.z[i, k] for k in ks)
+        d_j = sum(dep_minute[(j, k)] * mm.z[j, k] for k in ks)
+        return d_j >= d_i + dur
+
+    if precedence_pairs:
+        mdl.Precedence = pyo.Constraint(precedence_pairs, rule=_precedence)
+
+    # (2) No trip may overlap a slot its own vehicle spends charging.
+    forbidden: list[tuple[int, int]] = []
+    for i, (q, slot, _d) in enumerate(trips):
+        chr_slots = {int(s) for s in charging_slots.get(q, [])}
+        if not chr_slots:
+            continue
+        for k in ks:
+            start = dep_minute[(i, k)]
+            end = start + dur
+            first_slot = int(start // delta)
+            last_slot = int((end - 1e-9) // delta)
+            if any(s in chr_slots for s in range(first_slot, last_slot + 1)):
+                forbidden.append((i, k))
+    if forbidden:
+        mdl.NoChargeEncroachment = pyo.Constraint(
+            forbidden, rule=lambda mm, i, k: mm.z[i, k] == 0
+        )
+
+    solver = pyo.SolverFactory(mip_solver)
+    res = solver.solve(mdl, tee=False, load_solutions=False)
+    term = getattr(res.solver, "termination_condition", None)
+    if term != pyo.TerminationCondition.optimal:
+        raise RuntimeError(
+            "chain-constrained optimal-placement MIP did not solve to optimality: "
+            f"termination={term}. Infeasible here would be a real signal, not a defect: "
+            "it would mean the master handed over a slot schedule no assignment of "
+            "departure instants can perform."
+        )
+    mdl.solutions.load_from(res)
+
+    waiting = sum(
+        (dep_minute[(i, k)] - float(m)) * float(pyo.value(mdl.x[m, i, k]))
+        for (m, i, k) in arcs
+    )
+    unserved = sum(float(pyo.value(mdl.u[d, m])) for (d, m) in unserved_index)
+    total_pax = float(sum(sum(c.values()) for c in counts.values()))
+    chosen = {
+        trips[i]: dep_minute[(i, k)]
+        for i in range(len(trips))
+        for k in ks
+        if float(pyo.value(mdl.z[i, k])) > 0.5
+    }
+    return (
+        MinutePricingResult(
+            total_cost=waiting + float(p_minutes) * unserved,
+            waiting_minutes=float(waiting),
+            unserved_passengers=float(unserved),
+            served_passengers=total_pax - float(unserved),
+            total_passengers=total_pax,
+            departures_used=len(trips),
+            policy="optimal+chain",
+        ),
+        chosen,
+    )
+
+
 def slot_objective_in_minutes(
     slot_waiting_cost: float, slot_unserved: float, slot_resolution: int, p_slots: float
 ) -> float:
