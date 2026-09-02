@@ -4035,3 +4035,150 @@ Full suite re-run clean: **276 tests, 267 passed, 9 skipped** (was 272/263/9). `
 from the continuous-time CP model, which lives outside this repository. This closes the
 validator-side half of the blocker the report names; the other half is producing the CP
 schedule to feed it, which is A4b/A4d's CP leg and is not this repository's to run.
+
+## D73 — Sweeping p_minutes and Wmax jointly finds a cliff: below p_minutes ~30 the model serves nobody, whatever Wmax is
+
+Date: 2026-08-30. Closes forward-plan item A2 (`docs/FORWARD_PLAN_v1.md`). Branch
+`penalty-window-sweep-a2`, cut from `main` after D70 and D71 merged, before D72 merged — the
+same merge-order note as D71/D72: **this entry assumes D72 lands before it; if the merge order
+differs, this is the one to renumber.**
+
+**Why swept.** `p_minutes ~ 56` and `Wmax = 60` min are both stated in the report as policy
+assumptions, not elicited preferences (Section res-penalty). The report's own next step names
+sweeping them jointly and publishing the frontier "in front of whoever will operate the
+service." Neither had been swept, let alone jointly, before this.
+
+**Instrument.** `scripts/sweep_penalty_window.py`, new in this commit. Base config
+`configs/milp/baseline_d9_p56_monolith.yaml` (Q=2, T=22, slot=30, single-scenario `base.yaml`,
+300 requests), one monolithic CPLEX solve per cell, every cell re-priced at minute fidelity
+(`minute_pricer.price_schedule_at_minutes`, `midpoint` policy) rather than read off the slot
+objective — the slot figure is known to overstate cost by 28.5% and waiting alone by 66-86%
+(D51), and a frontier meant to be read by an operator is exactly the table that error must not
+enter.
+
+**The grid**, `p_minutes` in `{14, 28, 56, 112, 224}` x `Wmax` in `{30, 45, 60, 90, 120}` min,
+served (of 300):
+
+| Wmax \\ p_minutes | 14 | 28 | 56 | 112 | 224 |
+|---:|---:|---:|---:|---:|---:|
+| 30 | 0 | 0 | 171 | 171 | 171 |
+| 45 | 0 | 0 | 184 | 196 | 196 |
+| 60 | 0 | 0 | 187 | 220 | 221 |
+| 90 | 0 | 0 | 188 | 227 | 233 |
+| 120 | 0 | 0 | 187 | 229 | 238 |
+
+**The headline: at `p_minutes` 14 and 28, served is zero at every `Wmax` tested.** The
+cost-minimising schedule runs no departures at all and pays the flat unmet-demand penalty for
+every one of the 300 requests (`300 x 14 = 4200`, `300 x 28 = 8400` — both total-cost columns
+match exactly). This is not a bug: nothing in the objective rewards serving a passenger beyond
+avoiding the penalty, so whenever the aggregate waiting cost of running any service exceeds
+what the penalty would have cost, the optimum is to run nothing. Service is not gradual in the
+penalty; it turns on past a threshold.
+
+**The threshold, pinned down.** A refinement sweep at `Wmax = 60` only, `p_minutes` in
+`{28, 35, 42, 49}`, found the crossover between 28 and 35: 0 served at 28, 173/300 at 35,
+179/300 at 42, 183/300 at 49. Not narrowed further than that bracket — the point was to locate
+the cliff, not its last decimal.
+
+**What this means for the operator's own value.** `p_minutes ~ 56` sits just above the
+threshold, not comfortably inside the region where more service is worth it. A small downward
+revision of the indifference statement (Section res-penalty) could cross back into the
+zero-service regime; the sweep is what makes that risk visible rather than latent in a single
+point estimate.
+
+**Two more readings of the grid, secondary to the cliff.** At `Wmax = 30` served is flat at 171
+across `p_minutes` 56/112/224 — the waiting cap, not the penalty, is what binds there, so
+raising the penalty further buys nothing until `Wmax` is loosened. And average wait among
+served climbs with both `p_minutes` and `Wmax` (13.3 to 28.7 min across the grid) — a higher
+penalty buys more passengers served partly by tolerating longer waits for them, exactly the
+order-of-service mechanism Section meth-priority describes.
+
+**Artefacts.** `data/measurements.json` gets a `penalty_window_frontier` entry (the full 5x5
+grid plus the refinement sweep); `scripts/report_figures/fig_penalty_window.py` plots served
+share and average wait against `p_minutes` (log axis), one line per `Wmax`, with the cliff and
+the operator's value marked.
+
+**What this does not do.** It does not revise the operator's stated indifference of ~56 --
+that figure came from an explicit tradeoff statement (Section res-penalty), not from this
+sweep, and the sweep's job is to show its consequences, not to replace it. It does not sweep
+jointly with anything else (fleet size, demand scenario) -- one instance, one scenario, as
+scoped by A2.
+
+## D74 — F2 (placement freedom) is implemented, measured against its own falsifier, and refuted -- more sharply than "no improvement"
+
+Date: 2026-08-31. Closes the F2 lever in `docs/PROJECT_STATE_v6.md` §5, one of the two live
+bound-side levers on the open list. Branch `f2-placement-freedom`, cut from `main` after D73
+merged, before D72 merged -- the same merge-order note as before: **this entry assumes D72
+lands first; if the order differs, this is the one to renumber.**
+
+**What F2 is, exactly as designed in §5.** A fixed offset grid `O ⊂ [0, δ]`, chosen once at
+load, so a departure of slot `tau` is reachable at any minute `tau*delta + o` for `o in O`,
+not only at `departure_policy`'s single instant. A relaxation, not a refinement: two
+passengers on the same physical departure may be priced as boarding it at different candidate
+minutes, so `Q_relaxed(Y) <= Q_true(Y)` for any fixed `Y`, and a cut derived from the relaxed
+LP is a valid lower bound on the true one.
+
+**Implementation.** `solve_minute_recourse` (`src/mobauto2_benders/minute_pricer.py`) takes a
+new `placement_offsets: Sequence[float] | None` parameter. Internally, every arc now carries
+an offset index `k` in addition to `(m, t)`; the capacity constraint sums over `k` before
+comparing to `S*Y_d[tau]`, so the row count, right-hand side and dual object are byte-for-byte
+identical to the single-offset case regardless of `len(O)` -- E2 holds by construction, not
+merely by argument. `placement_offsets=None` (the default) is the same internal code path with
+exactly one offset in it, so the two cases cannot silently diverge; a test
+(`test_placement_offsets_none_matches_todays_single_offset_model`) pins that identity to 9
+decimal places. Wired through `SPParams.placement_offsets` →
+`subproblem.placement_offsets` in the config schema (validated: only meaningful under
+`recourse_resolution: minute`, must be non-negative). 5 new tests in `tests/test_minute_pricer.py`
+cover the identity above, the relaxation property (`Q_both <= min(Q_start, Q_end)`), the
+one-row-per-slot invariant under a 4-offset grid, out-of-range validation, and the path
+through `solve_subproblem` end to end. Full suite: **277 tests** (was 272; D72, still
+unmerged at time of writing, would add 4 more elsewhere).
+
+**The falsifier, stated in `docs/PROJECT_STATE_v6.md` §5 before this ran:** "F2 is refuted if
+cut strength at a fixed budget does not improve beyond run-to-run noise."
+
+**The measurement.** `scripts/f2_placement_freedom_check.py`, two new configs
+(`configs/f2/check_baseline.yaml`, `configs/f2/check_offsets.yaml`) identical except for one
+key. Both iteration-budgeted (15 iterations, `total_time_limit_s` non-binding, single-threaded
+CPLEX) rather than wall-clock-budgeted, per `BENDERS_SPEC_v4` §0.10 -- which is what makes
+`clock_truncated_master_solves == 0` on both arms mean the comparison has **no run-to-run
+noise to attribute a gap to.** Instance: `rq5_benders_minute_p56` (slot first stage, minute
+recourse, `p_minutes = 56`, Q=2). Offsets tested: `{0, 15, 30}` against the baseline's single
+`{15}` (midpoint on `delta=30`) -- a proper superset, so the relaxation property is engaged at
+every candidate `Y`, not vacuously.
+
+| Iteration | baseline LB | F2 LB (offsets {0,15,30}) |
+|---:|---:|---:|
+| 3 | 40.22 | 1.88 |
+| 6 | 146.10 | 88.30 |
+| 9 | 168.26 | 120.86 |
+| 12 | 189.01 | 138.05 |
+| 15 | **193.12** | **143.09** |
+
+**The result: F2's lower bound is 25.9% WORSE than the baseline's at the same 15-iteration
+budget (143.09 vs 193.12), and it trails at every single iteration from #3 onward** -- not a
+noisy tie at the cutoff, a persistent, widening gap across the whole trajectory. Both runs
+proved `clock_truncated_master_solves == 0`. **F2 is settled negatively, and more decisively
+than its own falsifier asked for**: it does not merely fail to improve, it actively hurts the
+bound at this budget.
+
+**A likely mechanism -- stated as a hypothesis, not independently confirmed.** Both arms ran
+under `cut_mode: dual` (plain capacity duals), the only cut mode this repository has for
+minute-level recourse -- Magnanti–Wong selection is implemented for the slot primal only
+(RQ5's own config note: "`solve_mw_dual` mirrors the SLOT primal and would select duals for an
+LP that is not the one being solved"). Adding offsets to a slot's arc set gives the recourse
+LP more ways to attain the same optimum, which is exactly the condition Magnanti–Wong exists
+to correct (`docs/BENDERS_SPEC_v4.md`, "Selection"): more degeneracy, without a Pareto-optimal
+selection to counteract it, plausibly explains why the plain dual comes out weaker more often
+as the grid grows. **This was not measured separately in this entry** -- no degeneracy count,
+no comparison under a hypothetical MW-for-minutes. It is the mechanism consistent with the
+evidence in hand, not a demonstrated one.
+
+**What this settles, and what it leaves open.** It settles that placement freedom, as designed
+in §5 and tested here, is not a usable lever on this instance at `cut_mode: dual` -- closed by
+measurement, joining the list `docs/PROJECT_STATE_v6.md` §5 already keeps. It does not settle
+whether the mechanism hypothesis is right, whether a different offset grid (finer, coarser, or
+not containing the baseline's own offset) behaves differently, or whether extending
+Magnanti–Wong to minute-level recourse would recover the lever. None of those were in scope
+for the falsifier this entry closes; if F2 is revisited, MW-for-minutes is the natural
+prerequisite, not a bigger grid on the current cut mode.

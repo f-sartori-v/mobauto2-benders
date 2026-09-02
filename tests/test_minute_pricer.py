@@ -283,6 +283,96 @@ class TestDecomposedMinuteRecourse(unittest.TestCase):
         )
         self.assertLessEqual(more, base + 1e-9)
 
+    def test_placement_offsets_none_matches_todays_single_offset_model(self):
+        """F2's whole safety argument in one test: the default must be numerically
+        IDENTICAL to a singleton grid holding exactly the policy's own offset, not
+        merely 'close'. If these ever drift apart, F2 has silently changed the
+        model everyone else's numbers were produced under."""
+        from mobauto2_benders.minute_pricer import placement_offset, solve_minute_recourse
+
+        T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
+        duals_default, obj_default = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint",
+            lp_solver=require_solver_backend(),
+        )
+        duals_explicit, obj_explicit = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint",
+            lp_solver=require_solver_backend(),
+            placement_offsets=[placement_offset("midpoint", delta)],
+        )
+        self.assertAlmostEqual(obj_default, obj_explicit, places=9)
+        self.assertEqual(duals_default["pi_OUT"], duals_explicit["pi_OUT"])
+        self.assertEqual(duals_default["pi_RET"], duals_explicit["pi_RET"])
+        self.assertEqual(duals_explicit["placement_offsets"], [15.0])
+
+    def test_placement_freedom_is_a_relaxation_never_worse_than_either_offset_alone(self):
+        """F2's central claim: a richer offset grid can only lower or match the
+        recourse, never raise it, because every single-offset arc set is a subset
+        of the multi-offset one. Q_relaxed <= Q_true in the direction that matters
+        for a lower bound."""
+        from mobauto2_benders.minute_pricer import solve_minute_recourse
+
+        T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
+        _, obj_start = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs,
+            lp_solver=require_solver_backend(), placement_offsets=[0.0],
+        )
+        _, obj_end = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs,
+            lp_solver=require_solver_backend(), placement_offsets=[delta],
+        )
+        _, obj_both = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs,
+            lp_solver=require_solver_backend(), placement_offsets=[0.0, delta],
+        )
+        self.assertLessEqual(obj_both, min(obj_start, obj_end) + 1e-9)
+
+    def test_capacity_row_stays_one_per_slot_under_a_multi_offset_grid(self):
+        """The interface condition F2 depends on: however many offsets are in the
+        grid, capacity is still indexed by slot alone, so the cut the master
+        receives is the same object it always was."""
+        from mobauto2_benders.minute_pricer import solve_minute_recourse
+
+        T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
+        duals, _ = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs,
+            lp_solver=require_solver_backend(), placement_offsets=[0.0, 10.0, 20.0, 30.0],
+        )
+        self.assertEqual(set(duals["pi_OUT"]), set(range(T)))
+        self.assertEqual(set(duals["pi_RET"]), set(range(T)))
+        for t, v in duals["pi_OUT"].items():
+            self.assertLessEqual(v, 1e-9, f"pi_OUT[{t}] is positive: {v}")
+
+    def test_placement_offsets_outside_the_slot_are_refused(self):
+        from mobauto2_benders.minute_pricer import solve_minute_recourse
+
+        T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
+        with self.assertRaises(ValueError):
+            solve_minute_recourse(
+                T, delta, wmax, p_slots, C_out, C_ret, reqs,
+                lp_solver=require_solver_backend(), placement_offsets=[-5.0],
+            )
+        with self.assertRaises(ValueError):
+            solve_minute_recourse(
+                T, delta, wmax, p_slots, C_out, C_ret, reqs,
+                lp_solver=require_solver_backend(), placement_offsets=[delta + 1.0],
+            )
+
+    def test_reaches_solve_subproblem_through_sp_params(self):
+        """End-to-end through the same dispatch the Benders loop uses, not just the
+        library function directly."""
+        from mobauto2_benders.problem.subproblem_impl import SPParams, solve_subproblem
+
+        T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
+        P = SPParams(
+            T=T, Wmax_slots=2, p=p_slots, lp_solver=require_solver_backend(), S=S,
+            K_out=[0] * T, K_ret=[0] * T, slot_resolution=delta,
+            recourse_resolution="minute", Wmax_minutes=wmax, request_minutes=reqs,
+            placement_offsets=[0.0, delta],
+        )
+        duals, obj = solve_subproblem(P, C_out, C_ret, [0.0] * T, [0.0] * T)
+        self.assertEqual(duals["placement_offsets"], [0.0, delta])
+
     def test_minute_mode_refuses_to_run_without_arrival_minutes(self):
         """Falling back to the slot model here would report a multi-resolution run
         that never happened."""
@@ -296,3 +386,237 @@ class TestDecomposedMinuteRecourse(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             solve_subproblem(P, [0.0] * 6, [0.0] * 6, [0.0] * 6, [0.0] * 6)
         self.assertIn("request_minutes", str(ctx.exception))
+
+
+class TestOptimalPlacement(unittest.TestCase):
+    """`price_schedule_optimal_placement` chooses the departure INSTANT instead of
+    assuming it. It is the newest component here and the one most likely to be wrong,
+    so it is pinned three independent ways: against the fixed-policy pricer when the
+    choice is removed, against brute-force enumeration when the instance is small
+    enough to enumerate, and against the F2 relaxation, which must lower-bound it.
+
+    The sandwich those last two establish
+
+        Q_relaxed  <=  Q_optimal  <=  min over policies of Q_fixed
+
+    is not only the measurement of what placement freedom is worth -- it is a standing
+    consistency check on all three implementations. If the ordering ever inverts, one
+    of them is broken, and the test says which side.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        require_solver_backend()
+
+    def _price_opt(self, *args, **kwargs):
+        kwargs.setdefault("mip_solver", require_solver_backend())
+        return _minute_pricer.price_schedule_optimal_placement(*args, **kwargs)
+
+    def _case(self):
+        # delta=4 keeps the default offset grid at five candidates {0,1,2,3,4}, small
+        # enough for the enumeration test below to be exhaustive rather than sampled.
+        delta, S, wmax, p_min = 4, 3.0, 10.0, 100.0
+        sched = {"OUT": [1, 3], "RET": []}
+        reqs = {"OUT": [2, 3, 5, 6, 11, 13], "RET": []}
+        return delta, S, wmax, p_min, sched, reqs
+
+    def test_a_single_offset_reproduces_that_fixed_policy_exactly(self):
+        """With one candidate instant there is no choice left to make, so the MIP must
+        return precisely what the fixed-policy LP returns. This is the identity that
+        keeps the two code paths from silently diverging."""
+        from mobauto2_benders.minute_pricer import placement_offset
+
+        delta, S, wmax, p_min, sched, reqs = self._case()
+        for policy in ("start", "midpoint", "end"):
+            with self.subTest(policy=policy):
+                fixed = price_schedule_at_minutes(
+                    sched, reqs, delta, S, wmax, p_min, policy=policy
+                )
+                opt = self._price_opt(
+                    sched, reqs, delta, S, wmax, p_min,
+                    offsets=[placement_offset(policy, float(delta))],
+                )
+                self.assertAlmostEqual(opt.total_cost, fixed.total_cost, places=9)
+                self.assertAlmostEqual(
+                    opt.unserved_passengers, fixed.unserved_passengers, places=9
+                )
+
+    def test_optimal_placement_is_never_worse_than_any_fixed_policy(self):
+        """The upper side of the sandwich. Every fixed convention is one point in the
+        space the MIP minimises over, so none of them can beat it."""
+        delta, S, wmax, p_min, sched, reqs = self._case()
+        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min)
+        for policy in ("start", "midpoint", "end"):
+            fixed = price_schedule_at_minutes(
+                sched, reqs, delta, S, wmax, p_min, policy=policy
+            )
+            self.assertLessEqual(opt.total_cost, fixed.total_cost + 1e-9, policy)
+
+    def test_the_f2_relaxation_lower_bounds_optimal_placement(self):
+        """The lower side of the sandwich, and the reason F2 is the only one of the
+        three that may generate a cut for the optimal-placement model: it is the only
+        one guaranteed to sit at or below the truth."""
+        from mobauto2_benders.minute_pricer import solve_minute_recourse
+
+        T, delta, S, wmax, p_slots = 6, 4, 3.0, 10.0, 25.0
+        p_min = p_slots * delta
+        grid = [0.0, 2.0, 4.0]
+        sched = {"OUT": [1, 3], "RET": []}
+        reqs = {"OUT": [2, 3, 5, 6, 11, 13], "RET": []}
+        C_out = [0.0] * T
+        C_out[1] = S
+        C_out[3] = S
+
+        _duals, obj_slot_units = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, [0.0] * T, reqs,
+            policy="midpoint", lp_solver=require_solver_backend(),
+            placement_offsets=grid,
+        )
+        relaxed_cost = obj_slot_units * delta
+        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min, offsets=grid)
+        self.assertLessEqual(relaxed_cost, opt.total_cost + 1e-9)
+
+    def test_it_matches_brute_force_enumeration(self):
+        """The MIP is checked against the definition of what it claims to compute:
+        enumerate every assignment of instants to departures, price each one with the
+        independent fixed-minutes pricer, and take the minimum."""
+        import itertools
+
+        delta, S, wmax, p_min, sched, reqs = self._case()
+        slots = sched["OUT"]
+        grid = [float(k) for k in range(delta + 1)]
+
+        best = float("inf")
+        for combo in itertools.product(grid, repeat=len(slots)):
+            dep_minutes = [
+                float(t) * float(delta) + off for t, off in zip(slots, combo)
+            ]
+            w, u, _s = price_direction_at_minutes(
+                reqs["OUT"], dep_minutes, S, wmax, p_min
+            )
+            best = min(best, w + p_min * u)
+
+        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min)
+        self.assertAlmostEqual(opt.total_cost, best, places=6)
+
+    def test_a_hand_checkable_case(self):
+        """One departure in slot 1 (minutes 10..20 at delta=10), two passengers at
+        minutes 12 and 18, seats enough for both, Wmax generous. Any instant before 18
+        strands the 18 or makes it wait negatively (not allowed); the cheapest legal
+        instant is 18 itself, costing (18-12) + (18-18) = 6 passenger-minutes."""
+        delta, S, wmax, p_min = 10, 5.0, 60.0, 500.0
+        sched = {"OUT": [1], "RET": []}
+        reqs = {"OUT": [12, 18], "RET": []}
+        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min)
+        self.assertAlmostEqual(opt.total_cost, 6.0, places=6)
+        self.assertAlmostEqual(opt.unserved_passengers, 0.0, places=9)
+
+    def test_offsets_outside_the_slot_are_refused(self):
+        delta, S, wmax, p_min, sched, reqs = self._case()
+        with self.assertRaises(ValueError):
+            self._price_opt(sched, reqs, delta, S, wmax, p_min, offsets=[0.0, delta + 1.0])
+
+
+class TestOptimalPlacementWithChain(unittest.TestCase):
+    """`price_schedule_optimal_placement_with_chain` is the version a vehicle can
+    actually fly: departures still choose their instant, but a vehicle's trips must
+    follow one another and no trip may eat into a slot its vehicle spends charging.
+
+    It closes the sandwich at four terms rather than three:
+
+        Q_relaxed <= Q_optimal(free) <= Q_optimal(chain) <= Q_fixed[start]
+
+    The right-hand end holds because `start` -- every departure at its slot boundary --
+    is always chain-feasible whenever the master's own slot schedule was: a trip that
+    fills exactly the slots allocated to it encroaches on nothing and delays nothing.
+    That makes `start` the witness that the chain-constrained problem is feasible at
+    all, and the reason an infeasible result here would indict the master, not this
+    model.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        require_solver_backend()
+
+    def _chain(self, *args, **kwargs):
+        kwargs.setdefault("mip_solver", require_solver_backend())
+        return _minute_pricer.price_schedule_optimal_placement_with_chain(*args, **kwargs)
+
+    def _free(self, *args, **kwargs):
+        kwargs.setdefault("mip_solver", require_solver_backend())
+        return _minute_pricer.price_schedule_optimal_placement(*args, **kwargs)
+
+    def test_one_trip_per_vehicle_and_no_charging_matches_free_shifting(self):
+        """With nothing to chain to and nothing to encroach on, the two constraints
+        are vacuous and the chain model must reduce to the free one exactly."""
+        delta, S, wmax, p_min, dur = 4, 3.0, 10.0, 100.0, 4.0
+        reqs = {"OUT": [2, 3, 5, 6, 11, 13], "RET": []}
+        # Two vehicles, one trip each -> no precedence pair exists.
+        veh = {0: [(1, "OUT")], 1: [(3, "OUT")]}
+        chain, _minutes = self._chain(
+            veh, {}, reqs, delta, S, wmax, p_min, dur
+        )
+        free = self._free({"OUT": [1, 3], "RET": []}, reqs, delta, S, wmax, p_min)
+        self.assertAlmostEqual(chain.total_cost, free.total_cost, places=6)
+
+    def test_precedence_is_respected_by_the_chosen_minutes(self):
+        """The constraint is checked where it is easiest to check honestly: on the
+        departure instants the model actually returns."""
+        delta, S, wmax, p_min, dur = 10, 5.0, 60.0, 200.0, 10.0
+        reqs = {"OUT": [11, 14, 19], "RET": [25, 28, 33]}
+        veh = {0: [(1, "OUT"), (2, "RET")]}
+        _res, minutes = self._chain(veh, {}, reqs, delta, S, wmax, p_min, dur)
+        d_out = minutes[(0, 1, "OUT")]
+        d_ret = minutes[(0, 2, "RET")]
+        self.assertGreaterEqual(d_ret + 1e-9, d_out + dur)
+
+    def test_a_charging_slot_pins_the_trip_before_it_to_its_slot_boundary(self):
+        """When a trip fills its slot exactly, any positive shift spills into the next
+        slot. If the vehicle is charging there, the shift is refused and the departure
+        is pinned to offset 0 -- which is what `start` already assumes."""
+        delta, S, wmax, p_min, dur = 10, 5.0, 60.0, 200.0, 10.0
+        reqs = {"OUT": [11, 14, 19], "RET": []}
+        veh = {0: [(1, "OUT")]}
+        pinned, minutes = self._chain(
+            veh, {0: [2]}, reqs, delta, S, wmax, p_min, dur
+        )
+        self.assertAlmostEqual(minutes[(0, 1, "OUT")], 10.0, places=9)
+        at_start = price_schedule_at_minutes(
+            {"OUT": [1], "RET": []}, reqs, delta, S, wmax, p_min, policy="start"
+        )
+        self.assertAlmostEqual(pinned.total_cost, at_start.total_cost, places=6)
+
+        # And without the charging slot the same instance is free to do better.
+        free_to_shift, _m = self._chain(veh, {}, reqs, delta, S, wmax, p_min, dur)
+        self.assertLess(free_to_shift.total_cost, pinned.total_cost)
+
+    def test_the_four_term_sandwich_holds(self):
+        """Every ordering the module claims, asserted end to end on one instance."""
+        from mobauto2_benders.minute_pricer import solve_minute_recourse
+
+        T, delta, S, wmax, p_slots, dur = 8, 10, 5.0, 60.0, 20.0, 10.0
+        p_min = p_slots * delta
+        reqs = {"OUT": [11, 14, 19, 22, 27], "RET": [35, 41, 44]}
+        veh = {0: [(1, "OUT"), (3, "RET")], 1: [(2, "OUT")]}
+        sched = {"OUT": [1, 2], "RET": [3]}
+
+        C_out = [0.0] * T
+        C_out[1] = S
+        C_out[2] = S
+        C_ret = [0.0] * T
+        C_ret[3] = S
+        grid = [float(k) for k in range(delta + 1)]
+        _d, obj_slots = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint",
+            lp_solver=require_solver_backend(), placement_offsets=grid,
+        )
+        relaxed = obj_slots * delta
+        free = self._free(sched, reqs, delta, S, wmax, p_min)
+        chain, _m = self._chain(veh, {}, reqs, delta, S, wmax, p_min, dur)
+        at_start = price_schedule_at_minutes(
+            sched, reqs, delta, S, wmax, p_min, policy="start"
+        )
+
+        self.assertLessEqual(relaxed, free.total_cost + 1e-6)
+        self.assertLessEqual(free.total_cost, chain.total_cost + 1e-6)
+        self.assertLessEqual(chain.total_cost, at_start.total_cost + 1e-6)
