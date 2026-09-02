@@ -4864,3 +4864,70 @@ feasibility, left as explicitly separate work.
 `tests/test_continuous_schedule.py`, `tests/fixtures/continuous_schedule_roundtrip.yaml`.
 `docs/BENDERS_SPEC_v4.md` gets new section 2.11. No `measurements.json` entry (no quantitative
 claim for the report).
+
+## D85 — B1: a proven-optimal delta=1 comparison, via Route 2 (a smaller instance), Route 1 not attempted and why
+
+Date: 2026-09-02. Handout item B1. Branch: `main`.
+
+**Why Route 1 was not run.** `delta1_monolith_pilot.py` on the full `T_minutes=660` instance
+has already been run twice: 300s/arm (~47-48% gaps, both arms) and, under D76, 3600s/arm (gap
+tightened to 6.14%/7.02%, the two arms agreeing to 1.40%, **neither arm proven**). Route 1
+(`delta1_to_optimality.py --outer-time-limit 10800`) would (a) be a third escalation of the
+identical lever -- longer wall clock on the identical instance -- which R9 and the handout's
+own "do not accept a third clock-truncated run at a longer budget with no plan change" caution
+against repeating without a plan change, and (b) even if it succeeded, only closes **arm B**:
+that script runs the minute-recourse arm alone by design, and the accept-test needs **both**
+arms proven. Given the 300s->3600s trend (real but slow: order-of-magnitude gap reduction per
+12x budget) there is no basis to expect 3x more wall clock (10800s) closes a MIP of this size
+to a strict `gap=0`, and burning ~3h of machine time to very likely reconfirm "still not proven"
+is the plan-change trigger, not a prerequisite to it. Route 2 was tried directly instead.
+
+**Route 2 -- the reduction, stated.** New config
+`configs/milp/baseline_d9_p56_monolith_delta1_t180.yaml`: `T_minutes` cut from 660 to 180
+(`T=180` slots at `delta=1`, vs 660), same demand file (`setups/base.yaml`), same Q=2, S=15,
+Wmax_minutes=60, p_minutes=56, energy model, trip duration -- nothing resampled or reshaped.
+127 of 300 requests fall inside `[0, 180)` minutes (117 OUT, 10 RET -- the morning OUT peak and
+its earliest returns); 173 are outside it and are excluded explicitly (not silently) by the new
+script, `scripts/delta1_short_horizon_pilot.py`, which truncates the request list to the
+instance's own horizon before handing it to both arms, so arm B sees the same reduced demand
+arm A's own `aggregate_requests` would.
+
+**Command:**
+
+    python scripts/delta1_short_horizon_pilot.py --Q 2 --policy start --time-limit 900
+
+**Result -- both arms proven optimal, well inside budget:**
+
+| arm | status | wall | own claimed cost (rescaled) | priced @ minute |
+|---|---|---:|---:|---:|
+| A (slot-only) | OPTIMAL, gap=0.0 | 23.8 s | 4119.08 | 4119.00 |
+| B (minute-recourse) | OPTIMAL, gap=0.0 | 19.7 s | 4053.08 | 4053.00 |
+
+Neither solve was clock-truncated (both terminated on the MIP gap at 23.8s/19.7s, well under
+the 900s cap and even under the 60s trial cap that preceded this run). `gain = 1.60%`,
+schedules differ (`same? no`) -- a genuine, if small, valuation effect survives even at this
+short horizon.
+
+**The 0.08 discrepancy between "own claimed cost" and "priced @ minute fidelity" is accounted
+for exactly, not waved past** (the accept-test: "any discrepancy is a defect, not a finding").
+Both arms show the identical 0.08 gap. `Shuttle totals (OUT+RET): q0=4, q1=4` -- 8 trips total
+across both vehicles -- and `start_cost_epsilon = 0.01` per trip (D4): `8 x 0.01 = 0.08`,
+matching both discrepancies to 1e-13. The solver's own objective includes this regularisation
+term (D4: it only breaks ties between equal-waiting solutions, 0.01 per trip against a
+~4000-plus objective); `price_schedule_at_minutes` correctly excludes it, since it prices the
+passenger side only. Not a defect: the two numbers differ by exactly the term one includes and
+the other does not, and that term's value is independently known from the config, not fit to
+the discrepancy.
+
+**What this does and does not settle.** It settles that a delta=1 slot-vs-minute comparison
+*can* be run to proven optimality, with the smaller-instance caveat stated: this is a 180-minute
+morning-peak instance, not the full 660-minute day. It does not settle the full-instance
+question -- whether the full T=660 delta=1 MILP is viable at all remains open, per D76's own
+finding, and this entry does not reopen that attempt. It does not change any headline number
+already recorded (A1-A5): this is a separate, smaller instance, not a substitute for any of
+them.
+
+**Record.** `configs/milp/baseline_d9_p56_monolith_delta1_t180.yaml`,
+`scripts/delta1_short_horizon_pilot.py` (new). No `measurements.json` entry -- this is a
+sanity/tractability result (report §5's kind of claim), not a table-facing headline number, and
+the handout does not name a `measurements.json` key for it.

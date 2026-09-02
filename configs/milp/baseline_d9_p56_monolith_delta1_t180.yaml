@@ -1,0 +1,64 @@
+# B1 (HANDOUT_V02_CONSOLIDATION.md), Route 2 -- a SMALLER delta=1 instance.
+#
+# WHY. delta1_monolith_pilot.py on the full T_minutes=660 instance has been run three
+# times without either arm proving optimality: 300s/arm (~47-48% gaps, D-entry pre-D76),
+# 3600s/arm (D76: gap tightened to 6.14%/7.02%, agreed to 1.4%, neither arm proven).
+# The handout is explicit: "a smaller instance that PROVES is worth more than the full
+# instance that does not, provided the reduction is stated." This is that reduction.
+#
+# THE REDUCTION, STATED. T_minutes cut from 660 to 180 (T=180 slots at delta=1, vs 660)
+# -- the first 180 minutes of the SAME demand file (setups/base.yaml), nothing
+# resampled or reshaped. This keeps 127 of 300 requests (117 OUT, 10 RET) -- the
+# morning OUT peak and its earliest returns -- and drops everything after minute 180
+# the same way any horizon truncation in this codebase does (counted and warned,
+# D25), not silently. Every other parameter (Q, S, Wmax_minutes, p_minutes,
+# trip_duration_minutes, energy model) is identical to baseline_d9_p56_monolith.yaml.
+
+schema:
+  name: mobauto2_milp_config
+  version: 3
+
+run:
+  name: baseline_d9_p56_monolith_delta1_t180
+  log_level: INFO
+  seed: 42
+
+data:
+  scenario_files: [setups/base.yaml]
+
+model:
+  time:
+    T_minutes: 180
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0]
+    initial_actions: [IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+milp:
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  solve_time_limit_s: 900
+  mipgap: 1.0e-6
+  solver_backend: cplex
+  cplex_options:
+    CPXPARAM_MIP_Strategy_Symmetry: 5
+    CPXPARAM_Threads: 1
+
+service:
+  S: 15
+  Wmax_minutes: 60
+  p_minutes: 56.0
+  fill_first_epsilon: 0.0
+
+solver:
+  solver_tee: false
