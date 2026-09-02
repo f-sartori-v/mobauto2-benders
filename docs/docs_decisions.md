@@ -4809,3 +4809,58 @@ master share for this project; it is what one 10-iteration run of one fixed-budg
 config happened to spend. It does not close item 5's second half.
 
 **Record.** `scripts/report_figures/data/measurements.json -> runtime_split`, new block.
+
+## D84 — B4: the continuous-time schedule exchange format, a loader, and a round-trip test
+
+Date: 2026-09-02. Handout item B4. Branch: `main`. D72 closed the validator half
+(`price_schedule_given_departure_minutes` accepts arbitrary minutes -- 37.5 and 82.25 are in
+its own tests). What was missing was a documented format for a continuous-time schedule to
+arrive in from the CP/LBBD line (`20_MobAuto2_CP_LBBD`, a separate repository) and a loader.
+This closes that.
+
+**Format.** New schema `mobauto2_continuous_schedule` v1: `horizon_minutes`, `seats`, and a
+list of `vehicles`, each with an `id`, `departures` (`OUT`/`RET` minute lists, not required to
+be a multiple of any slot width -- the whole point), and an optional `charging_plan` (a list of
+`{start_minute, end_minute}` intervals). Documented in full in `docs/BENDERS_SPEC_v4.md` new
+section 2.11, so the constraint side can emit against it without asking.
+
+**Loader.** `src/mobauto2_benders/continuous_schedule.py`: `load_continuous_schedule` /
+`parse_continuous_schedule` (validate), `to_departures_minutes` (flatten across vehicles into
+the per-direction pool the pricer wants -- vehicle identity is discarded here deliberately,
+matching the slot-based `_schedule()` helpers elsewhere in this project), and
+`price_continuous_schedule` (flatten + price in one call). `charging_plan` is parsed and
+validated (well-formed intervals) and returned on the loaded object, but is **not** consumed by
+pricing -- feasibility against the energy model is separate work, out of this item's scope.
+
+**Validation is fail-closed**, per receitas-basicas: unknown schema/version, a missing required
+key, a departure outside `[0, horizon_minutes]`, a duplicate vehicle id, an unrecognised
+direction key, or a charging interval with `end_minute <= start_minute` all raise `ValueError`
+naming the offending vehicle and field. Seven tests in `TestValidation` cover these; none is
+silently coerced or dropped.
+
+**Round-trip test.** `tests/test_continuous_schedule.py` +
+`tests/fixtures/continuous_schedule_roundtrip.yaml`: a two-vehicle schedule (the slots
+`{"OUT": [1,2,4,6], "RET": [2,3,5,7]}` at `delta=30, policy=start`, converted to minutes and
+split across two vehicles) is loaded and priced via `price_continuous_schedule`, and checked
+against the same schedule's cost computed **independently** through the existing slot path
+(`price_schedule_at_minutes` on the slot form directly) -- total_cost=311.0, waiting=255.0,
+unserved=1, served=9, matched to 6 decimal places. Two different routes to the same LP, per R8,
+not a self-check against code the loader itself wrote. Also checked: flattening keeps every
+departure from both vehicles (none dropped), the charging plan round-trips unchanged, and the
+minutes match the slot-to-minute conversion the fixture's own header claims (checked directly,
+not trusted from the comment).
+
+**Full suite after adding this:** 306 tests, all passing (295 + 11 new: 4 round-trip, 7
+validation).
+
+**What this does and does not settle.** It settles that Comparison C is now one export away: a
+continuous-time schedule from the CP/LBBD side, in this format, prices immediately through the
+existing minute path. It does not produce Comparison C itself -- that needs an actual
+continuous-time schedule from the other repository, which is out of this item's scope (B4's own
+"do here: everything on this side" instruction) -- and it does not address charging-plan
+feasibility, left as explicitly separate work.
+
+**Record.** New files: `src/mobauto2_benders/continuous_schedule.py`,
+`tests/test_continuous_schedule.py`, `tests/fixtures/continuous_schedule_roundtrip.yaml`.
+`docs/BENDERS_SPEC_v4.md` gets new section 2.11. No `measurements.json` entry (no quantitative
+claim for the report).

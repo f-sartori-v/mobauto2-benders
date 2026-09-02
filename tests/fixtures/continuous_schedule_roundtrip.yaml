@@ -1,0 +1,24 @@
+# Fixture for test_continuous_schedule.py's round-trip test (B4, handout item).
+#
+# This is the schedule {"OUT": [1,2,4,6], "RET": [2,3,5,7]} (slots, delta=30) converted
+# to minutes under policy=start (dep_minute = tau*30, offset 0) and split across two
+# vehicles. The split is arbitrary -- pricing collapses vehicle identity away -- but is
+# stated here so the file reads as a real two-vehicle schedule, not a flat list with
+# vehicle headers bolted on.
+schema: mobauto2_continuous_schedule
+version: 1
+horizon_minutes: 660
+seats: 15
+vehicles:
+  - id: 0
+    departures:
+      OUT: [30.0, 120.0]
+      RET: [60.0, 150.0]
+    charging_plan:
+      - {start_minute: 165.0, end_minute: 195.0}
+  - id: 1
+    departures:
+      OUT: [60.0, 180.0]
+      RET: [90.0, 210.0]
+    charging_plan:
+      - {start_minute: 225.0, end_minute: 255.0}

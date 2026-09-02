@@ -510,6 +510,79 @@ re-measuring.
 Unchanged. Gate 1's sign-convention verification is empirical (D13) and now automated:
 `test_no_check_fail_lines` asserts no `[CHECK FAIL]` line appears.
 
+### 2.11 Continuous-time schedule exchange format (B4, D84)
+
+**Why this exists.** D72 made `minute_pricer.price_schedule_given_departure_minutes` accept
+departures at arbitrary minutes -- what a continuous-time model needs, since it is not
+confined to `tau*delta + offset` for any slot `tau` and any placement policy. What stayed
+missing was a documented format for such a schedule to arrive in from the constraint-programming
+/ LBBD line (a separate repository, `20_MobAuto2_CP_LBBD`), and a loader. This section and
+`src/mobauto2_benders/continuous_schedule.py` are that piece -- report Comparison C is now one
+export away, not unspecified work.
+
+**Format.** Schema `mobauto2_continuous_schedule`, version 1. YAML (or any format that parses to
+the same mapping -- the loader only requires `yaml.safe_load`-shaped input):
+
+```yaml
+schema: mobauto2_continuous_schedule
+version: 1
+horizon_minutes: <float>          # the schedule's own horizon, in minutes
+seats: <float>                    # per-departure capacity; homogeneous across vehicles
+vehicles:
+  - id: <string or int, unique>
+    departures:
+      OUT: [<minute>, ...]        # 0 <= minute <= horizon_minutes; NOT required to be
+      RET: [<minute>, ...]        # a multiple of any slot width (D72's whole point)
+    charging_plan:                # optional; [] if the vehicle never charges
+      - {start_minute: <float>, end_minute: <float>}   # end_minute > start_minute
+      ...
+  - id: ...
+    ...
+```
+
+Units are minutes from the horizon start, matching every other minute-level quantity in this
+repository (D50) -- not slots. `OUT`/`RET` are the only valid direction keys (`minute_pricer`'s
+own `OUT`/`RET` constants); an unrecognised key is rejected, not ignored.
+
+**Why `charging_plan` is in the format but not in the pricing path.** A continuous-time
+schedule is not fully specified without it -- a vehicle's departures must be feasible against
+its own charge state, which is the CP/LBBD side's concern, not this repository's. The loader
+parses and validates it (well-formed intervals, `end_minute > start_minute`) and returns it on
+`VehicleSchedule.charging_plan` so a caller has it, but `price_continuous_schedule` does not
+read it: pricing here is passenger-side only (waiting + unmet-demand penalty), matching every
+other function in `minute_pricer.py`. A feasibility check against the energy model, if wanted,
+is separate work against this same loaded structure, not a change to it.
+
+**Loader** (`src/mobauto2_benders/continuous_schedule.py`):
+
+- `load_continuous_schedule(path) -> ContinuousSchedule` -- reads and validates a file.
+- `parse_continuous_schedule(raw: dict) -> ContinuousSchedule` -- validates an
+  already-parsed mapping (what the loader calls internally; also the entry point for a
+  caller that builds the document in memory rather than reading a file).
+- `to_departures_minutes(schedule) -> dict[str, list[float]]` -- flattens every vehicle's
+  departures into the per-direction pool `price_schedule_given_departure_minutes` consumes.
+  **Vehicle identity is discarded here, deliberately** -- pricing only needs how many seats
+  depart when, the same collapse the slot-based `_schedule()` helpers elsewhere in this
+  project already perform.
+- `price_continuous_schedule(schedule, requests, wmax_minutes, p_minutes, lp_solver=...)
+  -> MinutePricingResult` -- flattens and prices in one call.
+
+**Validation is fail-closed** (receitas-basicas): an unknown schema name or version, a missing
+required key, a departure outside `[0, horizon_minutes]`, a duplicate vehicle id, an unknown
+direction key, or a charging interval with `end_minute <= start_minute` all raise `ValueError`
+naming the offending vehicle and field -- none is silently coerced, defaulted, or dropped. A
+dropped departure would look identical to a schedule that legitimately serves fewer passengers,
+and nothing downstream could tell the two apart.
+
+**Round-trip test** (`tests/test_continuous_schedule.py`, fixture
+`tests/fixtures/continuous_schedule_roundtrip.yaml`): a two-vehicle schedule, written in this
+format, is loaded and priced through `price_continuous_schedule`; the result is checked against
+the same schedule's cost computed independently through the existing slot path
+(`price_schedule_at_minutes` on `{"OUT": [1,2,4,6], "RET": [2,3,5,7]}` at `delta=30,
+policy=start`, converted to the identical minutes by construction) -- two different routes to
+the same LP, per R8. Also checked: flattening keeps every departure from both vehicles, the
+charging plan round-trips unchanged, and every validation failure mode above actually raises.
+
 ---
 
 ## 3. Repository state
