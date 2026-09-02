@@ -4420,3 +4420,49 @@ script was written to check, short of a formal proof.
    Section 4's 1h/arm attempt closed the gap to ~6-7% each side but did not prove either arm --
    T=660 needs either a materially longer budget still, or a smaller `delta=1` instance than the
    full `setups/base.yaml`, to close for real.
+
+## D77 — Step 0 of the v0.2 consolidation handout: local `main` was three commits behind `origin/main`, missing D76 entirely
+
+Date: 2026-09-02. Handout: `HANDOUT_V02_CONSOLIDATION.md` (untracked work order against report
+v0.2), Step 0 (environment gate). Branch: `main`, working directly (no feature branch -- this
+step is a repo-hygiene fix plus a measurement, not a code change).
+
+**What was found.** Before any handout step could run, `python -m unittest discover -s tests -v`
+reported **291 tests, all passing**, not the 294 the handout's Step 0 asks for. Per R9 this was
+diagnosed rather than waved through. The static count of `def test_` across `tests/*.py` also
+came to exactly 291 -- so the suite was internally consistent (0 skips under the commercial
+`cplex_direct` backend, confirmed available) and nothing was silently skipping. The discrepancy
+was therefore a missing-commits problem, not a missing-coverage one: local `main` was at `e175a2a`
+(PR #21 merged) while `origin/main` was three commits ahead at `6322f9a` (PR #22, branch
+`fix/d76-departure-placement-anticipation`) -- **the D76 merge itself was never pulled into the
+local checkout.** Corroborating symptom: `src/mobauto2_benders/config.py` still had
+`departure_policy: str = "midpoint"` as the default, contradicting D76 and R2's premise that
+`start` is already the default in code.
+
+**Fix.** `git fetch origin && git merge --ff-only origin/main` (working tree was clean; fast-forward,
+no conflicts, nothing local was lost). This pulled in PR #22's 23 changed files, including the
+three new `test_minute_pricer.py` cases that account for 291 -> 294. Re-running the suite after
+the fast-forward: **294 tests, all passing**, in 52.1s. `departure_policy` now defaults to
+`"start"` in `config.py`.
+
+**R6 assertion (delta_chg recompute after a `slot_resolution` override), run against
+`_energy_params_for_resolution` on `configs/default.yaml`, both before and after the
+fast-forward:**
+
+    delta=30  delta_chg=35.0   expected=35.0   OK
+    delta=15  delta_chg=17.5   expected=17.5   OK
+    delta=10  delta_chg=11.67  expected=11.67  OK
+    delta=1   delta_chg=1.17   expected=1.17   OK
+
+**What this does and does not settle.** It settles that Step 0's gate now passes exactly as
+specified (294/294, R6 holds at all four resolutions) and that every Track A/B step that follows
+runs against the actual D76 code (default policy `start`), not a stale pre-D76 checkout that would
+have silently reintroduced the `midpoint` convention the whole handout exists to retire. It does
+not itself produce any report-facing measurement -- it is the gate, not a result -- and it flags a
+process gap worth noting outside this entry: local `main` can drift behind `origin/main` after a
+PR merges upstream without a local fast-forward, and that drift is exactly the kind of silent
+unit/convention confusion R6 and this project's history (D26, the 80/120 cells) warn about. Worth
+a habit, not a fix: pull before trusting a local checkout's test count or defaults.
+
+**Record.** No `measurements.json` entry (this step produces no quantitative claim for the
+report). `docs/PROJECT_STATE_v6.md` test count updated separately under C2.
