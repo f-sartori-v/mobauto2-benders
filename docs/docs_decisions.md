@@ -4622,3 +4622,72 @@ replaced, `instance` policy set to `start`, refinement block's `served` correcte
 counts and a `total_cost`/`avg_wait_min` row added to it (D73 recorded `served` only). A new
 `zero_service_arithmetic_check` sub-block records the R8 recomputation explicitly. D73's
 `midpoint` values kept verbatim under a new `midpoint_counterfactual` key.
+
+## D81 — A2: the five-shape de-aligned grid regenerated at `o = 0`, 15/15 cells, and two exactly-zero cells traced to their cause rather than waved through
+
+Date: 2026-09-02. Handout item A2. Branch: `main`. First, the code fix A2 named explicitly:
+`scripts/sweep_multiresolution.py --policies` help text still argued `start` was "kept only as
+a lower envelope (D54)" and defaulted to sweeping all three policies -- both withdrawn by D76.
+Default corrected to `start`; help text rewritten to state `start` is the committed instant and
+`midpoint`/`end` are labelled counterfactuals. Command:
+
+    python scripts/sweep_multiresolution.py --policies start --slot 30,15,10 --Q 2 --p-minutes 56 --shapes flat,commuter,bimodal,burst,spiky
+
+15 cells (30 monolithic solves: slot recourse + minute recourse per cell), all at
+`setups/generated/{flat,commuter,bimodal,burst,spiky}.yaml` -- the de-aligned generator, never
+before swept at `start`.
+
+**Minute-level gain (%), re-priced at minute fidelity, at `o = 0`:**
+
+| shape | delta=30 | delta=15 | delta=10 |
+|---|---:|---:|---:|
+| flat | 1.36 | 3.46 | 2.40 |
+| commuter | 3.45 | 1.25 | 1.49 |
+| bimodal | 1.32 | 0.17 | 0.50 |
+| burst | **0.00** | 8.44 | 6.46 |
+| spiky | **0.00** | 1.99 | 0.82 |
+
+**Every cell proved optimal.** 29 of 30 solves returned CPLEX `term=optimal` at `gap=0.0`
+exactly; one (`flat`, delta=30, the slot-recourse arm) returned `term=optimal` at
+`gap=0.000179` -- CPLEX's own MIP-gap tolerance, not a clock stop (no time limit was hit; the
+raw solver log shows the same `status=ok term=optimal` as every other cell). None of the 30 is
+clock-truncated.
+
+**The two exactly-0.00% cells were investigated before being recorded, per the handout's own
+instruction (a de-aligned generator should not produce this).** Two checks:
+
+1. **Generator alignment, direct.** Read every arrival minute out of `burst.yaml` and
+   `spiky.yaml` and counted exact multiples of the slot width (30): burst has **0/150** (OUT)
+   and **0/150** (RET) on a slot boundary; spiky has 5/150 and 8/150, statistically
+   indistinguishable from `flat`'s own 4/150 and 4/150 (chance rate for ~150 draws over a
+   ~650-minute horizon at width 30). The de-alignment property is intact; this is not the old
+   slot-aligned generator's pathology recurring.
+2. **The mechanism, direct.** Reproduced both arms standalone for `burst`/`spiky` at delta=30
+   and printed each arm's own schedule (not just its re-priced cost): the slot-recourse MIP and
+   the minute-recourse MIP -- two independently formulated objectives, solved separately to
+   proven optimality -- chose the **bit-identical first-stage schedule** (same departure slots,
+   both vehicles, both directions) for burst and for spiky, and only for these two shapes, and
+   only at delta=30. At delta=15 and delta=10 the schedules differ (`same?=no` in the sweep's own
+   output) and the gain is positive (8.44%, 1.99% at delta=15; 6.46%, 0.82% at delta=10).
+
+**Reading, stated as what was established and no further.** At the coarsest resolution (T=22
+slots) the first-stage combinatorial choice is constrained enough that, for burst/spiky's own
+demand pattern specifically, the slot-aggregate objective and the exact-minute objective rank
+the same schedule best -- i.e. there is a genuine coincidence of optima, not an inability to
+compute one. This is consistent with (not separately proven beyond) the observation that more
+scheduling freedom exists at finer resolutions, where the same two shapes do show a gain. What
+this does not establish: a general claim that burst/spiky always tie at coarse resolution, or a
+closed-form account of why THIS schedule dominates both objectives simultaneously -- both would
+need more cells than this grid provides.
+
+**What this does and does not settle.** It settles the `1.3-8.2%` sentence report §4.4.4 is
+built on: that range was measured on the slot-aligned generator, known to bias this comparison
+downward; the de-aligned range at `o = 0` is **0.00% to 8.44%** across the three resolutions and
+five shapes, with the two zero cells now explained rather than merely observed. It does not
+settle the `Q x delta` factorial (B5) or extend past `Q = 2`.
+
+**Record.** `scripts/report_figures/data/measurements.json -> multiresolution_gain`, new
+`start` block added (5 shapes x 3 resolutions) alongside the existing `midpoint`/`end` blocks
+(kept, not deleted). A `start_zero_gain_cells` note records the investigation above so a future
+reader does not have to re-derive it. `sweep_multiresolution.py`'s `--policies` default and help
+text corrected in the same commit as the code fix, separately from this measurement per R10.

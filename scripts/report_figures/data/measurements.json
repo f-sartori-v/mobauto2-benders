@@ -73,14 +73,25 @@
     }
   },
   "multiresolution_gain": {
-    "source": "docs/RESEARCH_NOTE_v2.md section 2.2 (D54, D55)",
-    "instance": "Q = 2, p_minutes = 56, de-aligned generated shapes, every solve proven optimal",
+    "source": "docs/docs_decisions.md D81 (2026-09-02), scripts/sweep_multiresolution.py --policies start --slot 30,15,10 --Q 2 --p-minutes 56 --shapes flat,commuter,bimodal,burst,spiky, 15/15 cells (30/30 monolithic solves) at status=optimal",
+    "instance": "Q = 2, p_minutes = 56, de-aligned generated shapes, policy = start, every solve proven optimal (one solve, flat/delta=30 arm A, converged to CPLEX's own MIP-gap tolerance at gap=0.000179, not clock-truncated)",
     "unit": "per cent",
     "resolutions": [
       30,
       15,
       10
     ],
+    "start": {
+      "flat": [1.36, 3.46, 2.40],
+      "commuter": [3.45, 1.25, 1.49],
+      "bimodal": [1.32, 0.17, 0.50],
+      "burst": [0.00, 8.44, 6.46],
+      "spiky": [0.00, 1.99, 0.82]
+    },
+    "start_zero_gain_cells": {
+      "note": "burst and spiky at delta=30 report exactly 0.00% gain -- flagged for investigation by the handout before recording (a de-aligned generator should not produce this by boundary alignment). Investigated (D81): the generator's alignment property is intact (0/150 burst arrivals and 5/150, 8/150 spiky arrivals land on exact multiples of 30, the latter consistent with flat's own 4/150 chance rate); a direct check confirmed the two monolithic MIPs (slot recourse, minute recourse), independently formulated and solved, chose the BIT-IDENTICAL first-stage schedule (same departure slots for both vehicles, both directions) at delta=30 for these two shapes only, at every finer delta (15, 10) the schedules differ and the gain is positive. Reading: at the coarsest resolution the first-stage combinatorial choice is constrained enough (T=22 slots, Q=2) that the two objectives -- slot-aggregate wait vs exact-minute wait -- happen to rank the same schedule best for burst/spiky's own demand pattern; at finer resolutions there is more scheduling freedom and the two objectives diverge. Not a generator regression.",
+      "cells": ["burst delta=30", "spiky delta=30"]
+    },
     "midpoint": {
       "flat": [
         12.43,
