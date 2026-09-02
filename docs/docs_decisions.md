@@ -4374,20 +4374,38 @@ sole explanation, and MW-for-minutes remains the prerequisite `PROJECT_STATE_v6.
 named, not a smaller or better-aimed grid. F2 stays closed by measurement; the corrected grid
 does not reopen it as a usable lever, only as a fairly-stated one.
 
-### 4. `scripts/delta1_monolith_pilot.py` -- attempted, inconclusive (clock-truncated on an oversized instance, not a correctness signal)
+### 4. `scripts/delta1_monolith_pilot.py` -- run twice; still clock-truncated even at 1h/arm, but the gap tightened by an order of magnitude and the reading is now informative, not just inconclusive
 
-Run at `--Q 2 --time-limit 300`, both arms under the corrected `policy=start`. Both solver A
-(slot-only monolith) and solver B (minute-recourse master) hit `term=maxTimeLimit` at 300s
-per solve (T=660 slots is a 10-30x larger monolith than any other resolution this project
-runs, exactly the tractability risk the script's own docstring named in advance) -- neither
-proved optimal, so "same schedule / ~0% gain" is not a fair test of this fix on this run:
-`gain = -1.9524%`, `same schedule? no`, both `status=FEASIBLE` off the clock, not off the gap.
-This is the script's own documented failure mode ("if this does not converge... THAT is a
-finding, not a failure to hide"), not evidence against the D76 fix -- the fix's correctness is
-what section 2's 294/294 suite (arithmetic pinned by hand, including this exact scenario) checks,
-not this comparison. Revisiting this validation needs either a materially longer budget than
-300s/arm (an operator call, not one to make unilaterally given standing guidance to ask before
-long solves) or a smaller instance at `delta=1` than the full `setups/base.yaml`.
+**First attempt, `--time-limit 300`.** Both solver A (slot-only monolith) and solver B
+(minute-recourse master) hit `term=maxTimeLimit` at 300s per solve (T=660 slots is a 10-30x
+larger monolith than any other resolution this project runs, exactly the tractability risk the
+script's own docstring named in advance) -- neither proved optimal, both `status=FEASIBLE` off
+the clock with a ~47-48% internal gap. `gain = -1.9524%`, `same schedule? no`. Not a fair test of
+this fix on this run, and not evidence against it -- the fix's correctness is what section 2's
+294/294 suite (arithmetic pinned by hand, including this exact scenario) checks, not this
+comparison.
+
+**Second attempt, `--time-limit 3600` (operator's own call, informed of the first result).** Both
+arms STILL terminate on `term=maxTimeLimit`, not proven optimal, after a full hour each -- T=660
+does not close inside 1h/arm on this machine, a tractability finding in its own right ("if this
+does not converge... THAT is a finding, not a failure to hide," as the script's docstring says).
+But the internal gap tightened by roughly an order of magnitude, from ~47-48% to:
+
+    A (slot-only)      : obj=8000.24  bound=7508.63  gap=6.14%
+    B (minute-recourse): obj=7879.24  bound=7326.19  gap=7.02%
+    priced @ minute: A cost=7991.00 unserved=85 | B cost=7879.00 unserved=88
+    gain = 1.4016%   same schedule? no
+
+Both are now close-to-optimal feasible solutions, not wildly unconverged ones, so this reading is
+worth recording even though neither side is a proof: at delta=1 the two arms land within ~1.4% of
+each other, in the direction the minute-recourse arm being priced at least as accurately as the
+slot arm would predict (B's own claimed cost, 7879, matches its minute-fidelity price exactly --
+no valuation gap left to close once slots and minutes are the same grid -- while A's slot claim,
+not shown here, would still differ from its 7991 minute-fidelity price by construction, D53/D54).
+It does not replace a proven-optimal comparison, and none of the D76 fix's correctness rests on
+it -- that is section 2's job -- but it is no longer merely "inconclusive": within the gap each
+side still carries, the two arms already agree to within 1.4%, which is the sanity property this
+script was written to check, short of a formal proof.
 
 ### 5. What is still open
 
@@ -4398,5 +4416,7 @@ long solves) or a smaller instance at `delta=1` than the full `setups/base.yaml`
    of it should keep being read as "what the schedule really costs" until regenerated under
    `start`. That regeneration is a separate, larger pass, deliberately not bundled into this
    entry.
-2. A converged (not clock-truncated) `delta1_monolith_pilot.py` run, at a budget or instance
-   size an operator has actually chosen, if the delta=1-vs-MILP cross-check is still wanted.
+2. A PROVEN-OPTIMAL (not merely clock-truncated-but-tight) `delta1_monolith_pilot.py` run.
+   Section 4's 1h/arm attempt closed the gap to ~6-7% each side but did not prove either arm --
+   T=660 needs either a materially longer budget still, or a smaller `delta=1` instance than the
+   full `setups/base.yaml`, to close for real.
