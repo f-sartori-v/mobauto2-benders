@@ -4236,3 +4236,187 @@ is wanted, note `configs/milp/target_scale450_monolith.yaml`'s `initial_battery`
 `initial_actions` lists have length 1 and are padded by repeating the last entry (matching
 the homogeneous-fleet convention elsewhere in this project); no config change is needed to
 extend the sweep.
+
+## D76 — `start` is not a convention, it is what `t+1` already means; the offset grid was searching the wrong direction; and D54's case for `end`/`midpoint` is withdrawn
+
+Date: 2026-09-02. The operator's own audit, not a measurement run -- raised in conversation
+against `minute_pricer.py`'s `DeparturePolicy` machinery and D54, which this entry corrects.
+Everything below is a code/config/test fix plus the reasoning for it; the empirical
+re-measurement it obligates (F2 under the corrected grid, D53/D54/D70/D73/D74's headline
+numbers, `report_figures/`) is NOT done in this entry -- see "What is still open" below.
+
+### 1. The master's own t+1 rule already IS `start`; `midpoint`/`end` price a schedule that was never committed to
+
+The master buffers arrivals during slot `t` and departs in slot `t+1`, at the instant `t+1`
+begins -- `t+1 * delta`, exactly (the operator's own restatement, confirmed against
+`scripts/minute_vs_slot_schedule.py`'s `_schedule()`: the `tau` fed into `departure_minutes`/
+`attach_minute_recourse` is literally the master's own `yOUT[q,tau]` index, already legal only
+for `tau >= t+1`, D7/D8). `placement_offset("start", delta) = 0` therefore is not one modelling
+convention among three: it is a restatement of what `tau*delta` already means. Everyone who
+boards departure `tau` arrived during an EARLIER slot and has, by construction, fully arrived
+before slot `tau` begins -- there is no "passenger not yet arrived" instant for `start` to be
+naive about. That concern only applies to arrivals DURING slot `tau` itself, which `tau>=t+1`
+already excludes from this departure by definition.
+
+The pre-existing comment block (this module, and D54 Section 1) argued the opposite: that
+`start` "assumes the bus departs... before the passengers it is collecting have arrived," and
+that `end` is the "honest" choice because it matches "how the demand is aggregated." That
+argument silently treated slot `tau` as if it were ALSO collecting new arrivals during its own
+window -- exactly the same-slot service `tau >= t+1` forbids for this departure. It is not a
+matter of taste; it conflated two different slots. Traced further, it is also moot on its own
+terms: the bound-direction case FOR `end` ("the only convention under which the slot recourse
+is a lower bound on the minute-level recourse") was already refuted by D54 Section 1's own
+measurement -- the slot model overstates the true minute cost under all three conventions,
+`end` included -- so that argument was never live either.
+
+**The reachability leak this produces.** The only feasibility filter this module applies is
+`0 <= dep_minute - arrival <= Wmax` (`attach_minute_recourse`, `price_direction_at_minutes`) --
+no explicit same-slot exclusion. Pricing under `midpoint`/`end` therefore lets a departure whose
+COMMITTED clock time is `tau*delta` claim credit for passengers who arrived DURING slot `tau` --
+a same-slot pickup `tau>=t+1` explicitly forbids for this departure, and a capability that is
+real only if the vehicle actually left later than `tau*delta`. `start` is the only convention
+that does not silently grant it.
+
+**Fix.** `policy: DeparturePolicy = "start"` everywhere it was `"midpoint"` (4 signatures in
+`minute_pricer.py`; every `--policy` default across `scripts/`; `departure_policy` defaults in
+`config.py` and `problem/subproblem_impl.py`; the two `configs/f2/*.yaml` and
+`configs/phase1/{d9_recourse_slot,d9_recourse_minute,rq5_benders_minute_p56}.yaml`).
+`honest_waiting`'s `policies` default narrows from `("start","midpoint")` to `("start",)` --
+there is no genuine convention uncertainty left to bracket for a schedule the master already
+committed to. `midpoint`/`end` remain in `DeparturePolicy` and are still computable: they are
+now documented as explicit, labelled COUNTERFACTUALS ("what if real dwell/boarding time pushes
+the departure N minutes past its committed instant"), never defaults, never candidates for
+"what this schedule truly costs."
+
+### 2. The placement-freedom offset grid was searching the wrong side of `tau*delta`
+
+Separately: `_offset_grid` (`price_direction_optimal_placement`,
+`price_schedule_optimal_placement[_with_chain]`, and F2's `solve_minute_recourse
+(placement_offsets=...)`) searched `[0, delta]` -- i.e. FROM the committed instant `tau*delta`
+FORWARD, into slot `tau+1`'s territory. Once (1) established `tau*delta` as the master's own
+committed instant rather than one end of a free window, that direction is not a real degree of
+freedom: `tau>=t+1` already means nobody boarding this departure is still arriving once slot
+`tau` opens, so waiting longer inside it buys nothing and only adds cost -- pure noise in a
+relaxation, never a genuine alternative. A caller who wants "what if this departure happened at
+a later tau" already has that available: a different `tau` in the schedule, not an offset on
+this one.
+
+**The genuine freedom runs the other way.** If the demand actually assigned to a departure all
+arrived at the very start of the PRECEDING slot (the operator's example: slot `t-1`'s demand all
+arriving at its own open, currently served only at `t`'s boundary), the true cheapest instant is
+that earlier arrival, not `tau*delta` -- and the old `[0,delta]` grid could never propose it,
+because it never looked left of the committed instant at all. `price_schedule_optimal_placement`
+("optimal" in its own name) was therefore optimal-within-slot-`tau`, not optimal.
+
+**Fix.** `_offset_grid`'s DEFAULT (when `offsets=None`) is now `[-delta, 0]` -- anticipation
+only, ceiling at the committed instant, floor one slot earlier. Explicit `offsets` stay
+validated against the wider symmetric `[-delta, delta]` (not clamped to anticipate-only): a
+caller doing deliberate counterfactual or cross-validation work (e.g. reproducing a `midpoint`/
+`end` fixed-policy cost through this machinery, which several tests do) is unaffected. The
+mechanism that keeps this safe for the CHAIN-constrained evaluator was already generic and
+needed no change: `price_schedule_optimal_placement_with_chain`'s charging-encroachment check
+(`NoChargeEncroachment`) computes `first_slot`/`last_slot` from the actual chosen instant, in
+either direction, so a trip that fills its own slot exactly and anticipates into a slot its
+vehicle spends charging is refused exactly as a forward encroachment always was -- the operator's
+own caution, confirmed already enforced, not added. The docstring's illustrative example (a
+trip "immediately followed by a charging slot" pinning it to offset 0) is corrected to
+"immediately PRECEDED by," which is now the direction that actually pins it.
+
+**Test surface.** `tests/test_minute_pricer.py`'s `TestOptimalPlacement` and
+`TestOptimalPlacementWithChain` had several cases built on demand deliberately placed INSIDE a
+departure's own slot (the same conflation as Section 1) -- `test_a_hand_checkable_case`,
+`test_precedence_is_respected_by_the_chosen_minutes`,
+`test_a_charging_slot_pins_the_trip_before_it_to_its_slot_boundary`, and
+`test_the_four_term_sandwich_holds` are rewritten with demand shifted into each departure's
+legal ANTICIPATION band instead (mechanically: every such request minute moved one `delta`
+earlier), and the charging test is mirrored to demonstrate a PRECEDING charging slot pinning
+the shift instead of a following one. `test_optimal_placement_is_never_worse_than_any_fixed_
+policy` is split: `test_default_optimal_placement_is_never_worse_than_start` checks the DEFAULT
+grid against the one fixed policy still guaranteed to be one of its points (`start`), and
+`test_a_grid_spanning_all_three_dominates_every_fixed_policy` keeps the general MIP-correctness
+claim (dominates ALL THREE fixed policies) on an explicit grid built to contain them, decoupled
+from whatever the production default is. A new
+`test_default_grid_anticipates_a_departure_into_its_predecessors_window` pins the operator's own
+example directly: three passengers arriving at a slot's own open, served today at its close,
+must be priced at zero wait once anticipation reaches the floor.
+
+**Measured.** `python -m unittest discover -s tests -v` (p310, `cplex_direct`): **294/294 pass,
+0 skipped** -- the full suite, not only this file (`tests/test_minute_pricer.py` alone: 35/35).
+
+### 3. F2 / D74 is reopened by this change, not reaffirmed by it -- and the reopened measurement is ALSO negative, more so than D74
+
+D74 measured F2's offset grid (`[0, delta]`, `departure_policy: midpoint`) hurting the Benders
+lower bound by 25.9% and closed the direction "by measurement." Both configs
+(`configs/f2/check_baseline.yaml`, `configs/f2/check_offsets.yaml`) and the falsifier script
+(`scripts/f2_placement_freedom_check.py`) were updated to `departure_policy: start` and the
+anticipate-only grid `[-30, -15, 0]`. **This is a different model than the one D74 measured, not
+a rerun of D74's own numbers.** The hypothesis going in was that half the old grid's "freedom"
+(the delay direction) was structural noise that could only ever widen a relaxation without ever
+paying for it, and that removing it might recover some or all of the lever.
+
+**Measured, same iteration-budgeted (15 iterations), bit-reproducible protocol as D74**
+(`clock_truncated_master_solves == 0` on both arms):
+
+    LB baseline (start, single offset) : 184.495
+    LB F2 (start, anticipate-only grid): 130.466
+    gain                                : -54.029 (-29.285%)
+
+**The hypothesis is refuted, not confirmed -- and the gap widened, not narrowed.** Removing the
+noise direction did not recover the lever; F2 is worse here than D74's original -25.9% figure
+(not a directly comparable baseline, since the baseline arm itself moved from `midpoint` to
+`start`, but the qualitative reading is unambiguous: "falsifier triggers, more sharply than 'no
+improvement'" holds again, harder). This narrows what D74's mechanism hypothesis can explain: if
+the delay-direction noise were the dominant driver of the degeneracy that plain-dual selection
+handles badly, correcting it should have closed some of the gap, not widened it. The remaining,
+untested half of D74's own hypothesis -- `cut_mode: dual` having no Pareto-optimality correction
+for the degeneracy an offset grid introduces, whatever its direction -- is now the more likely
+sole explanation, and MW-for-minutes remains the prerequisite `PROJECT_STATE_v6.md` already
+named, not a smaller or better-aimed grid. F2 stays closed by measurement; the corrected grid
+does not reopen it as a usable lever, only as a fairly-stated one.
+
+### 4. `scripts/delta1_monolith_pilot.py` -- run twice; still clock-truncated even at 1h/arm, but the gap tightened by an order of magnitude and the reading is now informative, not just inconclusive
+
+**First attempt, `--time-limit 300`.** Both solver A (slot-only monolith) and solver B
+(minute-recourse master) hit `term=maxTimeLimit` at 300s per solve (T=660 slots is a 10-30x
+larger monolith than any other resolution this project runs, exactly the tractability risk the
+script's own docstring named in advance) -- neither proved optimal, both `status=FEASIBLE` off
+the clock with a ~47-48% internal gap. `gain = -1.9524%`, `same schedule? no`. Not a fair test of
+this fix on this run, and not evidence against it -- the fix's correctness is what section 2's
+294/294 suite (arithmetic pinned by hand, including this exact scenario) checks, not this
+comparison.
+
+**Second attempt, `--time-limit 3600` (operator's own call, informed of the first result).** Both
+arms STILL terminate on `term=maxTimeLimit`, not proven optimal, after a full hour each -- T=660
+does not close inside 1h/arm on this machine, a tractability finding in its own right ("if this
+does not converge... THAT is a finding, not a failure to hide," as the script's docstring says).
+But the internal gap tightened by roughly an order of magnitude, from ~47-48% to:
+
+    A (slot-only)      : obj=8000.24  bound=7508.63  gap=6.14%
+    B (minute-recourse): obj=7879.24  bound=7326.19  gap=7.02%
+    priced @ minute: A cost=7991.00 unserved=85 | B cost=7879.00 unserved=88
+    gain = 1.4016%   same schedule? no
+
+Both are now close-to-optimal feasible solutions, not wildly unconverged ones, so this reading is
+worth recording even though neither side is a proof: at delta=1 the two arms land within ~1.4% of
+each other, in the direction the minute-recourse arm being priced at least as accurately as the
+slot arm would predict (B's own claimed cost, 7879, matches its minute-fidelity price exactly --
+no valuation gap left to close once slots and minutes are the same grid -- while A's slot claim,
+not shown here, would still differ from its 7991 minute-fidelity price by construction, D53/D54).
+It does not replace a proven-optimal comparison, and none of the D76 fix's correctness rests on
+it -- that is section 2's job -- but it is no longer merely "inconclusive": within the gap each
+side still carries, the two arms already agree to within 1.4%, which is the sanity property this
+script was written to check, short of a formal proof.
+
+### 5. What is still open
+
+1. Every headline number this repository has reported under `policy=midpoint` (D53, D54, D70,
+   D73, and `scripts/report_figures/`'s regenerable figures/`measurements.json`) was computed
+   under the now-withdrawn convention. None of it is retracted by this entry -- those numbers
+   are still correct measurements OF a `midpoint`-departing counterfactual schedule -- but none
+   of it should keep being read as "what the schedule really costs" until regenerated under
+   `start`. That regeneration is a separate, larger pass, deliberately not bundled into this
+   entry.
+2. A PROVEN-OPTIMAL (not merely clock-truncated-but-tight) `delta1_monolith_pilot.py` run.
+   Section 4's 1h/arm attempt closed the gap to ~6-7% each side but did not prove either arm --
+   T=660 needs either a materially longer budget still, or a smaller `delta=1` instance than the
+   full `setups/base.yaml`, to close for real.

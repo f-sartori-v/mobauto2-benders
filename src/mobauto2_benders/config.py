@@ -258,16 +258,21 @@ class SubproblemSection:
     # rows stay indexed by departure slot in both, so the cut the master receives is
     # the same object and every downstream check is unchanged.
     recourse_resolution: str = "slot"
-    # Where inside its slot a departure is assumed to leave, in minute mode. Measured
-    # to move the answer by ~4% of the objective on baseline_d9, so it is an explicit
-    # knob rather than a constant buried in the pricer.
-    departure_policy: str = "midpoint"
-    # F2 (docs/PROJECT_STATE_v6.md section 5): a fixed offset grid O subset [0, delta],
-    # chosen once at load, letting the minute recourse treat a departure as reachable at
-    # any minute in O rather than only at departure_policy's single instant. A RELAXATION
-    # -- Q_relaxed <= Q_true -- so a run using it may report a valid LOWER bound and must
-    # not report its upper bound as the schedule's true cost. None (default) is today's
-    # single-offset model exactly. Only meaningful under recourse_resolution == "minute".
+    # Where inside its slot a departure is assumed to leave, in minute mode. "start" is
+    # the only convention that prices what the schedule's own t+1 commitment actually
+    # does (D76) -- see minute_pricer.py's `DeparturePolicy` comment. "midpoint"/"end"
+    # remain available as explicit counterfactuals, not as competing estimates.
+    departure_policy: str = "start"
+    # F2 (docs/PROJECT_STATE_v6.md section 5, D76): a fixed offset grid O subset
+    # [-delta, delta], chosen once at load, letting the minute recourse treat a departure
+    # as reachable at any minute in O rather than only at departure_policy's single
+    # instant. A RELAXATION -- Q_relaxed <= Q_true -- so a run using it may report a
+    # valid LOWER bound and must not report its upper bound as the schedule's true cost.
+    # None (default) is today's single-offset model exactly. Only meaningful under
+    # recourse_resolution == "minute". tau*delta (offset 0) is the ceiling, not the
+    # floor: it is the master's own committed instant, so a genuine grid is
+    # anticipate-only (O subset [-delta, 0]); positive offsets remain accepted for
+    # deliberate counterfactual use but do not represent a real degree of freedom.
     placement_offsets: list[float] | None = None
     degenerate_cut_probe_top_k: int = 6
     degenerate_cut_probe_top_k_out: int | None = None
@@ -622,7 +627,7 @@ def upgrade_config_v1_to_v2(old: Mapping[str, Any]) -> dict[str, Any]:
             "Wmax_slots": sub_params.get("Wmax_slots"),
             "p": sub_params.get("p"),
             "recourse_resolution": sub_params.get("recourse_resolution", "slot"),
-            "departure_policy": sub_params.get("departure_policy", "midpoint"),
+            "departure_policy": sub_params.get("departure_policy", "start"),
             "placement_offsets": sub_params.get("placement_offsets"),
             "degenerate_cut_probe_top_k": sub_params.get(
                 "degenerate_cut_probe_top_k", 6
@@ -1185,7 +1190,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             f"{_recourse_resolution!r}"
         )
     _departure_policy = str(
-        sub_raw.get("departure_policy", "midpoint")
+        sub_raw.get("departure_policy", "start")
     ).strip().lower()
     if _departure_policy not in {"start", "midpoint", "end"}:
         raise ValueError(
@@ -1222,11 +1227,11 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
                 "subproblem.placement_offsets must be numeric, got "
                 f"{_placement_offsets_raw!r}"
             ) from exc
-        if any(o < 0.0 for o in _placement_offsets):
-            raise ValueError(
-                "subproblem.placement_offsets must be non-negative, got "
-                f"{_placement_offsets!r}"
-            )
+        # D76: negative offsets are legitimate here (anticipation -- a departure leaving
+        # earlier than its slot's own tau*delta), so no sign restriction at this layer.
+        # The exact bound, [-slot_resolution, slot_resolution], is enforced downstream by
+        # minute_pricer.py::_offset_grid / solve_minute_recourse, which have delta in
+        # scope; this layer only needs the values to be numeric, already checked above.
     # Resolve the cut generator (S1b).
     #
     # `cut_mode` is the one key. The legacy pair `use_magnanti_wong` / `use_dual_slopes`

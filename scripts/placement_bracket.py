@@ -9,18 +9,20 @@ precedence chain to respect. Before paying for it, measure what it could pay bac
 
 THE INSTRUMENT. Three quantities on one fixed schedule, all in passenger-minutes:
 
-    Q_relaxed   <=   Q_optimal   <=   min over policies of Q_fixed
-    (F2, D74)        (this build)     (today's model)
+    Q_relaxed   <=   Q_optimal   <=   Q_fixed[start]
+    (F2, D74/D76)    (this build)     (today's model, the only honest fixed policy)
 
-  * `Q_fixed` is today's answer -- `price_schedule_at_minutes` under each convention.
+  * `Q_fixed[start]` is today's answer, priced under `start` -- the only convention that
+    prices what this schedule actually does (D76); `midpoint`/`end` are printed too, but
+    only as labelled counterfactuals, not competing baselines.
   * `Q_optimal` chooses one instant per departure, shared by everyone boarding it
-    (`price_schedule_optimal_placement`). It ignores vehicle feasibility of the shift,
-    which can only make it cheaper, so it is a LOWER bound on what an implementable
-    optimal placement achieves -- not an achievable cost.
-  * `Q_relaxed` is F2's relaxation: every passenger may pick its own instant. Physically
-    impossible, strictly cheaper, and the only one of the three that may legitimately
-    generate a Benders cut for the optimal-placement model, because it is the only one
-    guaranteed to sit at or below the truth.
+    (`price_schedule_optimal_placement`), searching ANTICIPATION only (D76) -- it ignores
+    vehicle feasibility of the shift, which can only make it cheaper, so it is a LOWER
+    bound on what an implementable optimal placement achieves -- not an achievable cost.
+  * `Q_relaxed` is F2's relaxation: every passenger may pick its own instant, over the
+    same anticipate-only grid. Physically impossible, strictly cheaper, and the only one
+    of the three that may legitimately generate a Benders cut for the optimal-placement
+    model, because it is the only one guaranteed to sit at or below the truth.
 
 HOW TO READ THE RESULT. The prize is `best_fixed - Q_optimal`: how much of today's cost
 is an artefact of assuming the departure instant rather than choosing it. If it is small
@@ -135,6 +137,11 @@ def main() -> int:
               f"{len(charging_slots[q])} charging slots")
     print()
 
+    # D76: only "start" prices what this committed schedule actually does -- see
+    # minute_pricer.py's `DeparturePolicy` comment. `midpoint`/`end` are printed
+    # alongside it purely as labelled counterfactuals (a slower-departing schedule the
+    # master never chose); they are not candidates for "best fixed" any more, so the
+    # baseline the prize is measured against is `fixed["start"]`, not min() over all three.
     fixed: dict[str, float] = {}
     for policy in ("start", "midpoint", "end"):
         r = price_schedule_at_minutes(
@@ -142,8 +149,9 @@ def main() -> int:
         )
         fixed[policy] = r.total_cost
         print(f"  Q_fixed[{policy:8s}] = {r.total_cost:10.2f}   "
-              f"unserved={r.unserved_passengers:5.0f}")
-    best_policy = min(fixed, key=fixed.get)
+              f"unserved={r.unserved_passengers:5.0f}"
+              + ("   <- honest baseline (D76)" if policy == "start" else "   (counterfactual)"))
+    best_policy = "start"
     best_fixed = fixed[best_policy]
     print()
 
@@ -172,11 +180,14 @@ def main() -> int:
         C_out[t] += seats
     for t in sched["RET"]:
         C_ret[t] += seats
-    grid = [float(k) for k in range(delta + 1)]
-    print("  computing Q_relaxed (F2, every passenger free) ...", flush=True)
+    # D76: anticipate-only grid -- tau*delta is the ceiling (the master's own committed
+    # instant), not the floor. A positive-offset grid here would price a schedule that
+    # departs later than the master ever committed to; see minute_pricer.py::_offset_grid.
+    grid = [float(k) for k in range(-delta, 1)]
+    print("  computing Q_relaxed (F2, every passenger free, anticipate-only) ...", flush=True)
     _duals, obj_slot_units = solve_minute_recourse(
         T, delta, wmax, p_slots, C_out, C_ret, requests,
-        policy="midpoint", placement_offsets=grid,
+        policy="start", placement_offsets=grid,
     )
     relaxed = obj_slot_units * delta
     print(f"  Q_relaxed            = {relaxed:10.2f}")

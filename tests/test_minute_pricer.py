@@ -344,19 +344,35 @@ class TestDecomposedMinuteRecourse(unittest.TestCase):
             self.assertLessEqual(v, 1e-9, f"pi_OUT[{t}] is positive: {v}")
 
     def test_placement_offsets_outside_the_slot_are_refused(self):
+        """D76: the valid range is symmetric, [-delta, delta] -- anticipation as well as
+        the (non-default, counterfactual) positive direction -- so the refused values
+        have to sit outside THAT wider range, not merely be negative."""
         from mobauto2_benders.minute_pricer import solve_minute_recourse
 
         T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
         with self.assertRaises(ValueError):
             solve_minute_recourse(
                 T, delta, wmax, p_slots, C_out, C_ret, reqs,
-                lp_solver=require_solver_backend(), placement_offsets=[-5.0],
+                lp_solver=require_solver_backend(), placement_offsets=[-delta - 1.0],
             )
         with self.assertRaises(ValueError):
             solve_minute_recourse(
                 T, delta, wmax, p_slots, C_out, C_ret, reqs,
                 lp_solver=require_solver_backend(), placement_offsets=[delta + 1.0],
             )
+
+    def test_placement_offsets_none_now_defaults_to_start(self):
+        """D76: the single-offset default tracks `policy`, which now defaults to
+        `start` -- so with neither passed explicitly, the recourse must match the
+        anticipate-only default in `_offset_grid` collapsed to its ceiling, offset 0."""
+        from mobauto2_benders.minute_pricer import solve_minute_recourse
+
+        T, delta, S, wmax, p_slots, C_out, C_ret, reqs = self._case()
+        duals, _obj = solve_minute_recourse(
+            T, delta, wmax, p_slots, C_out, C_ret, reqs,
+            lp_solver=require_solver_backend(),
+        )
+        self.assertEqual(duals["placement_offsets"], [0.0])
 
     def test_reaches_solve_subproblem_through_sp_params(self):
         """End-to-end through the same dispatch the Benders loop uses, not just the
@@ -395,13 +411,16 @@ class TestOptimalPlacement(unittest.TestCase):
     choice is removed, against brute-force enumeration when the instance is small
     enough to enumerate, and against the F2 relaxation, which must lower-bound it.
 
-    The sandwich those last two establish
+    D76: `tau*delta` (offset 0, `start`) is the master's own committed instant, a
+    CEILING, not the low end of a free window -- the genuine degree of freedom is
+    anticipation only. The sandwich
 
-        Q_relaxed  <=  Q_optimal  <=  min over policies of Q_fixed
+        Q_relaxed  <=  Q_optimal  <=  Q_fixed[start]
 
-    is not only the measurement of what placement freedom is worth -- it is a standing
-    consistency check on all three implementations. If the ordering ever inverts, one
-    of them is broken, and the test says which side.
+    holds for the DEFAULT (anticipate-only) grid, because 0 is still its rightmost/
+    ceiling element. The wider claim against ALL THREE fixed policies still holds too,
+    but only for a grid built to contain all three offsets explicitly -- `start` is no
+    longer alone in being guaranteed dominated by an unqualified call.
     """
 
     @classmethod
@@ -441,11 +460,27 @@ class TestOptimalPlacement(unittest.TestCase):
                     opt.unserved_passengers, fixed.unserved_passengers, places=9
                 )
 
-    def test_optimal_placement_is_never_worse_than_any_fixed_policy(self):
-        """The upper side of the sandwich. Every fixed convention is one point in the
-        space the MIP minimises over, so none of them can beat it."""
+    def test_default_optimal_placement_is_never_worse_than_start(self):
+        """The upper side of the sandwich for the DEFAULT (anticipate-only) grid.
+        `start` (offset 0) is the one fixed policy still guaranteed to be a point in
+        that grid, so it is the one none of it can beat."""
         delta, S, wmax, p_min, sched, reqs = self._case()
         opt = self._price_opt(sched, reqs, delta, S, wmax, p_min)
+        fixed = price_schedule_at_minutes(
+            sched, reqs, delta, S, wmax, p_min, policy="start"
+        )
+        self.assertLessEqual(opt.total_cost, fixed.total_cost + 1e-9)
+
+    def test_a_grid_spanning_all_three_dominates_every_fixed_policy(self):
+        """The general MIP-correctness property this module claims -- optimal
+        placement over a set of candidate instants can never lose to any single one of
+        them -- checked independently of what the production default happens to be, by
+        handing the MIP an explicit grid that contains all three fixed policies."""
+        from mobauto2_benders.minute_pricer import placement_offset
+
+        delta, S, wmax, p_min, sched, reqs = self._case()
+        grid = sorted({placement_offset(p, float(delta)) for p in ("start", "midpoint", "end")})
+        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min, offsets=grid)
         for policy in ("start", "midpoint", "end"):
             fixed = price_schedule_at_minutes(
                 sched, reqs, delta, S, wmax, p_min, policy=policy
@@ -479,7 +514,9 @@ class TestOptimalPlacement(unittest.TestCase):
     def test_it_matches_brute_force_enumeration(self):
         """The MIP is checked against the definition of what it claims to compute:
         enumerate every assignment of instants to departures, price each one with the
-        independent fixed-minutes pricer, and take the minimum."""
+        independent fixed-minutes pricer, and take the minimum. The grid is passed
+        explicitly to both sides so this is a check of the MIP against the definition,
+        not an accidental check against whatever the default grid happens to be."""
         import itertools
 
         delta, S, wmax, p_min, sched, reqs = self._case()
@@ -496,17 +533,20 @@ class TestOptimalPlacement(unittest.TestCase):
             )
             best = min(best, w + p_min * u)
 
-        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min)
+        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min, offsets=grid)
         self.assertAlmostEqual(opt.total_cost, best, places=6)
 
     def test_a_hand_checkable_case(self):
-        """One departure in slot 1 (minutes 10..20 at delta=10), two passengers at
-        minutes 12 and 18, seats enough for both, Wmax generous. Any instant before 18
-        strands the 18 or makes it wait negatively (not allowed); the cheapest legal
-        instant is 18 itself, costing (18-12) + (18-18) = 6 passenger-minutes."""
+        """One departure in slot 1 (ceiling 10 at delta=10 -- D76: tau*delta, not
+        tau*delta+delta, is the committed instant), two passengers at minutes 2 and 8,
+        seats enough for both, Wmax generous. Anticipating below 8 strands the
+        8-arrival; anything above 8 (up to the ceiling, 10) just adds needless wait to
+        both. The cheapest legal instant is 8 itself: (8-2) + (8-8) = 6 passenger-
+        minutes -- the same hand-checked total as before D76, now reached by
+        anticipating down to the later passenger instead of delaying up to it."""
         delta, S, wmax, p_min = 10, 5.0, 60.0, 500.0
         sched = {"OUT": [1], "RET": []}
-        reqs = {"OUT": [12, 18], "RET": []}
+        reqs = {"OUT": [2, 8], "RET": []}
         opt = self._price_opt(sched, reqs, delta, S, wmax, p_min)
         self.assertAlmostEqual(opt.total_cost, 6.0, places=6)
         self.assertAlmostEqual(opt.unserved_passengers, 0.0, places=9)
@@ -515,6 +555,24 @@ class TestOptimalPlacement(unittest.TestCase):
         delta, S, wmax, p_min, sched, reqs = self._case()
         with self.assertRaises(ValueError):
             self._price_opt(sched, reqs, delta, S, wmax, p_min, offsets=[0.0, delta + 1.0])
+        with self.assertRaises(ValueError):
+            self._price_opt(sched, reqs, delta, S, wmax, p_min, offsets=[-delta - 1.0, 0.0])
+
+    def test_default_grid_anticipates_a_departure_into_its_predecessors_window(self):
+        """The concrete scenario D76 was written to fix: demand assigned to a
+        departure all arrived at the very start of the PRECEDING slot, and is served
+        today at the slot boundary. The optimal placement, searched only over the
+        default (anticipate-only) grid, must pull the departure all the way back to
+        meet them, not merely to somewhere inside its own slot."""
+        delta, S, wmax, p_min = 30, 5.0, 60.0, 500.0
+        sched = {"OUT": [1], "RET": []}  # slot 1 -> ceiling (committed instant) = 30
+        reqs = {"OUT": [0, 0, 0], "RET": []}  # all arrive at the previous slot's start
+        opt = self._price_opt(sched, reqs, delta, S, wmax, p_min)
+        # No waiting at all is achievable only by anticipating all the way to minute 0 --
+        # the previous slot's own start -- which is outside [0, delta] (the old,
+        # incorrect default) but inside [-delta, 0] (the corrected one).
+        self.assertAlmostEqual(opt.waiting_minutes, 0.0, places=6)
+        self.assertAlmostEqual(opt.unserved_passengers, 0.0, places=9)
 
 
 class TestOptimalPlacementWithChain(unittest.TestCase):
@@ -561,9 +619,15 @@ class TestOptimalPlacementWithChain(unittest.TestCase):
 
     def test_precedence_is_respected_by_the_chosen_minutes(self):
         """The constraint is checked where it is easiest to check honestly: on the
-        departure instants the model actually returns."""
+        departure instants the model actually returns.
+
+        D76: requests are shifted one `delta` earlier than the pre-D76 version of this
+        test used, to sit inside each trip's ANTICIPATION window (slot tau's legal band
+        is now `[(tau-1)*delta, tau*delta]`, not `[tau*delta, (tau+1)*delta]`) -- so the
+        scenario still exercises real, servable demand under the corrected default grid
+        instead of demand that arrived during the departure's own slot."""
         delta, S, wmax, p_min, dur = 10, 5.0, 60.0, 200.0, 10.0
-        reqs = {"OUT": [11, 14, 19], "RET": [25, 28, 33]}
+        reqs = {"OUT": [1, 4, 9], "RET": [15, 18, 23]}
         veh = {0: [(1, "OUT"), (2, "RET")]}
         _res, minutes = self._chain(veh, {}, reqs, delta, S, wmax, p_min, dur)
         d_out = minutes[(0, 1, "OUT")]
@@ -571,14 +635,15 @@ class TestOptimalPlacementWithChain(unittest.TestCase):
         self.assertGreaterEqual(d_ret + 1e-9, d_out + dur)
 
     def test_a_charging_slot_pins_the_trip_before_it_to_its_slot_boundary(self):
-        """When a trip fills its slot exactly, any positive shift spills into the next
-        slot. If the vehicle is charging there, the shift is refused and the departure
-        is pinned to offset 0 -- which is what `start` already assumes."""
+        """D76: the only freedom left is anticipation, so it is now a charging slot
+        immediately PRECEDING a trip that fills its own slot exactly which forbids any
+        shift at all -- any anticipation would spill into that preceding slot. The
+        departure is pinned to offset 0, which is what `start` already assumes."""
         delta, S, wmax, p_min, dur = 10, 5.0, 60.0, 200.0, 10.0
-        reqs = {"OUT": [11, 14, 19], "RET": []}
+        reqs = {"OUT": [2, 5, 9], "RET": []}
         veh = {0: [(1, "OUT")]}
         pinned, minutes = self._chain(
-            veh, {0: [2]}, reqs, delta, S, wmax, p_min, dur
+            veh, {0: [0]}, reqs, delta, S, wmax, p_min, dur
         )
         self.assertAlmostEqual(minutes[(0, 1, "OUT")], 10.0, places=9)
         at_start = price_schedule_at_minutes(
@@ -586,17 +651,26 @@ class TestOptimalPlacementWithChain(unittest.TestCase):
         )
         self.assertAlmostEqual(pinned.total_cost, at_start.total_cost, places=6)
 
-        # And without the charging slot the same instance is free to do better.
+        # And without the charging slot the same instance is free to anticipate and do
+        # better (best legal instant is 9, the latest of the three arrivals).
         free_to_shift, _m = self._chain(veh, {}, reqs, delta, S, wmax, p_min, dur)
         self.assertLess(free_to_shift.total_cost, pinned.total_cost)
 
     def test_the_four_term_sandwich_holds(self):
-        """Every ordering the module claims, asserted end to end on one instance."""
+        """Every ordering the module claims, asserted end to end on one instance.
+
+        D76: the grid is anticipate-only (`[-delta, 0]`) and is passed EXPLICITLY to
+        `solve_minute_recourse`, `self._free` and `self._chain` alike, so the sandwich
+        is checked on a shared, known offset set rather than relying on all three
+        functions' defaults to agree by construction (they do, but that identity has
+        its own dedicated test elsewhere). Requests are shifted one `delta` earlier
+        than the pre-D76 version of this test, to sit inside each trip's legal
+        anticipation band instead of its own (same-slot) collection window."""
         from mobauto2_benders.minute_pricer import solve_minute_recourse
 
         T, delta, S, wmax, p_slots, dur = 8, 10, 5.0, 60.0, 20.0, 10.0
         p_min = p_slots * delta
-        reqs = {"OUT": [11, 14, 19, 22, 27], "RET": [35, 41, 44]}
+        reqs = {"OUT": [1, 4, 9, 12, 17], "RET": [25, 31, 34]}
         veh = {0: [(1, "OUT"), (3, "RET")], 1: [(2, "OUT")]}
         sched = {"OUT": [1, 2], "RET": [3]}
 
@@ -605,14 +679,14 @@ class TestOptimalPlacementWithChain(unittest.TestCase):
         C_out[2] = S
         C_ret = [0.0] * T
         C_ret[3] = S
-        grid = [float(k) for k in range(delta + 1)]
+        grid = [float(k) for k in range(-delta, 1)]
         _d, obj_slots = solve_minute_recourse(
-            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="midpoint",
+            T, delta, wmax, p_slots, C_out, C_ret, reqs, policy="start",
             lp_solver=require_solver_backend(), placement_offsets=grid,
         )
         relaxed = obj_slots * delta
-        free = self._free(sched, reqs, delta, S, wmax, p_min)
-        chain, _m = self._chain(veh, {}, reqs, delta, S, wmax, p_min, dur)
+        free = self._free(sched, reqs, delta, S, wmax, p_min, offsets=grid)
+        chain, _m = self._chain(veh, {}, reqs, delta, S, wmax, p_min, dur, offsets=grid)
         at_start = price_schedule_at_minutes(
             sched, reqs, delta, S, wmax, p_min, policy="start"
         )

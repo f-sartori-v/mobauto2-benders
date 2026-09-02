@@ -252,6 +252,21 @@ Pareto-optimality correction for that degeneracy, so it picks weaker duals more 
 grid grows. **Do not re-attempt F2 without addressing that first** — extending MW to minute
 recourse is the natural next step if this lever is revisited, not a bigger offset grid.
 
+**D76 reopened this, re-measured it, and it is still closed — more decisively.** The offset grid
+`O ⊂ [0,δ]` measured above searched the wrong side of the master's own committed instant:
+`tau*delta` (`departure_policy: start`) is not the low end of a free window, it is what the
+master's own `t+1` rule already commits this departure to, and `[0,δ]`'s positive direction is
+structural noise (delaying can never help, since `tau>=t+1` already excludes same-slot arrivals
+from this departure). The genuine freedom is anticipation, `O ⊂ [-δ,0]`, wired into
+`configs/f2/{check_baseline,check_offsets}.yaml` / `scripts/f2_placement_freedom_check.py`.
+**Re-measured, same iteration-budgeted protocol: gain = -29.285% (LB 130.47 vs baseline
+184.50), "falsifier triggers, more sharply than 'no improvement'" — WORSE than the original
+-25.9%, not better.** Removing the noise direction did not recover the lever; if anything it
+narrows the mechanism hypothesis to the half that was never tested here — `cut_mode: dual`
+having no Pareto-optimality correction for the degeneracy an offset grid introduces, whatever
+its direction. MW-for-minutes remains the prerequisite, unchanged from before D76 (see
+docs_decisions.md D76 §3).
+
 **Stabilisation, level method.** The one lever whose diagnosis matches the observed symptom:
 Benders iterations on a 150-cut master oscillate in **1064–1090 with no trend**, a spread the
 size of run-to-run noise, at a 46% internal gap. Prefer a level method to a trust region —

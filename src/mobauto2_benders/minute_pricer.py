@@ -49,29 +49,37 @@ from typing import Any, Iterable, Literal, Sequence
 OUT = "OUT"
 RET = "RET"
 
-# Where inside its slot a departure is assumed to actually leave. A modelling assumption,
-# not a fact, and the measured answer depends on it heavily -- so it is a parameter and
-# every result reports which one it used.
+# Where inside its slot a departure is assumed to actually leave.
 #
-# The three are not interchangeable, and the difference is a BOUNDING property. A
-# passenger arriving at minute m in slot t, served by a departure in slot tau, is charged
-# (tau - t) * delta by the slot model. The true wait is D(tau) - m, and m ranges over
-# [t*delta, (t+1)*delta):
+# CORRECTED (D76; the previous version of this comment argued `end` was the honest
+# choice, and it was wrong). `tau` here is never the arrival's own slot -- it is the
+# master's departure-slot INDEX, already legal only for tau >= t+1 (D7/D8). Everyone who
+# boards departure tau therefore arrived during an EARLIER slot and has, by construction,
+# fully arrived before slot tau even begins. `start` (D(tau) = tau*delta) is not one
+# convention among three: it is a restatement of what the master's own t+1 rule already
+# commits to -- the vehicle leaves the instant its slot opens, because nobody boarding it
+# is still arriving. There is no passenger "not yet arrived" at that instant to protect
+# against; that concern only applies to arrivals DURING slot tau itself, and the master's
+# own legality rule (tau >= t+1) already excludes them from this departure by definition.
 #
-#   start     D(tau) = tau*delta            true wait <= slot charge   slot OVERSTATES
-#   midpoint  D(tau) = tau*delta + delta/2  straddles                  neither
-#   end       D(tau) = (tau+1)*delta        true wait >= slot charge   slot UNDERSTATES
+# `midpoint` and `end` price a DIFFERENT, slower-departing schedule -- one the master
+# never committed to. Worse, because the only reachability filter this module applies is
+# `0 <= dep_minute - arrival <= Wmax` (no explicit same-slot exclusion), pricing under
+# `midpoint`/`end` lets a departure whose committed clock time is tau*delta claim credit
+# for passengers who arrived DURING slot tau -- a same-slot pickup the master's tau>=t+1
+# rule explicitly forbids for this departure. That capability is real only if the vehicle
+# actually left later than tau*delta, which `start` is the only convention that does not
+# assume.
 #
-# `end` is therefore the only convention under which the slot recourse is a LOWER bound
-# on the minute-level recourse -- which is the direction Benders needs, since theta must
-# underestimate. It is also the convention that matches how the demand is aggregated:
-# arrivals are collected over [07:00, 07:30) and a bus leaving at 07:30 can carry all of
-# them.
+# They remain useful, explicitly, as counterfactual sensitivity toggles -- "what if real
+# dwell/boarding time pushes the departure N minutes past its committed instant" -- but
+# are not candidates for "what this schedule truly costs" and are not the default.
 #
-# The counter-effect, which is why this has to be measured rather than argued: the slot
-# model forbids same-slot service (tau >= t+1), but under `end` a 07:30 departure CAN
-# carry a 07:29 arrival. So the slot model excludes assignments that are feasible in
-# minutes, pushing its cost back up. The two effects oppose each other.
+# The bound-direction argument this comment used to make for `end` ("the only convention
+# under which the slot recourse lower-bounds the minute recourse") does not survive
+# either: D54 Section 1 measured the slot model overstating the true minute cost under
+# ALL THREE conventions, `end` included, so no convention actually delivers that property
+# in aggregate. It was never a reason to prefer `end` over `start`.
 DeparturePolicy = Literal["start", "midpoint", "end"]
 
 
@@ -254,10 +262,15 @@ def price_schedule_at_minutes(
     seats: float,
     wmax_minutes: float,
     p_minutes: float,
-    policy: DeparturePolicy = "midpoint",
+    policy: DeparturePolicy = "start",
     lp_solver: str = "cplex_direct",
 ) -> MinutePricingResult:
-    """Price a whole schedule (both directions) at minute fidelity."""
+    """Price a whole schedule (both directions) at minute fidelity.
+
+    `policy="start"` is the default because it is the only one that prices what this
+    schedule actually does (D76) -- see the `DeparturePolicy` comment above.
+    `midpoint`/`end` remain available as explicit counterfactual toggles.
+    """
     waiting = 0.0
     unserved = 0.0
     served = 0.0
@@ -347,24 +360,37 @@ def price_schedule_given_departure_minutes(
 
 
 def _offset_grid(slot_resolution: int, offsets: Sequence[float] | None) -> list[float]:
-    """Candidate departure instants inside a slot, as minutes from the slot's start.
+    """Candidate departure instants for a slot-`tau` departure, as minutes from `tau*delta`.
 
-    Default is every whole minute in `[0, delta]` INCLUSIVE, which is the same closed
-    range `placement_offset` maps the three conventions into (`start` -> 0,
-    `midpoint` -> delta/2, `end` -> delta). Inclusive on both ends matters: it is what
-    makes `start` and `end` members of the default grid, so the identity tests below
-    have something to be identical to.
+    CORRECTED (D76). `tau*delta` (offset 0, "start") is the CEILING, not one end of an
+    arbitrary window: it is the instant the master's own t+1 rule already commits this
+    departure to. The only genuine degree of freedom left to search is ANTICIPATION --
+    could this vehicle truly have left earlier, given who actually boarded it -- so the
+    default grid is every whole minute in `[-delta, 0]`, never positive.
+
+    Moving positive (towards `tau*delta + delta`, the old `end`) is not a competing
+    option to search: `tau >= t+1` (D7/D8) already means nobody boarding this departure
+    is still arriving during slot tau, so waiting longer inside slot tau buys nothing and
+    only adds cost -- pure noise in a relaxation, not a real choice. A caller who wants to
+    price "if this departure literally happened at a later tau" already has that: it is a
+    different tau in the schedule, not an offset on this one.
+
+    `offsets`, when given explicitly, is validated against the wider symmetric range
+    `[-delta, delta]` rather than clamped to the anticipate-only default -- deliberate
+    counterfactual or cross-validation use (e.g. reproducing a `midpoint`/`end` fixed
+    policy through this machinery) is still allowed; only the DEFAULT search space is
+    restricted to what is actually a real degree of freedom.
     """
     delta = float(slot_resolution)
     if offsets is not None:
         grid = [float(o) for o in offsets]
         for o in grid:
-            if not (0.0 <= o <= delta):
+            if not (-delta <= o <= delta):
                 raise ValueError(
-                    f"placement offset {o} is outside its slot [0, {delta}]"
+                    f"placement offset {o} is outside [-{delta}, {delta}]"
                 )
         return sorted(set(grid))
-    return [float(k) for k in range(int(delta) + 1)]
+    return [float(k) for k in range(-int(delta), 1)]
 
 
 def price_direction_optimal_placement(
@@ -593,8 +619,9 @@ def price_schedule_optimal_placement_with_chain(
        bound that is honestly an upper bound, in the direction that cannot mislead.
 
     Note what constraint 2 implies when a trip fills its slot exactly
-    (`trip_duration == slot_resolution`, the baseline's own case): a trip immediately
-    followed by a charging slot cannot shift at all, and is pinned to offset 0. Much of
+    (`trip_duration == slot_resolution`, the baseline's own case): the only freedom left
+    is anticipation (D76), so a trip immediately PRECEDED by a charging slot cannot shift
+    at all, and is pinned to offset 0 -- the same instant `start` already assumes. Much of
     the freedom the free-shifting evaluator reports may be unavailable for exactly this
     reason, which is the entire point of measuring rather than assuming.
 
@@ -785,7 +812,7 @@ def attach_minute_recourse(
     seats: float,
     wmax_minutes: float,
     p_minutes: float,
-    policy: DeparturePolicy = "midpoint",
+    policy: DeparturePolicy = "start",
     objective_scale: float = 1.0,
     scenarios: Sequence[tuple[dict[str, Sequence[int]], float]] | None = None,
 ) -> None:
@@ -1012,15 +1039,17 @@ def honest_waiting(
     slot_waiting_cost_slots: float,
     slot_unserved: float,
     served_slot: float,
-    policies: Iterable[DeparturePolicy] = ("start", "midpoint"),
+    policies: Iterable[DeparturePolicy] = ("start",),
     lp_solver: str = "cplex_direct",
 ) -> HonestWaitingReport:
     """Report the slot model's waiting estimate beside the minute-level truth.
 
-    Both placement policies are priced, and both are reported. The choice between them
-    is a modelling assumption, not a fact, and on `baseline_d9` it moves the answer by
-    more than any formulation change measured in this project -- so collapsing it to one
-    number would hide the largest single source of uncertainty in the figure.
+    CORRECTED (D76). `start` is not one candidate among several: it is what the
+    schedule's own t+1 commitment deterministically does, so there is no genuine
+    convention uncertainty to bracket here -- `policies` defaults to `("start",)` alone.
+    Pass additional policies explicitly only for a labelled counterfactual comparison
+    ("what if boarding realistically eats N extra minutes"), not as competing estimates
+    of the true cost.
     """
     return HonestWaitingReport(
         slot_waiting_minutes=float(slot_waiting_cost_slots) * float(slot_resolution),
@@ -1050,7 +1079,7 @@ def solve_minute_recourse(
     C_out: Sequence[float],
     C_ret: Sequence[float],
     request_minutes: dict[str, Sequence[int]],
-    policy: DeparturePolicy = "midpoint",
+    policy: DeparturePolicy = "start",
     lp_solver: str = "cplex_direct",
     solver_options: dict | None = None,
     solve_time_limit_s: float | None = None,
@@ -1081,7 +1110,7 @@ def solve_minute_recourse(
     of the schedule. `y` reaches this LP only as the capacity right-hand side.
 
     PLACEMENT FREEDOM (F2, docs/PROJECT_STATE_v6.md section 5, DESIGN_DD_v1 section 6).
-    `placement_offsets`, when given, is a fixed offset grid `O subset [0, delta]` -- a
+    `placement_offsets`, when given, is a fixed offset grid `O subset [-delta, delta]` -- a
     constant, chosen once at load, not a decision variable. A passenger may then board the
     departure of slot `tau` at ANY candidate minute `tau*delta + o` for `o` in `O`, not only
     at the single instant `policy` implies. This is a RELAXATION, not a refinement: two
@@ -1090,6 +1119,13 @@ def solve_minute_recourse(
     and a cut derived from it is a valid lower bound on `Q_true` -- but the schedule this
     recourse prices as an UPPER bound must not be trusted as one; only the master's cut-based
     lower bound may be read from a run using this.
+
+    CORRECTED DIRECTION (D76). `tau*delta` (offset 0) is the master's own committed
+    instant (D7/D8's t+1 rule), not the low end of a free window -- see `_offset_grid`.
+    A grid built for the genuine degree of freedom this recourse should explore is
+    anticipate-only, `O subset [-delta, 0]`; `D74`'s F2 measurement (grid `[0, delta]`,
+    bidirectional in the OLD, incorrect sense) is reopened by this change, not reaffirmed
+    by it, and needs re-measuring under the corrected grid before F2 is judged again.
 
     The capacity row stays ONE PER SLOT regardless of `len(placement_offsets)`: an arc now
     carries an extra offset index, but capacity constraints sum over that index before
@@ -1110,10 +1146,10 @@ def solve_minute_recourse(
         if placement_offsets
         else [placement_offset(policy, delta)]
     )
-    if any(o < 0.0 or o > delta for o in offsets):
+    if any(o < -delta or o > delta for o in offsets):
         raise ValueError(
-            f"placement_offsets must lie in [0, slot_resolution] = [0, {delta}], "
-            f"got {offsets!r}"
+            f"placement_offsets must lie in [-slot_resolution, slot_resolution] = "
+            f"[-{delta}, {delta}], got {offsets!r}"
         )
     taus = list(range(int(T)))
     ks = list(range(len(offsets)))

@@ -120,7 +120,7 @@ def _solve_minute_monolith(cfg, p_minutes: float, policy: str, time_limit: float
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--policy", choices=("start", "midpoint", "end"), default="midpoint")
+    ap.add_argument("--policy", choices=("start", "midpoint", "end"), default="start")
     ap.add_argument("--p-minutes", type=float, default=56.0)
     ap.add_argument(
         "--monolith-time-limit", type=float, default=300.0,

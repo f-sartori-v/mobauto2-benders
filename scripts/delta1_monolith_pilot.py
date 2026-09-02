@@ -1,14 +1,21 @@
 """Delta=1 sanity pilot: does slot-recourse collapse into minute-recourse at 1-minute slots?
 
-    python scripts/delta1_monolith_pilot.py [--Q 2] [--time-limit 300] [--policy end]
+    python scripts/delta1_monolith_pilot.py [--Q 2] [--time-limit 300] [--policy start]
 
 THE POINT (forward-plan A4d follow-up, requested inline after the delta in {30,15,10}
 factorial). At slot_resolution=1, a slot IS a minute: the slot-only recourse and the
 minute-level recourse are the same model, so the two solves this script runs (mirroring
 scripts/sweep_multiresolution.py's inner loop) should produce IDENTICAL schedules and
 costs -- `same?` should read `yes` and `gain` should read ~0.00%. That is the sanity
-check. `--policy end` is used (not the default 3-way sweep): at delta=1 the three
-placement conventions (start/midpoint/end) coincide, so sweeping them is redundant here.
+check, and it is now also the D76 validation target: `start` is the only policy that
+prices what the committed schedule actually does (see minute_pricer.py's
+`DeparturePolicy` comment), so this script is the cheap end-to-end check that the
+corrected minute pricer collapses onto the MILP's own answer once slot width stops
+mattering. `--policy start` is used (not the default 3-way sweep): at delta=1 the three
+placement conventions differ by under a minute, negligible either way, so sweeping them
+is redundant here -- but `start` is used rather than the old `end` default because it is
+the convention that is actually correct, not merely the one that happens not to matter
+at this resolution.
 
 THE OTHER POINT -- tractability. Every other resolution in this project's monolith
 results uses slot_resolution in {10, 15, 30}: T = T_minutes/delta in {66, 44, 22}. Here
@@ -68,7 +75,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--Q", type=int, default=2)
     ap.add_argument("--time-limit", type=float, default=300.0)
-    ap.add_argument("--policy", default="end")
+    ap.add_argument("--policy", default="start")
     ap.add_argument("--p-minutes", type=float, default=None)
     args = ap.parse_args()
 

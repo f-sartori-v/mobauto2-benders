@@ -160,7 +160,7 @@ def _relax_binaries(m) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--policy", default="midpoint")
+    ap.add_argument("--policy", default="start")
     ap.add_argument("--p-minutes", type=float, default=56.0)
     args = ap.parse_args()
 

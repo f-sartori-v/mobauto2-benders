@@ -2,9 +2,12 @@
 # is that one plus exactly one key, subproblem.placement_offsets, so any LB difference
 # between the two runs is attributable to that one key and nothing else.
 #
-# Offsets 0, 15, 30 minutes span the 30-minute slot at 15-minute resolution: a departure of
-# slot tau is reachable at its start, its midpoint, or its end, whichever a given passenger's
-# arrival minute makes cheapest -- the placement freedom F2 is about, not a decision variable.
+# Offsets -30, -15, 0 minutes (D76: corrected from the original 0/15/30 -- tau*delta, offset
+# 0, is the master's own committed instant, not the low end of a free window) span the
+# 30-minute slot: a departure of slot tau is reachable at (tau-1)*delta, its midpoint, or
+# tau*delta itself, whichever a given passenger's arrival minute makes cheapest -- the
+# placement freedom F2 is about, restricted to the direction that is a genuine degree of
+# freedom (anticipation), not a decision variable.
 
 schema:
   name: mobauto2_benders_config
@@ -66,8 +69,8 @@ subproblem:
   Wmax_minutes: 60
   p_minutes: 56.0
   recourse_resolution: minute
-  departure_policy: midpoint
-  placement_offsets: [0.0, 15.0, 30.0]
+  departure_policy: start
+  placement_offsets: [-30.0, -15.0, 0.0]
   degenerate_cut_probe_top_k: 6
   degenerate_cut_zero_tol: 1.0e-9
 
