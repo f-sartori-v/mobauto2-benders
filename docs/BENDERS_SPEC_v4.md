@@ -331,12 +331,37 @@ lower-bound guarantee, the runtime already drops `best_lb` when it is used, and 
 *fall-through* of the legacy pair — so a config that simply omitted both booleans landed on
 it silently and found out an hour later. Refused at load instead.
 
-**Magnanti–Wong is refused with `recourse_resolution: minute`.** `solve_mw_dual` builds the
-dual of the **slot** primal (`α[t] + π[τ] ≤ (τ−t)` over slot arcs); the minute recourse's
-primal has one demand row per arrival **minute**. They are duals of different LPs, so a
-dual optimal for one carries no weak-duality relation to the other and a cut from it can
-overestimate the recourse — D30's failure mode. Nothing guarded this before;
-`configs/phase1/rq5_benders_minute_p56.yaml` escaped it only by setting the flag false.
+**Magnanti–Wong is ported to `recourse_resolution: minute` (B2, handout item, 2026-09-02).**
+Until this port it was refused at load: `solve_mw_dual` builds the dual of the **slot**
+primal (`α[t] + π[τ] ≤ (τ−t)` over slot arcs), while the minute recourse's primal has one
+demand row per arrival **minute** and arc costs `(dep_minute − m)/δ` — duals of different
+LPs, so a dual feasible for the slot LP carries no weak-duality relation to the minute
+recourse, and a cut from it can overestimate — D30's failure mode.
+
+`solve_mw_dual_minute` (`minute_pricer.py`) is the minute recourse's **own** dual, built
+over its own arcs (`_minute_recourse_geometry`, shared with the primal so the two cannot
+diverge): `α[m] + π[τ] ≤ (dep_minute[τ] − m)/δ` per feasible arc, `α[m] ≤ p_slots` per
+arrival minute, `π[τ] ≤ 0` per slot -- the same sign convention as everywhere else in this
+module, and the same Pareto objective at the projected core point `Ȳ` (S3) the slot path
+uses, since that objective is purely a function of `π[τ]` and `Ȳ`, both already slot-indexed
+regardless of resolution.
+
+**The one structural difference the port had to add a guard for.** In the slot LP, every
+`π[τ]` with `τ ≥ 1` is guaranteed a dual-feasibility row by `(t, τ)` structure alone; only
+`τ = 0` can be orphaned (no arc reaches it). In the minute LP, whether `π[τ]` appears in any
+row is **data-dependent** -- any slot too early or too late for any actual arrival to reach
+within `Wmax_minutes` is orphaned, not just slot 0. Left free, such a `π[τ]` (`≤ 0`,
+maximised) risks an unbounded LP whenever its objective coefficient `S·Ȳ[τ] − C[τ]` is
+negative. `solve_mw_dual_minute` fixes any orphaned `π[τ]` to `0.0` rather than leaving it
+free: a shadow price for a capacity row that was never built is not a quantity the LP can
+meaningfully select. Covered by
+`tests/test_minute_mw.test_a_pi_with_no_dual_feasibility_row_is_fixed_to_zero_not_left_unbounded`.
+
+`config.py` no longer refuses `use_magnanti_wong: true` with `recourse_resolution: 'minute'`;
+`use_dual_slopes: true` (plain capacity duals) remains available and is still the right
+choice when a caller wants the non-Pareto ablation baseline (the `dual` row in the fallback
+table above). `configs/phase1/rq5_benders_minute_p56.yaml` is unaffected -- it still sets
+the flag false, and continues to run on the plain dual exactly as before.
 
 **Multi-scenario validity aggregation distinguishes NO_CUT from UNKNOWN.** A scenario whose
 θ early-exit fires produces no cut and carries no mode; reading that absence as `unknown`

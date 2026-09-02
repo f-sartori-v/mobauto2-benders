@@ -4931,3 +4931,101 @@ them.
 `scripts/delta1_short_horizon_pilot.py` (new). No `measurements.json` entry -- this is a
 sanity/tractability result (report §5's kind of claim), not a table-facing headline number, and
 the handout does not name a `measurements.json` key for it.
+
+## D86 — B2: Magnanti-Wong ported to the minute recourse; the F2 falsifier re-run under selection still triggers, more sharply than "no improvement"
+
+Date: 2026-09-02. Handout item B2. Branch: `main`.
+
+**The port.** `solve_mw_dual_minute` (new, `minute_pricer.py`) is the minute recourse's own
+Magnanti-Wong dual, built over the same arcs the primal (`solve_minute_recourse`) uses --
+extracted into a shared `_minute_recourse_geometry` helper so the two cannot silently diverge,
+the same reasoning that made `expand_slopes_to_candidate` its own function elsewhere in this
+project. Same interface as the slot path's `MWDual` (a scalar intercept, deliberately -- its
+docstring already anticipated this: "the minute recourse[has] one demand row per arrival
+MINUTE"), same sign convention (`pi <= 0`), same Pareto objective at the projected core point
+`Ybar` (S3, D63) -- that projection is already resolution-agnostic (pure first-stage/slot-index
+arithmetic, computed once in `evaluate()` before either generator is dispatched), so B2 needed
+no change to it, only to route into it.
+
+**The one structural difference the port had to guard against, not merely note.** In the slot
+LP, only slot 0 can lack a dual-feasibility row (structural: `t+1 <= tau`). In the minute LP,
+whether `pi[tau]` appears in any row is **data-dependent** -- any slot too early or late for any
+arrival to reach within `Wmax_minutes` is orphaned, not just slot 0. Left free, such a `pi[tau]`
+(`<= 0`, maximised) risks an unbounded LP whenever its objective coefficient is negative.
+Fixed at the cause: an orphaned `pi[tau]` is fixed to `0.0` rather than left free -- a shadow
+price for a capacity row that was never built is not a quantity the LP can select. Covered by
+`tests/test_minute_mw.test_a_pi_with_no_dual_feasibility_row_is_fixed_to_zero_not_left_unbounded`.
+
+**Wiring.** One new dispatch closure, `dispatch_mw_dual`, added beside `solve_mw_dual` in
+`subproblem_impl.py`'s `evaluate()` and called from both existing call sites (the multi-scenario
+loop and the single-scenario path) instead of `solve_mw_dual` directly -- one branch point, not
+one duplicated at each site. `config.py`'s load-time refusal of `use_magnanti_wong: true` with
+`recourse_resolution: 'minute'` is removed (it is no longer true); the removed guard's own test,
+`test_mw_with_minute_recourse_is_refused`, is replaced with
+`test_mw_with_minute_recourse_is_allowed`. `docs/BENDERS_SPEC_v4.md` section 2.6 rewritten to
+describe the port instead of the refusal.
+
+**Accept-test 1 -- cut-soundness invariants, mirroring the slot path's own
+(`tests/test_minute_mw.py`, 4 tests, LP backend required):**
+
+- `solve_mw_dual_minute` returns a solution (not `None`) on a representative instance, with
+  `dm_out/dm_ret <= 0` (sign convention holds).
+- **The intercept is derived from the demand duals and reconciles against the imposed form**
+  (S2) -- `derive_cut_intercepts` (unmodified, generic code) run on a minute-recourse `MWDual`
+  for the first time, and it does not raise.
+- **The cut never overestimates at a point other than its own anchor** -- checked at a genuinely
+  different schedule the dual was not built at, not merely tight at the incumbent (tight-at-
+  anchor is necessary but not sufficient; D30 was an overestimate everywhere else while exact at
+  one point).
+- The orphaned-`pi` guard fires correctly and returns `0.0`, not `None` and not an unbounded LP.
+
+**End-to-end confirmation**, beyond the isolated LP tests: a real 5-iteration Benders loop on
+`configs/phase1/rq5_benders_minute_p56_a5_iterbudget.yaml` with `use_magnanti_wong: true` added
+reports `cut_generation_mode=mw` and `mode=mw`/`lb_valid=valid` on **every** iteration, zero
+`[MW FAIL]` lines. Full suite after the port: 310 tests, all passing.
+
+**Accept-test 2 -- the F2 A/B, re-run under selection.** New configs
+`configs/f2/check_baseline_mw.yaml` / `check_offsets_mw.yaml` (the two existing F2 configs plus
+exactly `use_magnanti_wong: true`, nothing else -- same iteration budget (15), same generous
+time limit). `scripts/f2_placement_freedom_check.py` given optional `--baseline-config`/
+`--offsets-config` (defaults unchanged) so both variants run through the identical harness. The
+plain-dual run was repeated first as a control and reproduced the number already on record
+almost exactly (`-29.285%` here vs `-29.3%` recorded) -- the environment is measuring the same
+thing D76 did.
+
+| | LB baseline | LB F2 (anticipate-only) | gain | both bit-reproducible |
+|---|---:|---:|---:|:---:|
+| plain dual (control, re-run) | 184.495 | 130.466 | **-29.285%** | yes |
+| Magnanti-Wong selection | 184.564 | 132.057 | **-28.449%** | yes |
+
+Both arms of both runs: `clock_truncated_master_solves == 0`, 15 iterations each, deterministic
+(single-threaded, seeded).
+
+**Verdict, stated either way as B2 asked.** Selection does **not** recover the F2 lever.
+Both LBs move up slightly under MW relative to plain dual (baseline +0.07, offsets +1.59) --
+consistent with Pareto selection finding a marginally stronger cut at each anchor, as expected
+-- but the *gap between the two arms*, which is what F2 is actually about, is essentially
+unchanged: -29.3% under plain dual, -28.4% under selection, both far outside noise and both
+strongly negative. **The diagnosis in report §4.3.1 is complete, not partial.** Cut-side
+degeneracy correction was the remaining hypothesis after the offset-grid correction (D76) made
+the lever worse rather than better; with that hypothesis also tested and also negative, there is
+no known device left in this repository's own toolbox that turns placement freedom into a
+positive lever at this budget, on this instance. This is a finding, not a gap: F2's placement
+freedom does not help, under either cut generator this project has, and saying so completely is
+more useful than leaving cut selection as an open "what if."
+
+**What this does and does not settle.** It settles B2 completely: the port works, passes the
+same soundness bar the slot path is held to, and answers the question it was built to ask. It
+does not explain *why* placement freedom is harmful rather than merely neutral (D74/D76 already
+covers the mechanism: the relaxation lets two passengers on the same physical departure be
+priced as boarding at different candidate minutes, which loosens rather than tightens the
+capacity coupling the cut needs) -- B2 was never asked to re-derive that, only to check whether
+a better cut generator changes the answer. It does not.
+
+**Record.** New: `solve_mw_dual_minute`/`MinuteMWDual` (`minute_pricer.py`), `dispatch_mw_dual`
+(`subproblem_impl.py`), `tests/test_minute_mw.py`, `configs/f2/check_baseline_mw.yaml`,
+`configs/f2/check_offsets_mw.yaml`. Changed: `config.py` (guard removed),
+`tests/test_fast_safety_fixes.py` (refusal test replaced), `docs/BENDERS_SPEC_v4.md` section 2.6,
+`scripts/f2_placement_freedom_check.py` (config-path CLI args, stale grid label fixed).
+`scripts/report_figures/data/measurements.json -> placement_freedom_f2`, new block recording
+both the plain-dual control and the MW numbers side by side.

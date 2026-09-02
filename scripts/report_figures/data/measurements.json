@@ -5,6 +5,22 @@
     "traced back without opening the plotting code. Editing a number here changes",
     "the figure and nothing else; the scripts hold no numbers of their own."
   ],
+  "placement_freedom_f2": {
+    "source": "docs/docs_decisions.md D86 (2026-09-02), scripts/f2_placement_freedom_check.py, configs/f2/check_{baseline,offsets}[_mw].yaml, 15 iterations/arm, all 4 arms clock_truncated_master_solves == 0",
+    "instance": "Q = 2, T = 22, minute recourse, p_minutes = 56, policy = start, anticipate-only offset grid [-30,-15,0] (D76)",
+    "unit": "lower bound, slot-equivalent units; gain is relative to the baseline arm's LB",
+    "plain_dual": {
+      "lb_baseline": 184.495,
+      "lb_offsets": 130.466,
+      "gain_pct": -29.285
+    },
+    "magnanti_wong": {
+      "lb_baseline": 184.564,
+      "lb_offsets": 132.057,
+      "gain_pct": -28.449
+    },
+    "verdict": "Selection does not recover the F2 lever. Both LBs move up slightly under MW (marginally stronger cuts at each anchor, as expected), but the gap between the two arms -- what F2 is actually about -- is essentially unchanged and remains strongly negative under both cut generators. Report Sec 4.3.1's placement-freedom diagnosis is complete, not partial."
+  },
   "runtime_split": {
     "source": "docs/docs_decisions.md D83 (2026-09-02), a standard Benders loop (configs/baseline_d9.yaml) with run.emit_reports=true, reading BendersRunResult / manifest['runtime'] (D71 instrumentation)",
     "instance": "baseline_d9.yaml, Q = 2, T = 22, p = 50 slot units (1500 pax-min regime), slot recourse, 10 iterations (this config's own fixed regression budget), single-threaded",

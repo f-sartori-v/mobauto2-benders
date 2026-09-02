@@ -80,20 +80,22 @@ class ConfigRefusals(unittest.TestCase):
         finally:
             out.unlink(missing_ok=True)
 
-    def test_mw_with_minute_recourse_is_refused(self):
-        """solve_mw_dual is the dual of the SLOT primal. Under minute recourse the
-        primal has one demand row per arrival minute, so the two are duals of different
-        LPs and a cut from the slot dual can overestimate -- D30's failure mode."""
-        with self.assertRaises(ValueError) as ctx:
-            self._cfg(
-                {
-                    "use_magnanti_wong": True,
-                    "recourse_resolution": "minute",
-                    "Wmax_minutes": 60,
-                },
-                "_tmp_mw_minute.yaml",
-            )
-        self.assertIn("duals of different", str(ctx.exception).lower())
+    def test_mw_with_minute_recourse_is_allowed(self):
+        """B2 (handout item, 2026-09-02): this combination used to be refused at
+        load, because solve_mw_dual built only the dual of the SLOT primal, a
+        different LP from the minute recourse's own. solve_mw_dual_minute
+        (minute_pricer.py) is that LP's own dual, so the combination is no longer
+        refused -- see tests/test_minute_mw.py for the port's own soundness
+        checks."""
+        cfg = self._cfg(
+            {
+                "use_magnanti_wong": True,
+                "recourse_resolution": "minute",
+                "Wmax_minutes": 60,
+            },
+            "_tmp_mw_minute.yaml",
+        )
+        self.assertEqual(cfg.subproblem.cut_mode, "mw")
 
     def test_plain_dual_with_minute_recourse_is_allowed(self):
         """The valid combination must stay reachable, or the refusal has removed the
