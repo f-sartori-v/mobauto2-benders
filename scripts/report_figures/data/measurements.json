@@ -16,19 +16,40 @@
     "monolith_seconds": 0.8
   },
   "valuation_decomposition": {
-    "source": "docs/RESEARCH_NOTE_v2.md section 2.1 (D51, D53)",
-    "instance": "baseline, Q = 2, T = 22, 30-minute slots, p_minutes = 56",
+    "source": "docs/docs_decisions.md D78 (2026-09-02), scripts/minute_vs_slot_schedule.py --policy start --p-minutes 56, both solves proven optimal",
+    "instance": "baseline, Q = 2, T = 22, 30-minute slots, p_minutes = 56, policy = start",
     "unit": "passenger-minutes",
-    "claimed_cost_of_slot_schedule": 11990,
-    "true_cost_of_slot_schedule": 9326,
-    "true_cost_of_best_schedule": 8794,
-    "reporting_error_pct": 28.5,
-    "decision_error_pct": 6.0,
-    "waiting_reported_min": 38.24,
+    "claimed_cost_of_slot_schedule": 11997.2,
+    "true_cost_of_slot_schedule": 8596.0,
+    "true_cost_of_best_schedule": 8388.0,
+    "reporting_error_pct": 39.57,
+    "decision_error_pct": 2.48,
+    "waiting_reported_min": 30.0,
     "waiting_true_min_range": [
-      20.4,
-      23.2
-    ]
+      13.93,
+      15.94
+    ],
+    "unserved_reported": 115,
+    "unserved_true_range": [
+      90,
+      105
+    ],
+    "midpoint_counterfactual": {
+      "note": "Superseded by D76 (the committed departure offset is now policy=start; midpoint is a labelled counterfactual per R2). Kept, not deleted, because the report's superseded-values table (8_Deliver section 4.8) refers to these numbers.",
+      "source": "docs/RESEARCH_NOTE_v2.md section 2.1 (D51, D53)",
+      "instance": "baseline, Q = 2, T = 22, 30-minute slots, p_minutes = 56, policy = midpoint",
+      "unit": "passenger-minutes",
+      "claimed_cost_of_slot_schedule": 11990,
+      "true_cost_of_slot_schedule": 9326,
+      "true_cost_of_best_schedule": 8794,
+      "reporting_error_pct": 28.5,
+      "decision_error_pct": 6.0,
+      "waiting_reported_min": 38.24,
+      "waiting_true_min_range": [
+        20.4,
+        23.2
+      ]
+    }
   },
   "multiresolution_gain": {
     "source": "docs/RESEARCH_NOTE_v2.md section 2.2 (D54, D55)",

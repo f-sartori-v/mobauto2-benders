@@ -4466,3 +4466,61 @@ a habit, not a fix: pull before trusting a local checkout's test count or defaul
 
 **Record.** No `measurements.json` entry (this step produces no quantitative claim for the
 report). `docs/PROJECT_STATE_v6.md` test count updated separately under C2.
+
+## D78 — A1: the valuation decomposition regenerated at `o = 0` (`policy: start`) -- the reporting error nearly doubles, it does not vanish
+
+Date: 2026-09-02. Handout item A1. Branch: `main`. Command:
+
+    python scripts/minute_vs_slot_schedule.py --policy start --p-minutes 56
+
+against `configs/milp/baseline_d9_monolith.yaml` (baseline, Q = 2, T = 22, 30-minute slots).
+Both arms (A: slot master + slot recourse; B: slot master + minute recourse, same first stage)
+solved as monolithic MIPs to proven optimality (CPLEX `term=optimal`, `gap=0.0` on both).
+
+**First attempt was wrong and is recorded as a finding, not silently redone.** The script's
+`--p-minutes` has no default (`None`), so a first run without the flag silently used the
+config's native `p_min=1500`, not the handout's `p_minutes = 56`. That run showed `schedules
+identical: True` and a **zero** reporting/decision error -- which is exactly the "if it is not
+[positive], stop and report that" trip-wire A1 names. It was not a finding about the mechanism;
+it was a wrong instance. Re-run with `--p-minutes 56` explicit.
+
+**A's own decomposition** (what the slot model believes about its own schedule) was not printed
+by the script, so it was extracted separately by replicating the script's arm-A setup
+(`MonolithSolver` + `_prepare_params`, same config, same `p`) and calling
+`mobauto2_milp.app._maybe_print_summary` on the result: `wait_slots=185`, `penalty_pax=115`
+(unserved), `pax_served=185/300`, `Avg wait (min)=30.00` -- and `slot_objective_in_minutes`'s own
+rescaling rule (`docs/decisions.md` D50, multiply the whole slot objective by `slot_resolution`)
+gives `399.90666... * 30 = 11997.20` passenger-minutes as the claimed cost.
+
+**The triple, at `o = 0`, passenger-minutes, `p_minutes = 56`:**
+
+| | claimed (A's own belief) | true cost of A's schedule (priced at minute) | true cost of best schedule (B, priced at minute) |
+|---|---:|---:|---:|
+| cost | 11997.20 | 8596.0 | 8388.0 |
+| avg wait (min) | 30.00 | 13.93 | 15.94 |
+| unserved | 115 | 105 | 90 |
+
+**reporting_error = (11997.20 - 8596.0) / 8596.0 = 39.57%** (was 28.5% at `midpoint`).
+**decision_error = (8596.0 - 8388.0) / 8388.0 = 2.48%** (was 6.0% at `midpoint`).
+
+**Accept-test check.** Both solves proven optimal (not clock-truncated); costs share one stated
+rescaling (`slot_objective_in_minutes`, `x delta`); reporting error is positive -- the slot model
+still overvalues its own schedule at the committed departure instant, more so than the withdrawn
+`midpoint` figure suggested, not less. The mechanism of report §4.4.2 stands; it does not need
+restating.
+
+**What this does and does not settle.** It settles the headline triple report §4.4 leads with:
+at the schedule the master actually commits to (`o=0`), the reporting error is 39.6% and the
+decision error is 2.5%, both larger in the reporting-error case and smaller in the
+decision-error case than the withdrawn `midpoint` figures -- so the qualitative claim (the slot
+model materially overvalues its own schedule; a materially different schedule is available under
+minute-accurate valuation) survives the offset correction, with the two numbers moving in
+opposite directions. It does not test any Q, `p_minutes` or shape other than the one baseline
+instance -- that is A2's job -- and it does not re-derive `waiting_reported_min` from anything
+other than this run's own `_maybe_print_summary` output, which is a live computation from the
+solved model, not a stored constant, satisfying R8.
+
+**Record.** `scripts/report_figures/data/measurements.json -> valuation_decomposition`, values
+replaced, `instance` policy set to `start`; the prior `midpoint` values kept verbatim under a new
+`midpoint_counterfactual` key (not deleted -- the report's superseded-values table in §4.8 still
+refers to them).
