@@ -121,6 +121,11 @@ docs/HANDLER_CENSUS.md
 docs/SESSION_TOOLING.md
 docs/design.md
 docs/BENDERS_CORRECTION_PLAN.md
+# Research notes for the departure-placement investigation: in-flight reasoning,
+# a known-wrong charging rule and numbers explicitly marked as lower bounds. Same
+# rule as docs/HANDOUT.md -- it reaches the repo as a reviewed summary in
+# docs_decisions.md, never as the working document.
+docs/HANDOUT_PLACEMENT.md
 
 handout.md
 

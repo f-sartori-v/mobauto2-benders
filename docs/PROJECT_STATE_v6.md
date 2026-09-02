@@ -223,23 +223,33 @@ The four documents are genuinely absent from this repository — including
 
 ## 5. What is open
 
-Two levers, and one reading task (D69 §8: the two DDD papers in full). Everything else on the bound is closed **by
+One lever, and one reading task (D69 §8: the two DDD papers in full). Everything else on the bound is closed **by
 measurement** and must not be re-attempted: cumulative-prefix symmetry; `b >= L·yRET` (M1);
 branch-and-Benders-cut for the *lower* bound; tightening `per_iteration_mipgap`; the
 per-iteration time limit as a tuning knob; Dantzig–Wolfe on the vehicle index; window trip
 caps in the master; more master seconds; the down-set recourse cut; the per-vehicle trip cap
-(D68 §3); moving the battery block down (D68 §4).
+(D68 §3); moving the battery block down (D68 §4); **and now F2 (D74) — do not re-attempt at
+`cut_mode: dual` without first fixing the mechanism below.**
 
-**F2 — placement freedom in the subproblem, Design 3 only.** Fix an offset grid `O ⊂ [0,δ)`
-once at load, so candidate departure minutes are **constants**. One capacity row per slot,
-same count, same right-hand side, same dual as today, with `Y` in `b` only — **E2 holds by
-construction** and the cut machinery is untouched. It is a *relaxation* (two passengers on
-one physical departure may board at different candidate minutes), so `Q_relaxed ≤ Q_true`
-and a cut from it is a valid lower bound on `Q_true`; the **upper bound must not come from
-the relaxed model**. Two designs to refuse: a continuous offset as a variable (second-stage
-makes the recourse non-LP; first-stage puts a decision in `A`, which is D30 verbatim), and
-pre-enumerated minutes with binary selection (makes the second stage a MILP).
-*Prerequisite S3, the core-point projection, is done (D63).* **Not implemented.**
+**F2 — placement freedom in the subproblem, Design 3 only. Implemented and tested; ✅ closed,
+settled negatively (D74).** Fix an offset grid `O ⊂ [0,δ]` once at load, so candidate departure
+minutes are **constants** — `src/mobauto2_benders/minute_pricer.py`'s
+`solve_minute_recourse(..., placement_offsets=O)`, wired through `SPParams` and
+`configs/*.subproblem.placement_offsets`. One capacity row per slot, same count, same
+right-hand side, same dual as today — **E2 holds by construction**, verified by test — and it
+is a *relaxation* exactly as designed: `Q_relaxed ≤ Q_true`.
+
+**Measured against its own pre-stated falsifier and refuted, more sharply than "no
+improvement."** At a 15-iteration, non-clock-truncated (bit-reproducible) budget on the
+`rq5_benders_minute_p56` instance, offsets `{0, 15, 30}` against the single midpoint offset
+`{15}`: the lower bound is **25.9% WORSE** (143.09 vs 193.12), and it trails the baseline at
+**every** iteration from #3 onward, not only at the cutoff — `scripts/f2_placement_freedom_check.py`,
+full trajectory in D74. **Likely mechanism, not yet independently confirmed:** the added arcs
+make the recourse LP more degenerate, and `cut_mode: dual` (plain capacity duals, the only mode
+available for minute recourse — Magnanti–Wong selection is not implemented for it) has no
+Pareto-optimality correction for that degeneracy, so it picks weaker duals more often as the
+grid grows. **Do not re-attempt F2 without addressing that first** — extending MW to minute
+recourse is the natural next step if this lever is revisited, not a bigger offset grid.
 
 **Stabilisation, level method.** The one lever whose diagnosis matches the observed symptom:
 Benders iterations on a 150-cut master oscillate in **1064–1090 with no trend**, a spread the
@@ -248,11 +258,12 @@ the target `L = LB + λ(UB − LB)` needs only bounds the loop already tracks, w
 region needs a norm on binary schedules. **Run it under the Phase-5 gate**, so a
 stabilisation bug cannot be mistaken for a convergence result. **Not implemented.**
 
-**Falsifiers, fixed in advance.** F2 is refuted if cut strength at a fixed budget does not
-improve beyond noise. Stabilisation is refuted if the 1064–1090 band persists with no trend.
-And **any** bound work is refuted *as a method claim* if it stays an order of magnitude
-behind a monolith that solves the test point exactly in 947 s — a better Benders bound that
-is still far behind the monolith is a result about Benders, and must be reported as one.
+**Falsifiers, fixed in advance.** F2 was refuted if cut strength at a fixed budget did not
+improve beyond noise — it did worse than that (D74). Stabilisation is refuted if the
+1064–1090 band persists with no trend. And **any** bound work is refuted *as a method claim*
+if it stays an order of magnitude behind a monolith that solves the test point exactly in
+947 s — a better Benders bound that is still far behind the monolith is a result about
+Benders, and must be reported as one.
 
 Smaller open items: the θ`[ω,d]` cell and the anchor A/B (D64) — the anchor A/B has **no
 valid measurement**, 0.299 vs 0.314 is void and unreplaced; D42's margins need re-measuring

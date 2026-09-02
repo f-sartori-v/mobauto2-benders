@@ -6,8 +6,8 @@
     "the figure and nothing else; the scripts hold no numbers of their own."
   ],
   "bound_interval": {
-    "source": "docs/PROJECT_STATE_v6.md section 2, claim 2 (D56)",
-    "instance": "Q = 3, minute recourse, single-threaded, p_minutes = 56",
+    "source": "docs/docs_decisions.md D56 (PROJECT_STATE_v6 section 2 mislabels this row as Q=3)",
+    "instance": "Q = 2, T = 22, minute recourse, single-threaded, p_minutes = 56",
     "lower_bound": 219.74,
     "upper_bound": 299.37,
     "optimum": 293.37,

@@ -1,0 +1,100 @@
+# F2's falsifier, baseline arm. docs/PROJECT_STATE_v6.md section 5, scripts/f2_placement_freedom_check.py.
+#
+# Same instance and regime as configs/phase1/rq5_benders_minute_p56.yaml (slot first stage,
+# minute recourse, p_minutes = 56), but budgeted differently on purpose: RQ5 asks how far the
+# decomposition gets in a fixed WALL-CLOCK budget; this asks whether a cut set built with
+# placement freedom is stronger than one without it at a fixed ITERATION budget. Those are
+# different questions and need different budgets (BENDERS_SPEC_v4 section 0.10): an
+# iteration-budgeted, non-clock-truncated run is bit-reproducible, which is what lets a run-to-
+# run difference be attributed to the mechanism rather than to noise.
+#
+# max_iterations is low on purpose -- this is a falsifier check, not a convergence run.
+# total_time_limit_s is generous so the clock never binds first; check
+# clock_truncated_master_solves == 0 in the result before trusting any comparison.
+#
+# The offsets arm (check_offsets.yaml) is this file plus exactly one key:
+# subproblem.placement_offsets. Every other setting is identical, so any LB difference
+# between the two runs is attributable to that one key.
+
+schema:
+  name: mobauto2_benders_config
+  version: 2
+
+run:
+  name: f2_check_baseline
+  log_level: INFO
+  log_file: null
+  report_dir: null
+  seed: 42
+
+data:
+  demand_file: setups/base.yaml
+  scenario_files:
+  scenario_weights: null
+  R_out: null
+  R_ret: null
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0, 150.0, 150.0]
+    initial_actions: [IDL, IDL, IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+master:
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  recourse_lower_bound: false
+  per_iteration_time_limit_s: 120
+  per_iteration_mipgap: 0.05
+  cplex_options:
+    CPXPARAM_Preprocessing_Symmetry: 5
+    CPXPARAM_Threads: 1
+  solver_backend: cplex_direct
+  aggregate_cuts_by_tau: true
+  theta_per_scenario: false
+  cut_coeff_threshold: 0.001
+  write_lp_after_cut: false
+
+subproblem:
+  multi_cuts_by_scenario: false
+  use_magnanti_wong: false
+  mw_core_alpha: 0.3
+  use_dual_slopes: true
+  S: 15
+  Wmax_minutes: 60
+  p_minutes: 56.0
+  recourse_resolution: minute
+  departure_policy: midpoint
+  degenerate_cut_probe_top_k: 6
+  degenerate_cut_zero_tol: 1.0e-9
+
+solver:
+  # ITERATION-budgeted, not wall-clock-budgeted. This is the one number this file changes
+  # relative to rq5_benders_minute_p56.yaml's intent, alongside a generous time limit below.
+  max_iterations: 15
+  tolerance: 0.001
+  total_time_limit_s: 1800
+  stall_max_no_improve_iters: 0
+  stall_min_abs_improve: 1.0
+  stall_min_rel_improve: 0.002
+  master_solver: cplex
+  subproblem_solver: cplex_direct
+  solver_tee: false
+
+tolerances:
+  eps_bin: 1.0e-5
+  eps_feas: 1.0e-7
+  eps_cut: 1.0e-8
+  eps_hash: 1.0e-6
