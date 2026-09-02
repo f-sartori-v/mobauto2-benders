@@ -4565,3 +4565,60 @@ minute-optimal oracle baseline would narrow or widen the gap -- that remains ope
 this number existed only as report text, not in `measurements.json` -- itself a defect this
 step fixes). D70's midpoint numbers (10 413 / 10 324 / +0.9%) kept under a
 `midpoint_counterfactual` key.
+
+## D80 — A4: the penalty x window frontier regenerated at `o = 0`, main grid plus the Wmax=60 refinement, all 29 cells proven optimal
+
+Date: 2026-09-02. Handout item A4. Branch: `main`. Commands:
+
+    python scripts/sweep_penalty_window.py --policy start --p-minutes 14,28,56,112,224 --wmax 30,45,60,90,120 --Q 2
+    python scripts/sweep_penalty_window.py --policy start --p-minutes 28,35,42,49 --wmax 60 --Q 2
+
+Same instrument as D73 (`scripts/sweep_penalty_window.py`, unchanged), same instance
+(`setups/base.yaml`, Q=2, T=22, 30-minute slots, 300 requests), only the departure policy
+changes, `midpoint` (D73) to `start`. All 25 main-grid cells and all 4 refinement cells
+reported `status=ok term=optimal` -- 29/29 proven, none clock-truncated.
+
+**Served / total, minute-honest, at `o = 0`:**
+
+| Wmax | p=14 | p=28 | p=56 | p=112 | p=224 |
+|---:|---:|---:|---:|---:|---:|
+| 30 | 0/300 | 0/300 | 186/300 | 186/300 | 186/300 |
+| 45 | 0/300 | 0/300 | 191/300 | 198/300 | 198/300 |
+| 60 | 0/300 | 0/300 | 195/300 | 220/300 | 224/300 |
+| 90 | 0/300 | 0/300 | 194/300 | 228/300 | 232/300 |
+| 120 | 0/300 | 0/300 | 194/300 | 230/300 | 237/300 |
+
+**Total cost (passenger-minutes):**
+
+| Wmax | p=14 | p=28 | p=56 | p=112 | p=224 |
+|---:|---:|---:|---:|---:|---:|
+| 30 | 4200 | 8400 | 8639 | 15023 | 27791 |
+| 45 | 4200 | 8400 | 8549 | 14305 | 25729 |
+| 60 | 4200 | 8400 | 8596 | 12922 | 21584 |
+| 90 | 4200 | 8400 | 8527 | 12688 | 20387 |
+| 120 | 4200 | 8400 | 8596 | 12660 | 19936 |
+
+**The zero-service cliff survives the offset correction unchanged in shape: `p_minutes` 14 and
+28 still serve nobody, at every Wmax.** The R8 arithmetic check holds exactly at both:
+`total_cost = 300 x p_minutes` -- `300 x 14 = 4200` and `300 x 28 = 8400`, matched to the unit
+at all 10 cells (5 Wmax values x 2 penalties) in the main grid. This is the objective behaving
+as specified (rejecting everyone costs exactly `300 x p_minutes` and nothing else can beat that
+below the threshold), not a defect.
+
+**Refinement at Wmax=60:** `p_minutes` in {28, 35, 42, 49} serves {0, 187, 190, 192} of 300,
+cost {8400, 6244, 7089, 7852} -- the cliff sits between 28 and 35, same bracket D73 found at
+`midpoint`.
+
+**What this does and does not settle.** It settles the frontier report §4.5/4.6's operator-facing
+table should print at the committed departure instant. The magnitudes moved from D73's
+`midpoint` values (e.g. `p=56,Wmax=60`: 9326 -> 8596; `p=224,Wmax=120`: 20712 -> 19936) but the
+qualitative shape -- the cliff at `p_minutes` 14/28, the served counts rising with Wmax and p --
+is unchanged, and the cliff's location (28 to 35) is unchanged. It does not test any Q other
+than 2 (B5's job) and does not itself explain why the cliff sits exactly there (D73 already
+covers the mechanism).
+
+**Record.** `scripts/report_figures/data/measurements.json -> penalty_window_frontier`, values
+replaced, `instance` policy set to `start`, refinement block's `served` corrected to the `start`
+counts and a `total_cost`/`avg_wait_min` row added to it (D73 recorded `served` only). A new
+`zero_service_arithmetic_check` sub-block records the R8 recomputation explicitly. D73's
+`midpoint` values kept verbatim under a new `midpoint_counterfactual` key.

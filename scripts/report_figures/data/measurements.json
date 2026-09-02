@@ -138,38 +138,77 @@
     "multi_scenario_gain": 3.84
   },
   "penalty_window_frontier": {
-    "source": "docs/docs_decisions.md D73, scripts/sweep_penalty_window.py",
-    "instance": "setups/base.yaml, Q = 2, T = 22, 30-minute slots, midpoint policy, 300 requests",
+    "source": "docs/docs_decisions.md D80 (2026-09-02), scripts/sweep_penalty_window.py --policy start, all 25 + 4 cells proven optimal",
+    "instance": "setups/base.yaml, Q = 2, T = 22, 30-minute slots, policy = start, 300 requests",
     "unit": "passenger-minutes / passengers, every solve proven optimal, minute-honest pricing",
     "p_minutes_grid": [14, 28, 56, 112, 224],
     "wmax_grid": [30, 45, 60, 90, 120],
     "served": {
-      "30":  [0, 0, 171, 171, 171],
-      "45":  [0, 0, 184, 196, 196],
-      "60":  [0, 0, 187, 220, 221],
-      "90":  [0, 0, 188, 227, 233],
-      "120": [0, 0, 187, 229, 238]
+      "30":  [0, 0, 186, 186, 186],
+      "45":  [0, 0, 191, 198, 198],
+      "60":  [0, 0, 195, 220, 224],
+      "90":  [0, 0, 194, 228, 232],
+      "120": [0, 0, 194, 230, 237]
     },
     "avg_wait_min": {
-      "30":  [0.0, 0.0, 13.3, 13.3, 13.3],
-      "45":  [0.0, 0.0, 15.2, 18.1, 18.1],
-      "60":  [0.0, 0.0, 16.0, 20.8, 23.2],
-      "90":  [0.0, 0.0, 15.9, 22.4, 26.5],
-      "120": [0.0, 0.0, 16.0, 23.1, 28.7]
+      "30":  [0.0, 0.0, 12.1, 12.1, 12.1],
+      "45":  [0.0, 0.0, 12.8, 14.6, 14.6],
+      "60":  [0.0, 0.0, 13.9, 18.0, 20.4],
+      "90":  [0.0, 0.0, 13.4, 20.3, 22.2],
+      "120": [0.0, 0.0, 13.7, 21.0, 24.6]
     },
     "total_cost": {
-      "30":  [4200, 8400, 9494, 16718, 31166],
-      "45":  [4200, 8400, 9287, 15189, 26837],
-      "60":  [4200, 8400, 9326, 13525, 22816],
-      "90":  [4200, 8400, 9268, 13260, 21193],
-      "120": [4200, 8400, 9326, 13242, 20712]
+      "30":  [4200, 8400, 8639, 15023, 27791],
+      "45":  [4200, 8400, 8549, 14305, 25729],
+      "60":  [4200, 8400, 8596, 12922, 21584],
+      "90":  [4200, 8400, 8527, 12688, 20387],
+      "120": [4200, 8400, 8596, 12660, 19936]
     },
     "zero_service_threshold": {
       "wmax_minutes": 60,
       "comment": "Refinement sweep at Wmax=60 only, not part of the 5x5 grid above.",
       "p_minutes": [28, 35, 42, 49],
-      "served": [0, 173, 179, 183],
+      "served": [0, 187, 190, 192],
+      "avg_wait_min": [0.0, 12.2, 13.0, 13.3],
+      "total_cost": [8400, 6244, 7089, 7852],
       "bracket": "crosses from zero to positive service between p_minutes=28 and 35"
+    },
+    "zero_service_arithmetic_check": {
+      "comment": "R8 independent recomputation: every zero-service cell must satisfy total_cost == 300 * p_minutes exactly.",
+      "p14": "300*14=4200, matches",
+      "p28": "300*28=8400, matches"
+    },
+    "midpoint_counterfactual": {
+      "note": "D73 (2026-08-31), superseded by D76 (policy default is now start); kept because it is the number the report currently prints.",
+      "source": "docs/docs_decisions.md D73, scripts/sweep_penalty_window.py",
+      "instance": "setups/base.yaml, Q = 2, T = 22, 30-minute slots, midpoint policy, 300 requests",
+      "served": {
+        "30":  [0, 0, 171, 171, 171],
+        "45":  [0, 0, 184, 196, 196],
+        "60":  [0, 0, 187, 220, 221],
+        "90":  [0, 0, 188, 227, 233],
+        "120": [0, 0, 187, 229, 238]
+      },
+      "avg_wait_min": {
+        "30":  [0.0, 0.0, 13.3, 13.3, 13.3],
+        "45":  [0.0, 0.0, 15.2, 18.1, 18.1],
+        "60":  [0.0, 0.0, 16.0, 20.8, 23.2],
+        "90":  [0.0, 0.0, 15.9, 22.4, 26.5],
+        "120": [0.0, 0.0, 16.0, 23.1, 28.7]
+      },
+      "total_cost": {
+        "30":  [4200, 8400, 9494, 16718, 31166],
+        "45":  [4200, 8400, 9287, 15189, 26837],
+        "60":  [4200, 8400, 9326, 13525, 22816],
+        "90":  [4200, 8400, 9268, 13260, 21193],
+        "120": [4200, 8400, 9326, 13242, 20712]
+      },
+      "zero_service_threshold": {
+        "wmax_minutes": 60,
+        "p_minutes": [28, 35, 42, 49],
+        "served": [0, 173, 179, 183],
+        "bracket": "crosses from zero to positive service between p_minutes=28 and 35"
+      }
     }
   }
 }
