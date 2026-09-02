@@ -1,0 +1,62 @@
+# A3 (docs/FORWARD_PLAN_v1.md): the trial's declared service level, 450 passengers/day, over
+# up to 30 trips/day (report Section intro-corridor, deliverable 1.4.3). Every instance
+# reported elsewhere in this project runs 300-400 requests; this is the first at the
+# project's own declared target scale.
+#
+# Demand: setups/base_scale450.yaml, produced by scripts/scale_baseline_demand.py --
+# bootstrap-resampled from setups/base.yaml's own empirical arrival distribution at 1.5x
+# volume, so the temporal PROFILE (the 08:00 OUT peak, the 16:00 RET peak) is unchanged and
+# only the volume moves.
+#
+# Q is set by scripts/sweep_target_scale.py per run; the value below is a placeholder.
+# p_minutes = 56, matching the operator's own indifference (D53) -- the regime every other
+# current-generation result in this project uses.
+
+schema:
+  name: mobauto2_milp_config
+  version: 3
+
+run:
+  name: target_scale450_monolith
+  log_level: INFO
+  seed: 42
+
+data:
+  scenario_files: [setups/base_scale450.yaml]
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0]
+    initial_actions: [IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+milp:
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  solve_time_limit_s: 1800
+  mipgap: 1.0e-6
+  solver_backend: cplex
+  cplex_options:
+    CPXPARAM_MIP_Strategy_Symmetry: 5
+    CPXPARAM_Threads: 1
+
+service:
+  S: 15
+  Wmax_minutes: 60
+  p_minutes: 56.0
+  fill_first_epsilon: 0.0
+
+solver:
+  solver_tee: false

@@ -73,7 +73,16 @@ bar as every other figure in the report.
 `scripts/sweep_multiresolution.py`; a figure script under `scripts/report_figures/`; a
 `data/measurements.json` entry.
 
-### A3. Validate at the official target service level (450 passengers/day, 30 trips/day)
+### A3. Validate at the official target service level (450 passengers/day, 30 trips/day) — ✅ done, D75
+
+No fleet size in `{2, 3, 4}` meets both halves of the declared service level at once: `450 / 30
+= 15.0`, exactly `S` (the seat count), so meeting both requires every trip at 100% capacity
+with zero slack — and every tested `Q` falls well short (51.6–59.7% of capacity per trip,
+falling as `Q` grows). `Q=2` (24 trips) is the largest fleet that fits the 30-trip ceiling, and
+it serves 47.8% of the 450-passenger target. See `docs_decisions.md` D75 for the full table,
+`setups/base_scale450.yaml` and `scripts/sweep_target_scale.py`. Not tested: `Q=1` or `Q>=5`
+(qualitative picture already clear from three points spanning the ceiling), and whether a
+different demand shape at 450 total eases the tension.
 
 **What.** Build an instance at the declared trial scale and run the fleet sweep against it.
 
