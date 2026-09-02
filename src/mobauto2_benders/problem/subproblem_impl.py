@@ -1142,7 +1142,7 @@ class ProblemSubproblem(Subproblem):
                     ),
                     Wmax_minutes=params.get("Wmax_minutes"),
                     departure_policy=str(
-                        params.get("departure_policy", "midpoint")
+                        params.get("departure_policy", "start")
                     ),
                     placement_offsets=params.get("placement_offsets"),
                     request_minutes=_minutes_for(s),
@@ -1997,7 +1997,7 @@ class ProblemSubproblem(Subproblem):
                 solve_time_limit_s=params.get("solve_time_limit_s"),
                 recourse_resolution=str(params.get("recourse_resolution", "slot")),
                 Wmax_minutes=params.get("Wmax_minutes"),
-                departure_policy=str(params.get("departure_policy", "midpoint")),
+                departure_policy=str(params.get("departure_policy", "start")),
                 placement_offsets=params.get("placement_offsets"),
                 request_minutes=_minutes_for(single_demand_source),
             )
@@ -2648,8 +2648,10 @@ class SPParams:
     # cut the master receives is the same object either way.
     recourse_resolution: str = "slot"
     Wmax_minutes: float | None = None
-    departure_policy: str = "midpoint"
-    # F2 (docs/PROJECT_STATE_v6.md section 5). None keeps today's single-offset model.
+    # "start" prices what the schedule's own t+1 commitment actually does (D76).
+    departure_policy: str = "start"
+    # F2 (docs/PROJECT_STATE_v6.md section 5, D76). None keeps today's single-offset
+    # model. A grid, when given, should be anticipate-only (O subset [-delta, 0]).
     placement_offsets: list[float] | None = None
     request_minutes: dict | None = None
 

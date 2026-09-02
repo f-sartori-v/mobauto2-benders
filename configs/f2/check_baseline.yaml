@@ -76,7 +76,7 @@ subproblem:
   Wmax_minutes: 60
   p_minutes: 56.0
   recourse_resolution: minute
-  departure_policy: midpoint
+  departure_policy: start
   degenerate_cut_probe_top_k: 6
   degenerate_cut_zero_tol: 1.0e-9
 

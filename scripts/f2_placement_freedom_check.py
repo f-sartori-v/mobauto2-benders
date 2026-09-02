@@ -3,12 +3,19 @@
     python scripts/f2_placement_freedom_check.py
 
 THE CLAIM UNDER TEST (docs/PROJECT_STATE_v6.md section 5, F2). A fixed offset grid
-`O subset [0, delta]`, chosen once at load, lets the minute recourse treat a departure as
-reachable at any minute in `O` rather than only at `departure_policy`'s single instant. It
+`O subset [-delta, delta]`, chosen once at load, lets the minute recourse treat a departure
+as reachable at any minute in `O` rather than only at `departure_policy`'s single instant. It
 is a RELAXATION (Q_relaxed <= Q_true), so a cut derived from it is a valid lower bound, and
 the design's whole point is that it might be a TIGHTER one -- more of the arc set the true
 minute-level problem has, without adding a single row to the master or changing the cut
 interface.
+
+D76 CORRECTION. The original run of this falsifier (D74) used `departure_policy: midpoint`
+and a positive-direction grid `[0, 15, 30]` -- both since found to price a schedule that
+departs later than the master ever committed to (tau*delta is the master's own committed
+instant, not the low end of a free window; see minute_pricer.py's `DeparturePolicy`
+comment). The configs now use `departure_policy: start` and the anticipate-only grid
+`[-30, -15, 0]`, so this is a genuine re-measurement, not a rerun of D74's own numbers.
 
 THE FALSIFIER, STATED IN ADVANCE, before this ran: settled negatively if cut strength at a
 fixed budget does not improve beyond run-to-run noise.

@@ -52,7 +52,7 @@ def _schedule(model) -> dict[str, list[int]]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
-        "--policy", choices=("start", "midpoint", "end"), default="midpoint",
+        "--policy", choices=("start", "midpoint", "end"), default="start",
         help="Where inside its slot a departure is assumed to leave. A modelling "
              "assumption, not a fact -- both are worth reporting.",
     )

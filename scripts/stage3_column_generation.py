@@ -379,7 +379,7 @@ def compact_root(config: str, p_minutes: float, policy: str) -> tuple[float, flo
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default=VALIDATE_CONFIG)
-    ap.add_argument("--policy", default="midpoint")
+    ap.add_argument("--policy", default="start")
     ap.add_argument("--p-minutes", type=float, default=56.0)
     ap.add_argument("--max-iters", type=int, default=2000)
     ap.add_argument("--time-limit", type=float, default=None,

@@ -37,7 +37,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--Q", type=int, default=2)
     ap.add_argument("--outer-time-limit", type=float, default=10800.0)
-    ap.add_argument("--policy", default="end")
+    ap.add_argument("--policy", default="start")
     args = ap.parse_args()
 
     from mobauto2_milp.config import load_config

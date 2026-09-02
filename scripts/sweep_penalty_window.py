@@ -102,7 +102,7 @@ def main() -> int:
     ap.add_argument("--wmax", default=",".join(str(v) for v in DEFAULT_WMAX))
     ap.add_argument("--slot", type=int, default=None)
     ap.add_argument("--Q", type=int, default=None)
-    ap.add_argument("--policy", choices=("start", "midpoint", "end"), default="midpoint")
+    ap.add_argument("--policy", choices=("start", "midpoint", "end"), default="start")
     args = ap.parse_args()
 
     from mobauto2_benders.minute_pricer import load_request_minutes, price_schedule_at_minutes

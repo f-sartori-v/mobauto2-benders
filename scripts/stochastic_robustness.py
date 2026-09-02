@@ -118,7 +118,7 @@ def main() -> int:
     ap.add_argument("--slot", type=int, default=None, help="Slot width in minutes; default from the base config.")
     ap.add_argument("--Q", type=int, default=None, help="Fleet size; default from the base config (2).")
     ap.add_argument("--p-minutes", type=float, default=56.0)
-    ap.add_argument("--policy", choices=("start", "midpoint", "end"), default="midpoint")
+    ap.add_argument("--policy", choices=("start", "midpoint", "end"), default="start")
     args = ap.parse_args()
 
     from mobauto2_benders.minute_pricer import load_request_minutes, price_schedule_at_minutes

@@ -44,12 +44,16 @@ def wmax_minutes_to_slots(wmax_minutes: float, slot_resolution: int) -> int:
     work introduces.
 
     NOTE what this does and does not guarantee. It bounds the wait measured from the
-    START of the arrival slot to the START of the departure slot. A passenger arriving
-    mid-slot waits less; a departure placed mid-slot (the midpoint convention of the
-    research note) adds up to half a slot, which can push the true wait past the cap
-    again -- at 30-minute slots, up to 75 minutes against a stated 60. That is a
-    property of the slot ABSTRACTION, not of this conversion, and it is why
-    `minute_pricer` enforces the real cap in minutes when it prices a schedule.
+    START of the arrival slot to the START of the departure slot -- which is exactly what
+    `minute_pricer`'s default (`start`, D76) prices, since the departure's own committed
+    instant IS its slot's start (D7/D8's t+1 rule). A passenger arriving mid-slot waits
+    less than this bound, never more, under that convention. The risk described in the
+    original note here -- a departure ASSUMED to leave mid-slot or later (the `midpoint`/
+    `end` counterfactuals) adding up to half a slot and pushing the true wait past the cap
+    (at 30-minute slots, up to 75 minutes against a stated 60) -- only arises if one of
+    those counterfactuals is deliberately selected; it is not a property of the default
+    path. `minute_pricer` still enforces the real cap in minutes whenever it prices a
+    schedule, regardless of which convention is asked for.
     """
     import math as _math
 
