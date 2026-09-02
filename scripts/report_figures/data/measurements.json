@@ -51,6 +51,27 @@
       ]
     }
   },
+  "hedging": {
+    "source": "docs/docs_decisions.md D79 (2026-09-02), scripts/stochastic_robustness.py --Q 2 --p-minutes 56 --policy start, five monolithic solves all proven optimal",
+    "instance": "Q = 2, p_minutes = 56, policy = start, four scenarios weight 0.25 each",
+    "unit": "passenger-minutes",
+    "scenarios": {
+      "base": {"hedged_cost": 8414, "oracle_cost": 8596, "gap_pct": -2.1, "hedged_unserved": 98, "oracle_unserved": 105},
+      "temporal_noise": {"hedged_cost": 8678, "oracle_cost": 8496, "gap_pct": 2.1, "hedged_unserved": 103, "oracle_unserved": 90},
+      "return_peak_advanced": {"hedged_cost": 9848, "oracle_cost": 9196, "gap_pct": 7.1, "hedged_unserved": 129, "oracle_unserved": 117},
+      "midday_surge": {"hedged_cost": 12291, "oracle_cost": 12132, "gap_pct": 1.3, "hedged_unserved": 166, "oracle_unserved": 167}
+    },
+    "weighted_mean_hedged_cost": 9808,
+    "weighted_mean_oracle_cost": 9605,
+    "weighted_mean_gap_pct": 2.1,
+    "note": "Per-scenario oracle baselines are slot-optimal schedules, so each carries its own unmeasured decision error (see valuation_decomposition); this is not upgraded to a minute-optimal per-scenario baseline here (that would be a separate measurement and D-number).",
+    "midpoint_counterfactual": {
+      "note": "D70 (2026-08-30), superseded by D76 (policy default is now start); kept because it is the number the report currently prints.",
+      "weighted_mean_hedged_cost": 10413,
+      "weighted_mean_oracle_cost": 10324,
+      "weighted_mean_gap_pct": 0.9
+    }
+  },
   "multiresolution_gain": {
     "source": "docs/RESEARCH_NOTE_v2.md section 2.2 (D54, D55)",
     "instance": "Q = 2, p_minutes = 56, de-aligned generated shapes, every solve proven optimal",

@@ -4524,3 +4524,44 @@ solved model, not a stored constant, satisfying R8.
 replaced, `instance` policy set to `start`; the prior `midpoint` values kept verbatim under a new
 `midpoint_counterfactual` key (not deleted -- the report's superseded-values table in §4.8 still
 refers to them).
+
+## D79 — A3: the hedging comparison regenerated at `o = 0`, and given a `measurements.json` entry for the first time
+
+Date: 2026-09-02. Handout item A3. Branch: `main`. Command:
+
+    python scripts/stochastic_robustness.py --Q 2 --p-minutes 56 --policy start
+
+Same instrument as D70 (`scripts/stochastic_robustness.py`, unchanged this run), same four
+scenarios at weight 0.25 each (`base`, `temporal_noise`, `return_peak_advanced`,
+`midday_surge`), same Q=2 / p_minutes=56 regime. Only the departure policy changes, `midpoint`
+(D70) to `start`. All five monolithic solves (one hedged, four oracle) terminated on the MIP
+gap, proven optimal.
+
+| Scenario | hedged (pax-min) | oracle (pax-min) | gap | hedged unserved | oracle unserved |
+|---|---:|---:|---:|---:|---:|
+| base | 8 414 | 8 596 | -2.1% | 98 | 105 |
+| temporal_noise | 8 678 | 8 496 | +2.1% | 103 | 90 |
+| return_peak_advanced | 9 848 | 9 196 | +7.1% | 129 | 117 |
+| midday_surge | 12 291 | 12 132 | +1.3% | 166 | 167 |
+| **AVERAGED (weight 0.25 each)** | **9 808** | **9 605** | **+2.1%** | | |
+
+**The headline number moves from 0.9% (D70, `midpoint`) to 2.1% (`start`).** The same caveat
+D70 flagged still applies and is worth re-stating rather than re-discovering: every oracle here
+is a **slot**-optimal schedule for its own scenario, so each carries its own unmeasured decision
+error (A1/D78 measured exactly this kind of gap at 39.6% for the baseline schedule) -- a
+genuinely minute-optimal per-scenario oracle would be a tighter, separate measurement, not built
+here, per the handout's explicit instruction not to quietly upgrade this comparison.
+
+**Accept-test check.** All five solves proven optimal (gap=0.0 on each); the weighted mean is
+computed over the same four 0.25 weights the report states (equal weights, so AVERAGED is the
+plain mean of the four per-scenario cells, matching the script's own arithmetic).
+
+**What this does and does not settle.** It settles the number report §4.5/4.6 should print at
+the committed departure instant: 2.1%, not 0.9%. Both point the same qualitative direction
+(hedging carries a small but real cost, single-digit per cent) and neither settles whether a
+minute-optimal oracle baseline would narrow or widen the gap -- that remains open, as before.
+
+**Record.** `scripts/report_figures/data/measurements.json -> hedging`, new block (previously
+this number existed only as report text, not in `measurements.json` -- itself a defect this
+step fixes). D70's midpoint numbers (10 413 / 10 324 / +0.9%) kept under a
+`midpoint_counterfactual` key.
