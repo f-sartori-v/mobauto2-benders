@@ -74,6 +74,25 @@ class TestConfigSchema(unittest.TestCase):
         cfg = load_cfg("baseline_d9.yaml")
         self.assertIsNotNone(cfg.model.costs.concurrency_penalty)
 
+    def test_delta_chg_recomputes_after_a_slot_resolution_override(self):
+        """R6 (handout C6, 2026-09-02): delta_chg is evaluated once at config load
+        for that config's own slot_resolution. Any script that overrides
+        slot_resolution (a multi-resolution sweep, e.g.) must call
+        _energy_params_for_resolution afterwards or every delta != the config's own
+        30 keeps charging at the 30-minute rate -- 2x too fast at delta=15, 3x at
+        delta=10. This defect invalidated 80 of 120 cells once already; this test
+        makes the recompute a checked contract rather than a convention scripts must
+        remember.
+        """
+        from mobauto2_benders.app import _energy_params_for_resolution
+
+        cfg = load_cfg("baseline_d9.yaml")
+        expected = {30: 35.00, 15: 17.50, 10: 11.67, 1: 1.17}
+        for delta, want in expected.items():
+            with self.subTest(slot_resolution=delta):
+                got = float(_energy_params_for_resolution(cfg, delta)["delta_chg"])
+                self.assertAlmostEqual(got, want, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

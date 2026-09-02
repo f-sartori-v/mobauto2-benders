@@ -4691,3 +4691,68 @@ settle the `Q x delta` factorial (B5) or extend past `Q = 2`.
 (kept, not deleted). A `start_zero_gain_cells` note records the investigation above so a future
 reader does not have to re-derive it. `sweep_multiresolution.py`'s `--policies` default and help
 text corrected in the same commit as the code fix, separately from this measurement per R10.
+
+## D82 — Track C: documentation and repository hygiene, six items
+
+Date: 2026-09-02. Handout Track C, items C1-C6. Branch: `main`. Bundled into one entry and one
+commit -- each item is a small, independent, non-conflicting edit to tracked docs or tests, and
+the handout's own §7 checklist reports them as one track.
+
+**C1 -- `PROJECT_STATE_v6.md` mislabels D56's smallest instance as `Q=3`.** D56 is `Q=2, T=22`
+(quoted verbatim in D56 itself: "baseline_d9, Q=2, T=22, 30-minute slots"). Fixed in
+`PROJECT_STATE_v6.md` §Claim 2's table. The same mislabel was also found, independently, in
+`docs/BENDERS_CORRECTION_PLAN.md` (not named by the handout, but the same root cause, same
+fix) -- confirmed absent from the report itself (`8_Deliver/`), so this had not yet propagated
+there a second time.
+
+**C2 -- stale test counts.** `README.md`, `docs/PROJECT_STATE_v6.md` and
+`docs/BENDERS_SPEC_v4.md` said 276 (or, in `PROJECT_STATE_v6.md`, "267 passed, 9 skipped").
+Updated to the count Step 0 (D77) actually measured, and again here after C6 added one more
+test: **295 passed, 0 skipped under the commercial backend.** `PROJECT_STATE_v6.md`'s skip
+count is now stated per-backend rather than as one bare number, since "9 skipped" described the
+open (HiGHS) backend, untested in this session (no `highspy` in the p310 venv) -- left as the
+handout's own qualitative description (CPLEX-specific machinery, no formulation invariant among
+them, D67) rather than asserting an unverified number. `BENDERS_SPEC_v4.md` §5's separate "49
+tests" line was left alone: it is a historical snapshot from the v3-to-v4 transition, not a
+running count, and changing it would misstate history rather than correct it.
+
+**C3 -- spec says `ceil`, code uses `floor`.** `BENDERS_SPEC_v4.md` §2.5 stated
+`W_slots = ceil(W_max_min/delta)`; `wmax_minutes_to_slots` (`subproblem_impl.py`) computes it by
+`floor`, deliberately, with a test (`test_fast_config.TestWmaxIsNeverRoundedUp`) pinning the
+reason -- `ceil` grants MORE waiting than the config asked for. Spec corrected to match the
+code, with the reasoning stated inline.
+
+**C4 -- the spec's Magnanti-Wong section still described the pre-D30 layered recourse in the
+formulation it labelled "the corrected one".** Three spots in section 2.6's default MW path
+(`docs/BENDERS_SPEC_v4.md`) carried the layer index `k` -- `pi_d[tau,k]`, `x[t,tau,k]`,
+`fill_eps*k`, `Sigma_k` -- even though section 2.5 (a few lines above) already documents the
+model as de-layered since D30, and `solve_mw_dual` (`subproblem_impl.py`) has never had a `k`
+index: its duals are declared over slots alone and its dual-feasibility row carries no
+`fill_eps` term. Rewrote the dual-feasibility system, the optimal-face inequality, the Pareto
+objective, and the "duals used for the cut" formula to match the actual (de-layered) code
+exactly, and removed a footnote ("the Sigma_k is gone") that only made sense next to the old,
+now-removed formula. The historical mentions of the layered form and v3's wrong sign (sections
+2.5's own explanation of why layers were removed, and 2.6's "correction to v3" note) were left
+as-is -- they are correctly framed as history, not as the current model.
+
+**C5 -- swept `configs/` for a shipped config still defaulting to a counterfactual offset.**
+`grep -rl "departure_policy:\s*midpoint\|departure_policy:\s*end" configs/` returned nothing;
+every config that sets the key explicitly already says `start` (D76's own commit updated them).
+`configs/f2/check_offsets.yaml`'s placement-offset grid is already the corrected anticipate-only
+`[-30, -15, 0]` (D76), not a forward grid. No change needed; nothing to fix.
+
+**C6 -- regression test for the R6 `delta_chg` recompute.** Added
+`test_delta_chg_recomputes_after_a_slot_resolution_override` to `tests/test_fast_config.py`:
+builds `_energy_params_for_resolution` at delta in {30, 15, 10, 1} against the tracked
+`baseline_d9.yaml` and asserts 35.00 / 17.50 / 11.67 / 1.17, matching R6's own assertion (and
+Step 0's, D77) exactly. This was previously a convention scripts had to remember; it is now
+checked on every run of the suite. Full suite re-run after adding it: **295 tests, all
+passing**, in 60.0s.
+
+**What this does and does not settle.** All six items close as specified in the handout's §7
+checklist. It does not touch the report itself -- none of these six is a quantitative claim, so
+none feeds `measurements.json` (per R10, only Track A/B measurements do).
+
+**Record.** `docs/PROJECT_STATE_v6.md`, `docs/BENDERS_CORRECTION_PLAN.md`,
+`docs/BENDERS_SPEC_v4.md`, `README.md`, `tests/test_fast_config.py`. No `measurements.json`
+entry.

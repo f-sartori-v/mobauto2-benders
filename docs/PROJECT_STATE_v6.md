@@ -52,10 +52,12 @@ contribution is the third, and it needs the first but not the second.
   under it** to two decimals. Agreement across two independent implementations *and* two
   independent solvers rules out a CPLEX-specific artefact.
 - Exactness conditions **E1–E4 are tests, not assumptions**.
-- **267 passed, 9 skipped** (D71 added 4 for the runtime-split instrumentation below; D72
-  added 4 more for the minute-departure validator). The 9 are CPLEX-specific machinery (the
-  branch-and-cut callback, `CPXPARAM_*` name resolution); no formulation invariant is among
-  them.
+- **295 passed, 0 skipped**, under the commercial (CPLEX) backend (D71 added 4 for the
+  runtime-split instrumentation below; D72 added 4 more for the minute-departure validator;
+  D76 added 3 more for the anticipation-only offset grid; D82 added 1 regression test for
+  the delta_chg recompute, R6). Under the open backend (HiGHS) a small number are expected
+  to skip -- CPLEX-specific machinery, the branch-and-cut callback and `CPXPARAM_*` name
+  resolution; no formulation invariant is among them (D67).
 
 *Caveats that must travel with claim 1:* every `mw`-labelled number written before D61
 predates the Magnanti–Wong guard fix; D42's dominance margins are withdrawn and unreplaced
@@ -65,7 +67,7 @@ predates the Magnanti–Wong guard fix; D42's dominance margins are withdrawn an
 
 | Measurement | Decomposition | Direct solve |
 |---|---|---|
-| Q=3, minute recourse (D56) | LB 219.74 / UB 299.37, 27% gap, **301.4 s** | minute monolith **293.37, proven optimal, 0.8 s** |
+| Q=2, T=22, minute recourse (D56) | LB 219.74 / UB 299.37, 27% gap, **301.4 s** | minute monolith **293.37, proven optimal, 0.8 s** |
 | Dantzig–Wolfe root, Q=3–5 (D57/D58) | 61–75% of optimum, 50–208 s | CPLEX's own root: **95–96%, 9–15 s** (D60) |
 | Q=3 slot model | **1148.65**, a 46% internal gap, 1520 s — **69.2% of the optimum** | **optimal 1658.86 in 947 s** (D50) |
 

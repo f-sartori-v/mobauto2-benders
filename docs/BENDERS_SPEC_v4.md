@@ -44,10 +44,10 @@ must be produced on the corrected model.
    nodes explored in those seconds depend on machine load (§0.10, D26). The manifest
    therefore records **whether** a run was reproducible rather than asserting that it
    was: `reproducibility.bit_reproducible` and the count behind it.
-5. Every claim in the paper has a test. **Implemented** — 276 tests (D68, D71, D72),
+5. Every claim in the paper has a test. **Implemented** — 295 tests (D68, D71, D72, D76, D82),
    `python -m unittest discover -s tests`. The count stood at 59 when this line was
-   written, at 196 at D62 and at 248 at D65; it is restated here rather than left to
-   drift. Of those, 63 were CPLEX-gated and skipped themselves on any checkout without
+   written, at 196 at D62, at 248 at D65, at 276 at D71/D72, and at 294 at D76; it is
+   restated here rather than left to drift. Of those, 63 were CPLEX-gated and skipped themselves on any checkout without
    a licence; since D67 they run on HiGHS too, and 9 CPLEX-specific tests remain gated.
 6. Gapped runs never reported as optima without a marker. **Tested**
    (`test_gapped_run_is_not_reported_as_optimal`).
@@ -165,7 +165,13 @@ conflated with it (D4). Kept per D18.
 ### 2.5 Subproblem — slot-only, **de-layered (D30, this is a model change)**
 
 ```
-Arcs[d] = { (t,τ) : t+1 <= τ <= min(T-1, t + W_slots) },  W_slots = ceil(W_max_min/δ)
+Arcs[d] = { (t,τ) : t+1 <= τ <= min(T-1, t + W_slots) },  W_slots = floor(W_max_min/δ)
+
+**`floor`, not `ceil`.** `wmax_minutes_to_slots` (`subproblem_impl.py`) computes this
+deliberately by `floor`, with a test pinning the reason: `ceil` would grant MORE waiting
+than the config asked for -- e.g. `Wmax_minutes=60, δ=45` would round a passenger's
+allowance up to 2 slots (90 min) instead of the 1 slot (45 min) the config actually states.
+This section previously said `ceil`; corrected (handout C3, 2026-09-02).
 
 min  Σ_d Σ_{(t,τ)∈Arcs[d]} (τ-t) · x_d[t,τ]  +  p · Σ_d Σ_t u_d[t]
 
@@ -211,7 +217,7 @@ what `solve_mw_dual` implemented, and it made the MW LP unbounded (`AUDIT_v4` C3
 **Duals used for the cut:**
 
 ```
-pi_OUT[τ] = Σ_k π_OUT[τ,k]      pi_RET[τ] = Σ_k π_RET[τ,k]     # per-slot, summed over layers
+pi_OUT[τ], pi_RET[τ]     # one per slot, read directly from m.dual -- no layers to sum over
 ```
 
 Never indexed by `q`. This is what makes the master's per-slot cut aggregation valid.
@@ -224,19 +230,27 @@ Never indexed by `q`. This is what makes the master's per-slot cut aggregation v
 below is the corrected one**; v3 described the broken version.
 
 ```
-variables:  α_d[t] free,  π_d[τ,k] <= 0
+variables:  α_d[t] free,  π_d[τ] <= 0
 
 dual feasibility, one constraint per primal variable:
-    from x[t,τ,k]:   α_d[t] + π_d[τ,k] <= (τ-t) + fill_eps·k
-    from u[t]:       α_d[t]            <= p
+    from x[t,τ]:   α_d[t] + π_d[τ] <= (τ-t)
+    from u[t]:     α_d[t]          <= p
 
 optimal face (weak duality gives dual_obj <= ub_base):
-    Σ_t R_d[t]·α_d[t] + Σ_{τ,k} cap_d[τ,k]·π_d[τ,k]  >=  ub_base − tol
+    Σ_t R_d[t]·α_d[t] + Σ_τ cap_d[τ]·π_d[τ]  >=  ub_base − tol
 
 objective (Pareto selection at the core point Ȳ):
-    max  Σ_τ (S·Ȳ_out[τ] − C_out[τ]) · Σ_k π_OUT[τ,k]
-       + Σ_τ (S·Ȳ_ret[τ] − C_ret[τ]) · Σ_k π_RET[τ,k]
+    max  Σ_τ (S·Ȳ_out[τ] − C_out[τ]) · π_OUT[τ]
+       + Σ_τ (S·Ȳ_ret[τ] − C_ret[τ]) · π_RET[τ]
 ```
+
+**De-layered throughout (§2.5, D30) -- corrected here (handout C4, 2026-09-02).** This
+formulation previously carried the pre-D30 layer index `k` (`π_d[τ,k]`, `x[t,τ,k]`,
+`fill_eps·k`, `Σ_k`) even though it was introduced as "the corrected one" replacing v3's
+broken sign convention; §2.5 had already removed layers from the primal, and
+`solve_mw_dual` (`subproblem_impl.py`) has never had a `k` index -- its `pi_OUT`/`pi_RET`
+are declared over slots alone, and its dual-feasibility row is `a[t] + pi[tau] <=
+max(0, tau-t)`, no `fill_eps` term. The formulas above now match that code exactly.
 
 Three points that v3 got wrong or omitted:
 
@@ -260,9 +274,9 @@ dm_out[τ] = S · π_OUT[τ]                (<= 0)
 coeff_yOUT[(q,τ)] = dm_out[τ]  for every q      # identical across q by construction
 ```
 
-The `Σ_k` is gone: there are no layers (§2.5), so there is one `π` per slot. The broadcast
-is `expand_slopes_to_candidate`, extracted because this block had been written out four
-times and a fix to one copy left the others generating the old cut.
+One `π` per slot (no layers, §2.5). The broadcast is `expand_slopes_to_candidate`,
+extracted because this block had been written out four times and a fix to one copy left
+the others generating the old cut.
 
 **Intercept — derived, not imposed (S2).**
 
