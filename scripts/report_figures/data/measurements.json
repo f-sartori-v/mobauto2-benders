@@ -5,6 +5,35 @@
     "traced back without opening the plotting code. Editing a number here changes",
     "the figure and nothing else; the scripts hold no numbers of their own."
   ],
+  "runtime_split": {
+    "source": "docs/docs_decisions.md D83 (2026-09-02), a standard Benders loop (configs/baseline_d9.yaml) with run.emit_reports=true, reading BendersRunResult / manifest['runtime'] (D71 instrumentation)",
+    "instance": "baseline_d9.yaml, Q = 2, T = 22, p = 50 slot units (1500 pax-min regime), slot recourse, 10 iterations (this config's own fixed regression budget), single-threaded",
+    "note": "supersedes nothing quotable -- the earlier 'master ~85.7% of runtime' figure was already withdrawn (PROJECT_STATE_v6 Sec 3, D71) and is not re-derived or refuted here; this is instrumentation exercised on a real run for the first time, not a like-for-like re-measurement of that withdrawn number.",
+    "unit": "seconds unless stated",
+    "total_wall_time_s": 79.4767,
+    "total_master_time_s": 77.6038,
+    "total_sp_solve_time_s": 0.3962,
+    "total_cutgen_time_s": 0.3043,
+    "total_cutadd_time_s": 0.0205,
+    "model_management_overhead_s": 1.1723,
+    "reconciliation_formula": "total_master_time_s + total_sp_solve_time_s + total_cutgen_time_s + model_management_overhead_s == total_wall_time_s",
+    "reconciliation_residual": 0.0,
+    "cutadd_note": "total_cutadd_time_s is tracked separately and is NOT one of the four terms the reconciliation above sums (it is small, 0.03% of wall time, and already inside model_management_overhead_s) -- matches the exact formula BendersRunResult's own tests assert (test_overhead_reconciles_the_split_to_the_wall_time).",
+    "pct_of_wall": {
+      "master": 97.64,
+      "sp_solve": 0.50,
+      "cutgen": 0.38,
+      "cutadd": 0.03,
+      "overhead": 1.47
+    },
+    "time_to_first_feasible_s": 0.294,
+    "distance_to_known_optimum_at_run_end": {
+      "known_optimum": 4183.24,
+      "run_end_incumbent": 4291.24,
+      "gap_pct": 2.58,
+      "note": "single end-of-run data point, not a time-to-threshold curve. B3's other half (time to within a fixed threshold of the optimum, over the run) is NOT implemented: no per-iteration timestamped incumbent trace exists in BendersRunResult or the manifest, only the final best_lower_bound/best_upper_bound. Restated, not newly discovered -- D71 already named this gap. Building that trace would be a code change out of this handout's scope."
+    }
+  },
   "bound_interval": {
     "source": "docs/docs_decisions.md D56 (PROJECT_STATE_v6 section 2 mislabels this row as Q=3)",
     "instance": "Q = 2, T = 22, minute recourse, single-threaded, p_minutes = 56",

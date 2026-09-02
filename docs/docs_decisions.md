@@ -4756,3 +4756,56 @@ none feeds `measurements.json` (per R10, only Track A/B measurements do).
 **Record.** `docs/PROJECT_STATE_v6.md`, `docs/BENDERS_CORRECTION_PLAN.md`,
 `docs/BENDERS_SPEC_v4.md`, `README.md`, `tests/test_fast_config.py`. No `measurements.json`
 entry.
+
+## D83 — B3: Comparison A's runtime split and time-to-first-feasible, run for the first time (D71 built the instrumentation, no run ever read it)
+
+Date: 2026-09-02. Handout item B3. Branch: `main`. Ran a standard Benders loop,
+`configs/baseline_d9.yaml` (Q=2, T=22, p=50 slot units -- the 1500 pax-min regime, slot
+recourse, single-threaded, this config's own fixed 10-iteration regression budget), with
+`run.emit_reports=true` via the `app.run` overrides dict, and read `BendersRunResult` plus
+`build_manifest`'s `"runtime"` section -- exactly what D71 built and, per its own text, never
+exercised on a real run.
+
+**The split, wall time 79.4767 s:**
+
+| component | seconds | % of wall |
+|---|---:|---:|
+| master | 77.6038 | 97.64% |
+| subproblem solve | 0.3962 | 0.50% |
+| cut generation | 0.3043 | 0.38% |
+| cut add | 0.0205 | 0.03% |
+| model-management overhead | 1.1723 | 1.47% |
+
+**Reconciliation: exact, not approximate.** `total_master_time_s + total_sp_solve_time_s +
+total_cutgen_time_s + model_management_overhead_s = 79.47668419999536`, equal to
+`total_wall_time_s` to the last representable bit (residual `0.0`, computed in float64). Note
+for the record, since it cost a wrong first pass: `total_cutadd_time_s` is tracked separately
+and is **not** a fifth term in this sum -- it is already inside `model_management_overhead_s`.
+Summing all five double-counts cut-add time by construction; the four-term formula above is the
+one `BendersRunResult`'s own test (`test_overhead_reconciles_the_split_to_the_wall_time`)
+asserts, and it is what was checked here.
+
+**Time to first feasible: 0.294 s** (this run's own `time_to_first_feasible_s`, first upper
+bound the loop ever holds, LP phase excluded).
+
+**The other half of item 5 -- time to within a fixed threshold of the optimum -- is confirmed
+not implemented, not newly discovered.** This instance has a known monolithic reference
+(4183.24, `KNOWN_FEASIBLE_UB` in the test suite). At run end (10 iterations, this config's fixed
+budget, `status=UNKNOWN`, not converged) the incumbent is 4291.24, **2.58% above** that
+reference -- one data point, not a time-to-threshold curve. Neither `BendersRunResult` nor the
+manifest retains a per-iteration timestamped incumbent/bound trace (`IterReport` objects are
+built and logged per iteration but never stored on the result), so "time to reach within X% of
+optimum" cannot be read off anything that exists today. D71 already named this gap; building the
+trace is a code change, out of this handout item's scope (it asked to read from the run result
+and manifest, not to add to them).
+
+**What this does and does not settle.** It settles that Comparison A's runtime-split and
+time-to-first-feasible instrumentation works end to end on a real run and reconciles exactly, so
+report §4.5/§4.6/wherever Comparison A appears can cite this table rather than the withdrawn
+85.7% figure. It does **not** re-derive, confirm or refute that withdrawn figure -- this is a
+different config from whatever produced it, run for a different reason (D71's own
+instrumentation demonstration), and the 97.64% master share here should not be read as "the"
+master share for this project; it is what one 10-iteration run of one fixed-budget regression
+config happened to spend. It does not close item 5's second half.
+
+**Record.** `scripts/report_figures/data/measurements.json -> runtime_split`, new block.
