@@ -216,11 +216,11 @@ did not move behaviour unintentionally.
 python -m unittest discover -s tests
 ```
 
-272 tests, about a minute (D68, D71). They cover cut soundness invariants, the Phase 5
+276 tests, about a minute (D68, D71, D72). They cover cut soundness invariants, the Phase 5
 exactness gate against the monolith (D62), Magnanti–Wong provenance
 and fallback, symmetry validity, the conditions under which a lower bound may be reported,
-the recourse anchor, the LP phase, configuration combinations that are refused, and the
-runtime-split instrumentation (D71).
+the recourse anchor, the LP phase, configuration combinations that are refused, the
+runtime-split instrumentation (D71), and the minute-departure validator (D72).
 
 **A CPLEX licence is no longer needed to run them.** Every gate used to name `cplex`
 literally, so a checkout without one skipped 63 tests — including E1/E2, cut
