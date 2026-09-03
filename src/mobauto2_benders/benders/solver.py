@@ -344,6 +344,10 @@ class BendersRunResult:
     sp_penalty_pax: Optional[float] = None
     sp_total_demand: Optional[float] = None
     sp_slot_resolution: Optional[int] = None
+    # B7.1 (audit item 1.3). Passengers the last recourse solve left unserved while an
+    # admissible departure still had a free seat -- the penalty regime made visible.
+    # Carried on the result, not only printed, so a table can report it.
+    sp_rejected_with_free_seat: Optional[float] = None
     # Which generator actually produced the cuts, and whether they support a
     # lower bound at all. Both were previously invisible: Magnanti-Wong failed
     # silently to finite differences while still claiming a valid bound, and
@@ -930,6 +934,7 @@ class BendersSolver:
                 "sp_penalty_pax": diag.get("penalty_pax"),
                 "sp_total_demand": diag.get("total_demand"),
                 "sp_slot_resolution": diag.get("slot_resolution"),
+                "sp_rejected_with_free_seat": diag.get("rejected_with_free_seat"),
             }
 
         def _make_result(status: SolveStatus, iterations: int) -> BendersRunResult:
@@ -974,6 +979,9 @@ class BendersSolver:
                 sp_penalty_pax=extra.get("sp_penalty_pax"),
                 sp_total_demand=extra.get("sp_total_demand"),
                 sp_slot_resolution=extra.get("sp_slot_resolution"),
+                sp_rejected_with_free_seat=extra.get(
+                    "sp_rejected_with_free_seat"
+                ),
                 clock_truncated_master_solves=int(clock_truncated_master_solves),
                 time_to_first_feasible_s=first_feasible_wall_s,
                 total_wall_time_s=_total_wall,

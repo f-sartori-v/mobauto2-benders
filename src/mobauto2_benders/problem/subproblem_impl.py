@@ -1083,6 +1083,10 @@ class ProblemSubproblem(Subproblem):
                 "penalty_pax": [],
                 "served_total": [],
                 "total_demand": [],
+                # B7.1. Aggregated the same way as every other headline quantity, so a
+                # multi-scenario run reports the regime effect it actually priced
+                # rather than one scenario's.
+                "rejected_with_free_seat": [],
             }
 
             for idx_s, s in enumerate(scenarios):
@@ -1240,6 +1244,9 @@ class ProblemSubproblem(Subproblem):
                 agg["penalty_pax"].append(float(duals.get("penalty_pax", 0.0)))
                 agg["served_total"].append(float(duals.get("served_total", 0.0)))
                 agg["total_demand"].append(float(duals.get("total_demand", 0.0)))
+                agg["rejected_with_free_seat"].append(
+                    float(duals.get("rejected_with_free_seat", 0.0))
+                )
                 agg.setdefault("timing_sp_solve_s", []).append(sp_solve_time)
 
             # B1. Deterministic scenario order before anything is combined.
@@ -1266,6 +1273,10 @@ class ProblemSubproblem(Subproblem):
                 agg_pen_pax = sum(w * u for w, u in zip(weights, agg["penalty_pax"]))
                 agg_served = sum(w * u for w, u in zip(weights, agg["served_total"]))
                 agg_total = sum(w * u for w, u in zip(weights, agg["total_demand"]))
+                agg_free_seat = sum(
+                    w * u
+                    for w, u in zip(weights, agg["rejected_with_free_seat"])
+                )
             elif ub_aggregation == "sum":
                 ub_val_agg = sum(ub_vals)
                 agg_obj = sum(agg["objective_value"])
@@ -1275,6 +1286,7 @@ class ProblemSubproblem(Subproblem):
                 agg_pen_pax = sum(agg["penalty_pax"])
                 agg_served = sum(agg["served_total"])
                 agg_total = sum(agg["total_demand"])
+                agg_free_seat = sum(agg["rejected_with_free_seat"])
             elif ub_aggregation == "max":
                 ub_val_agg = max(ub_vals)
                 idx_max = int(ub_vals.index(ub_val_agg))
@@ -1285,6 +1297,7 @@ class ProblemSubproblem(Subproblem):
                 agg_pen_pax = agg["penalty_pax"][idx_max]
                 agg_served = agg["served_total"][idx_max]
                 agg_total = agg["total_demand"][idx_max]
+                agg_free_seat = agg["rejected_with_free_seat"][idx_max]
             else:
                 raise ValueError("ub_aggregation must be one of 'mean', 'sum', 'max'")
 
@@ -1359,6 +1372,7 @@ class ProblemSubproblem(Subproblem):
                         "penalty_cost": agg_pen,
                         "penalty_pax": agg_pen_pax,
                         "served_total": agg_served,
+                        "rejected_with_free_seat": agg_free_seat,
                         "total_demand": agg_total,
                         "slot_resolution": int(params.get("slot_resolution", 1)),
                         "timing_sp_solve_s": sum(
@@ -1476,6 +1490,7 @@ class ProblemSubproblem(Subproblem):
                         "penalty_cost": agg_pen,
                         "penalty_pax": agg_pen_pax,
                         "served_total": agg_served,
+                        "rejected_with_free_seat": agg_free_seat,
                         "total_demand": agg_total,
                         "slot_resolution": int(params.get("slot_resolution", 1)),
                         "timing_sp_solve_s": sum(
@@ -1795,6 +1810,10 @@ class ProblemSubproblem(Subproblem):
                 agg_pen_pax = sum(w * u for w, u in zip(weights, agg["penalty_pax"]))
                 agg_served = sum(w * u for w, u in zip(weights, agg["served_total"]))
                 agg_total = sum(w * u for w, u in zip(weights, agg["total_demand"]))
+                agg_free_seat = sum(
+                    w * u
+                    for w, u in zip(weights, agg["rejected_with_free_seat"])
+                )
                 agg_sp_time = sum(
                     w * u for w, u in zip(weights, agg["timing_sp_solve_s"])
                 )
@@ -1810,6 +1829,7 @@ class ProblemSubproblem(Subproblem):
                 agg_pen_pax = sum(agg["penalty_pax"])
                 agg_served = sum(agg["served_total"])
                 agg_total = sum(agg["total_demand"])
+                agg_free_seat = sum(agg["rejected_with_free_seat"])
                 agg_sp_time = sum(agg["timing_sp_solve_s"])
                 agg_cut_time = sum(agg["timing_cutgen_s"])
             elif ub_aggregation == "max":
@@ -1822,6 +1842,7 @@ class ProblemSubproblem(Subproblem):
                 agg_pen_pax = agg["penalty_pax"][idx_max]
                 agg_served = agg["served_total"][idx_max]
                 agg_total = agg["total_demand"][idx_max]
+                agg_free_seat = agg["rejected_with_free_seat"][idx_max]
                 agg_sp_time = agg["timing_sp_solve_s"][idx_max]
                 agg_cut_time = agg["timing_cutgen_s"][idx_max]
             else:
@@ -2014,6 +2035,7 @@ class ProblemSubproblem(Subproblem):
                         "penalty_cost": agg_pen,
                         "penalty_pax": agg_pen_pax,
                         "served_total": agg_served,
+                        "rejected_with_free_seat": agg_free_seat,
                         "total_demand": agg_total,
                         "slot_resolution": int(params.get("slot_resolution", 1)),
                         "timing_sp_solve_s": agg_sp_time,
@@ -2039,6 +2061,7 @@ class ProblemSubproblem(Subproblem):
                         "penalty_cost": agg_pen,
                         "penalty_pax": agg_pen_pax,
                         "served_total": agg_served,
+                        "rejected_with_free_seat": agg_free_seat,
                         "total_demand": agg_total,
                         "slot_resolution": int(params.get("slot_resolution", 1)),
                         "timing_sp_solve_s": agg_sp_time,
@@ -2171,6 +2194,9 @@ class ProblemSubproblem(Subproblem):
                     "penalty_pax": float(duals.get("penalty_pax", 0.0)),
                     "served_total": float(duals.get("served_total", 0.0)),
                     "total_demand": float(duals.get("total_demand", 0.0)),
+                    "rejected_with_free_seat": float(
+                        duals.get("rejected_with_free_seat", 0.0)
+                    ),
                     "realized_departures": list(duals.get("realized_departures", [])),
                     "realized_departure_min_map": dict(
                         duals.get("realized_departure_min_map", {})
@@ -2398,6 +2424,9 @@ class ProblemSubproblem(Subproblem):
                 "penalty_pax": float(duals.get("penalty_pax", 0.0)),
                 "served_total": float(duals.get("served_total", 0.0)),
                 "total_demand": float(duals.get("total_demand", 0.0)),
+                "rejected_with_free_seat": float(
+                    duals.get("rejected_with_free_seat", 0.0)
+                ),
                 "realized_departures": list(duals.get("realized_departures", [])),
                 "realized_departure_min_map": dict(
                     duals.get("realized_departure_min_map", {})
@@ -3131,6 +3160,42 @@ def solve_subproblem(
                 total_ret_tau, kmax_ret, float(P.S)
             )
 
+    # ---- B7.1: rejected while a seat was free ---------------------------------
+    #
+    # THE REGIME, MADE VISIBLE. At delta=30 and p_min=56 the slot penalty is
+    # p = 56/30 ~ 1.867, so a two-slot wait costs 2 and a rejection costs 1.867: the
+    # model prefers to leave a passenger behind rather than make them wait an hour,
+    # EVEN WHEN A SEAT IS FREE. That is a coherent policy. It was never a stated one,
+    # and nothing in any output revealed that it was in force.
+    #
+    # Counted from the solved LP, not re-derived: a request slot with unserved demand
+    # is checked against the departures it actually has arcs to -- so reachability and
+    # W_max are already satisfied -- and the departure's remaining capacity.
+    #
+    # On the baseline this is NONZERO and must be. Zero at p_min=56 with W_max=60
+    # would mean the count or the pricing is wrong, which is why the acceptance test
+    # asserts both directions: nonzero at 56, zero at p_min=120, where no admissible
+    # wait can cost more than the penalty and rejection is never preferred.
+    _eps_free = 1e-9
+    rejected_with_free_seat = 0.0
+    for _u_var, _x_var, _arcs, _caps in (
+        (m.u_OUT, m.x_OUT, m.ArcsOut, C_out),
+        (m.u_RET, m.x_RET, m.ArcsRet, C_ret),
+    ):
+        _load = {}
+        for (t, tau) in _arcs:
+            _load[tau] = _load.get(tau, 0.0) + float(pyo.value(_x_var[t, tau]))
+        for t in Tset:
+            left = float(pyo.value(_u_var[t]))
+            if left <= _eps_free:
+                continue
+            reachable = [tau for tau in Tset if (t, tau) in _arcs]
+            if any(
+                _load.get(tau, 0.0) < float(_caps[tau]) - _eps_free
+                for tau in reachable
+            ):
+                rejected_with_free_seat += left
+
     # Component costs (per direction)
     try:
         out_cost_val = sum(
@@ -3282,6 +3347,9 @@ def solve_subproblem(
             "penalty_pax": penalty_pax,
             "served_total": served_total,
             "total_demand": total_demand,
+            # B7.1 (audit item 1.3). Passengers rejected while a departure they could
+            # legally have taken still had a free seat. See `_rejected_with_free_seat`.
+            "rejected_with_free_seat": rejected_with_free_seat,
             "timing_build_s": float(t_build1 - t_build0),
             "timing_solve_s": float(t_solve1 - t_solve0),
             "timing_extract_s": float(t_extract1 - t_extract0),

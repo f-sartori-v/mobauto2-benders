@@ -92,6 +92,9 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
 
     _set_if_not_none(mp, "start_cost_epsilon", costs.start_cost_epsilon)
     _set_if_not_none(mp, "concurrency_penalty", costs.concurrency_penalty)
+    # B7.2. Read by MonolithSolver.run, which dispatches to the lexicographic
+    # hierarchy or to the single weighted-sum solve.
+    mp["objective_mode"] = str(costs.objective_mode)
 
     mp["use_fifo_symmetry"] = bool(cfg.milp.use_fifo_symmetry)
     mp["symmetry_breaking"] = bool(cfg.milp.symmetry_breaking)

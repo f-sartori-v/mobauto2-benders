@@ -86,6 +86,17 @@ class EnergySection:
 class CostSection:
     start_cost_epsilon: float = 0.0
     concurrency_penalty: float = 0.0
+    # B7.2/B7.3 (audit item 1.3). "weighted_sum" is the DEFAULT, so every archived
+    # result reproduces and epsilon/kappa keep the meaning they have always had --
+    # policy weights, not tie-breakers; the audit is explicit that kappa=0.25 is large
+    # enough to select schedules.
+    #
+    # "lexicographic" states the other policy: maximise served demand first, then
+    # minimise waiting, then the epsilon and kappa terms. Under the weighted sum at
+    # p_min=56 and delta=30 a two-slot wait is strictly worse than a rejection, so
+    # some admissible waits are dominated by leaving the passenger behind. That is a
+    # real policy choice and it must be selectable rather than implied by arithmetic.
+    objective_mode: str = "weighted_sum"
 
 
 @dataclass(slots=True)
@@ -436,6 +447,24 @@ def _as_mapping(value: Any, where: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{where} must be a mapping")
     return value
+
+
+def _validated_objective_mode(raw) -> str:
+    """B7.2. One of two named modes, refused rather than defaulted on a typo.
+
+    A misspelled mode silently falling back to the weighted sum is exactly the shape
+    of defect the manifest exists to prevent: the run would report an objective mode
+    it did not use.
+    """
+    if raw is None:
+        return "weighted_sum"
+    mode = str(raw).strip().lower()
+    if mode not in {"weighted_sum", "lexicographic"}:
+        raise ValueError(
+            "model.costs.objective_mode must be 'weighted_sum' or 'lexicographic', "
+            f"got {raw!r}"
+        )
+    return mode
 
 
 def _check_unknown_keys(data: Mapping[str, Any], allowed: set[str], where: str) -> None:
@@ -946,7 +975,9 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
 
     costs_raw = _as_mapping(model_raw.get("costs"), "model.costs")
     _check_unknown_keys(
-        costs_raw, {"start_cost_epsilon", "concurrency_penalty"}, "model.costs"
+        costs_raw,
+        {"start_cost_epsilon", "concurrency_penalty", "objective_mode"},
+        "model.costs",
     )
     cost_section = CostSection(
         start_cost_epsilon=(
@@ -971,6 +1002,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             if costs_raw.get("concurrency_penalty") is not None
             else 0.0
         ),
+        objective_mode=_validated_objective_mode(costs_raw.get("objective_mode")),
     )
 
     master_raw = _as_mapping(data.get("master"), "master")

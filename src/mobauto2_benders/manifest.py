@@ -165,6 +165,10 @@ def build_manifest(
             ),
         },
         "objective_terms": {
+            # B7.3. "weighted_sum" or "lexicographic". Named in the shared manifest
+            # contract because the two are not two solvers of one problem -- they are
+            # two problems, and a table may not mix them.
+            "objective_mode": cfg.model.costs.objective_mode,
             "start_cost_epsilon": cfg.model.costs.start_cost_epsilon,
             # Active in the master objective and NOT in the published
             # formulation, so it must appear on any table quoting this run.

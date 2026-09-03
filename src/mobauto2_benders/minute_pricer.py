@@ -1607,6 +1607,26 @@ def solve_minute_recourse(
         wait_ret += _wait(m, t, k) * v
     unmet_out = sum(float(pyo.value(mdl.u_OUT[m])) for m in sorted(pools[OUT]))
     unmet_ret = sum(float(pyo.value(mdl.u_RET[m])) for m in sorted(pools[RET]))
+
+    # B7.1. The same diagnostic the slot recourse and the validator report, computed
+    # the same way, so a minute run and a slot run of one instance can be compared on
+    # it. Capacity is per SLOT here (summing over offsets), which is what `served_*`
+    # already holds, so the free-seat test is against `caps[d][t]` directly.
+    _eps_free = 1e-9
+    rejected_with_free_seat = 0.0
+    for d, served_d, u_var in (
+        (OUT, served_out, mdl.u_OUT),
+        (RET, served_ret, mdl.u_RET),
+    ):
+        for m in sorted(pools[d]):
+            left = float(pyo.value(u_var[m]))
+            if left <= _eps_free:
+                continue
+            reachable = {int(t) for (_m, t, _k) in by_minute[d][m]}
+            if any(
+                served_d[t] < float(caps[d][t]) - _eps_free for t in reachable
+            ):
+                rejected_with_free_seat += left
     t_extract1 = _time.perf_counter()
 
     obj_val = float(pyo.value(mdl.obj))
@@ -1632,8 +1652,10 @@ def solve_minute_recourse(
         "penalty_pax": float(unmet_out + unmet_ret),
         "served_total": float(sum(served_out) + sum(served_ret)),
         "total_demand": float(sum(pools[OUT].values()) + sum(pools[RET].values())),
+        "rejected_with_free_seat": float(rejected_with_free_seat),
         "is_feasible": True,
         "recourse_resolution": "minute",
+        "same_slot_eligibility": str(same_slot_eligibility),
         "departure_policy": str(policy),
         # F2. len(offsets) == 1 and offsets[0] == placement_offset(policy, delta) is
         # today's model exactly; anything else is the placement-freedom relaxation, and
@@ -1650,9 +1672,13 @@ def solve_minute_recourse(
 
 
 __all__ = [
+    "AssignmentRow",
+    "DEFAULT_SAME_SLOT_ELIGIBILITY",
     "HonestWaitingReport",
     "attach_minute_recourse",
+    "min_wait_minutes",
     "MinutePricingResult",
+    "price_schedule_given_departure_minutes",
     "honest_waiting",
     "departure_minutes",
     "load_request_minutes",

@@ -107,7 +107,18 @@ class MonolithSolver:
         self._scenarios = self._load_scenarios(len(list(model.T)))
         self._attach_recourse_model(model, self._scenarios)
 
-        solve_result = self.master.solve()
+        objective_mode = str(
+            self.master_params.get("objective_mode", "weighted_sum")
+        ).lower()
+        if objective_mode == "lexicographic":
+            solve_result = self._solve_lexicographic(model)
+        elif objective_mode == "weighted_sum":
+            solve_result = self.master.solve()
+        else:
+            raise ValueError(
+                "model.costs.objective_mode must be 'weighted_sum' or "
+                f"'lexicographic', got {objective_mode!r}"
+            )
         stats = self.master.last_solve_stats()
         self._last_stats = dict(stats)
         self._last_stats["elapsed_wall_s"] = time.perf_counter() - t0
@@ -157,6 +168,147 @@ class MonolithSolver:
             solve_finished_at=finished_at,
             elapsed_wall_s=float(elapsed_wall_s) if elapsed_wall_s is not None else None,
         )
+
+    # ------------------------------------------------------------------ B7.2
+    def _unserved_expr(self, m: pyo.ConcreteModel):
+        """Weighted unserved passengers -- the quantity level 1 minimises."""
+        weights = [float(sc.weight) for sc in self._scenarios]
+        return sum(
+            weights[int(s)]
+            * sum(m.u_OUT[s, t] + m.u_RET[s, t] for t in m.T)
+            for s in m.MonoScenarios
+        )
+
+    def _waiting_expr(self, m: pyo.ConcreteModel):
+        """Weighted waiting, in slot units -- the quantity level 2 minimises.
+
+        Read off the recourse's own cost expressions with the penalty term removed,
+        rather than rebuilt from the arc sets. Rebuilding it is how a reported waiting
+        figure stops matching the objective that produced it -- the same failure the
+        per-shuttle table already had once.
+        """
+        weights = [float(sc.weight) for sc in self._scenarios]
+        penalty = float(self.subproblem_params.get("p", 0.0))
+        return sum(
+            weights[int(s)]
+            * (
+                m.MonoScenarioCost[s]
+                - penalty * sum(m.u_OUT[s, t] + m.u_RET[s, t] for t in m.T)
+            )
+            for s in m.MonoScenarios
+        )
+
+    def _first_stage_expr(self, m: pyo.ConcreteModel):
+        """The epsilon and kappa terms -- the quantity level 3 minimises."""
+        eps_start = float(self.master_params.get("start_cost_epsilon", 0.0) or 0.0)
+        conc_pen = float(self.master_params.get("concurrency_penalty", 0.0) or 0.0)
+        expr = 0.0
+        if eps_start > 0.0:
+            expr = expr + eps_start * sum(
+                m.yOUT[q, t] + m.yRET[q, t] for q in m.Q for t in m.T
+            )
+        if conc_pen > 0.0 and hasattr(m, "eOut"):
+            expr = expr + conc_pen * (
+                sum(m.eOut[t] for t in m.T) + sum(m.eRet[t] for t in m.T)
+            )
+        return expr
+
+    def _solve_lexicographic(self, m: pyo.ConcreteModel):
+        """B7.2 (audit item 1.3). Serve first, then wait less, then the policy weights.
+
+        WHY THIS EXISTS. Under the weighted sum at p_min = 56 and delta = 30 a two-slot
+        wait costs 2 slot-units and a rejection costs 1.867, so the model prefers to
+        leave a passenger behind rather than make them wait an hour -- even with a free
+        seat (see `rejected_with_free_seat`). That is a coherent policy, and it is not
+        the one anybody stated. Lexicographic mode states the other one: maximise
+        served demand first, and only then trade waiting against it.
+
+        HOW, AND WHY NOT THE OTHER WAY. The work order forbids emulating the hierarchy
+        with small coefficients unless the bound is proved, and nobody has proved it --
+        that emulation is exactly the `epsilon`/`kappa` device the audit says is
+        already large enough to select schedules. So this is a genuine hierarchy: solve
+        level 1, FREEZE its optimal value as a constraint, solve level 2 inside that,
+        freeze, solve level 3.
+
+        Pyomo exposes no portable interface to CPLEX's own multiobjective facility, and
+        driving it would mean bypassing the model this repository's every other result
+        comes from. The sequential form computes the same optimum by definition; what
+        it does not inherit is CPLEX's internal handling of level tolerances, which is
+        why each freeze carries an explicit slack.
+
+        THE SLACK IS NOT A FUDGE, and it is the one place this method can go wrong.
+        Level 1 stops at the solver's MIP gap, so its "optimum" is an upper bound on
+        the true one. Freezing it EXACTLY would make level 2 infeasible whenever the
+        gap is nonzero, or -- worse -- would silently cut off the true optimum. The
+        freeze is therefore `level_k <= value_k + slack`, with the slack tied to the
+        solver's own reported gap rather than to a constant someone chose. It is
+        recorded in `_last_stats` so a run states the hierarchy it actually solved.
+        """
+        stages = [
+            ("served", self._unserved_expr(m)),
+            ("waiting", self._waiting_expr(m)),
+            ("first_stage", self._first_stage_expr(m)),
+        ]
+        original_obj = m.obj
+        original_obj.deactivate()
+        frozen: list[str] = []
+        record: list[dict[str, Any]] = []
+        result = None
+        try:
+            for level, (name, expr) in enumerate(stages):
+                comp_name = f"_lex_obj_{level}"
+                m.add_component(
+                    comp_name, pyo.Objective(expr=expr, sense=pyo.minimize)
+                )
+                result = self.master.solve()
+                stats = self.master.last_solve_stats()
+                value = float(pyo.value(expr))
+                gap = stats.get("gap")
+                # Slack from the solver's own gap on the value just achieved, never a
+                # constant. A zero gap freezes exactly; a 5% gap admits 5% of the
+                # achieved value, which is precisely the amount level 1 could not
+                # prove away.
+                rel = abs(float(gap)) if gap is not None else 0.0
+                slack = max(1e-6, rel * abs(value))
+                record.append(
+                    {
+                        "level": level,
+                        "name": name,
+                        "value": value,
+                        "gap": None if gap is None else float(gap),
+                        "freeze_slack": slack,
+                        "status": str(getattr(result, "status", None)),
+                    }
+                )
+                getattr(m, comp_name).deactivate()
+                if level < len(stages) - 1:
+                    cons_name = f"_lex_freeze_{level}"
+                    m.add_component(
+                        cons_name, pyo.Constraint(expr=expr <= value + slack)
+                    )
+                    frozen.append(cons_name)
+        finally:
+            for cons_name in frozen:
+                m.del_component(cons_name)
+            for level in range(len(stages)):
+                comp_name = f"_lex_obj_{level}"
+                if hasattr(m, comp_name):
+                    m.del_component(comp_name)
+            original_obj.activate()
+
+        self._last_stats = dict(self.master.last_solve_stats())
+        self._last_stats["objective_mode"] = "lexicographic"
+        self._last_stats["lexicographic_levels"] = record
+        # The reported objective is the WEIGHTED SUM evaluated at the lexicographic
+        # solution, so a lexicographic run and a weighted-sum run of one instance are
+        # reported in the same units and can be compared. It is not the value any
+        # level minimised, and calling it "the objective" without saying so is how two
+        # incomparable numbers end up in one table.
+        try:
+            result.objective = float(pyo.value(original_obj.expr))
+        except Exception:
+            pass
+        return result
 
     def format_solution(self) -> str:
         return self.master.format_solution()
