@@ -44,10 +44,10 @@ must be produced on the corrected model.
    nodes explored in those seconds depend on machine load (§0.10, D26). The manifest
    therefore records **whether** a run was reproducible rather than asserting that it
    was: `reproducibility.bit_reproducible` and the count behind it.
-5. Every claim in the paper has a test. **Implemented** — 276 tests (D68, D71, D72),
+5. Every claim in the paper has a test. **Implemented** — 295 tests (D68, D71, D72, D76, D82),
    `python -m unittest discover -s tests`. The count stood at 59 when this line was
-   written, at 196 at D62 and at 248 at D65; it is restated here rather than left to
-   drift. Of those, 63 were CPLEX-gated and skipped themselves on any checkout without
+   written, at 196 at D62, at 248 at D65, at 276 at D71/D72, and at 294 at D76; it is
+   restated here rather than left to drift. Of those, 63 were CPLEX-gated and skipped themselves on any checkout without
    a licence; since D67 they run on HiGHS too, and 9 CPLEX-specific tests remain gated.
 6. Gapped runs never reported as optima without a marker. **Tested**
    (`test_gapped_run_is_not_reported_as_optimal`).
@@ -165,7 +165,13 @@ conflated with it (D4). Kept per D18.
 ### 2.5 Subproblem — slot-only, **de-layered (D30, this is a model change)**
 
 ```
-Arcs[d] = { (t,τ) : t+1 <= τ <= min(T-1, t + W_slots) },  W_slots = ceil(W_max_min/δ)
+Arcs[d] = { (t,τ) : t+1 <= τ <= min(T-1, t + W_slots) },  W_slots = floor(W_max_min/δ)
+
+**`floor`, not `ceil`.** `wmax_minutes_to_slots` (`subproblem_impl.py`) computes this
+deliberately by `floor`, with a test pinning the reason: `ceil` would grant MORE waiting
+than the config asked for -- e.g. `Wmax_minutes=60, δ=45` would round a passenger's
+allowance up to 2 slots (90 min) instead of the 1 slot (45 min) the config actually states.
+This section previously said `ceil`; corrected (handout C3, 2026-09-02).
 
 min  Σ_d Σ_{(t,τ)∈Arcs[d]} (τ-t) · x_d[t,τ]  +  p · Σ_d Σ_t u_d[t]
 
@@ -211,7 +217,7 @@ what `solve_mw_dual` implemented, and it made the MW LP unbounded (`AUDIT_v4` C3
 **Duals used for the cut:**
 
 ```
-pi_OUT[τ] = Σ_k π_OUT[τ,k]      pi_RET[τ] = Σ_k π_RET[τ,k]     # per-slot, summed over layers
+pi_OUT[τ], pi_RET[τ]     # one per slot, read directly from m.dual -- no layers to sum over
 ```
 
 Never indexed by `q`. This is what makes the master's per-slot cut aggregation valid.
@@ -224,19 +230,27 @@ Never indexed by `q`. This is what makes the master's per-slot cut aggregation v
 below is the corrected one**; v3 described the broken version.
 
 ```
-variables:  α_d[t] free,  π_d[τ,k] <= 0
+variables:  α_d[t] free,  π_d[τ] <= 0
 
 dual feasibility, one constraint per primal variable:
-    from x[t,τ,k]:   α_d[t] + π_d[τ,k] <= (τ-t) + fill_eps·k
-    from u[t]:       α_d[t]            <= p
+    from x[t,τ]:   α_d[t] + π_d[τ] <= (τ-t)
+    from u[t]:     α_d[t]          <= p
 
 optimal face (weak duality gives dual_obj <= ub_base):
-    Σ_t R_d[t]·α_d[t] + Σ_{τ,k} cap_d[τ,k]·π_d[τ,k]  >=  ub_base − tol
+    Σ_t R_d[t]·α_d[t] + Σ_τ cap_d[τ]·π_d[τ]  >=  ub_base − tol
 
 objective (Pareto selection at the core point Ȳ):
-    max  Σ_τ (S·Ȳ_out[τ] − C_out[τ]) · Σ_k π_OUT[τ,k]
-       + Σ_τ (S·Ȳ_ret[τ] − C_ret[τ]) · Σ_k π_RET[τ,k]
+    max  Σ_τ (S·Ȳ_out[τ] − C_out[τ]) · π_OUT[τ]
+       + Σ_τ (S·Ȳ_ret[τ] − C_ret[τ]) · π_RET[τ]
 ```
+
+**De-layered throughout (§2.5, D30) -- corrected here (handout C4, 2026-09-02).** This
+formulation previously carried the pre-D30 layer index `k` (`π_d[τ,k]`, `x[t,τ,k]`,
+`fill_eps·k`, `Σ_k`) even though it was introduced as "the corrected one" replacing v3's
+broken sign convention; §2.5 had already removed layers from the primal, and
+`solve_mw_dual` (`subproblem_impl.py`) has never had a `k` index -- its `pi_OUT`/`pi_RET`
+are declared over slots alone, and its dual-feasibility row is `a[t] + pi[tau] <=
+max(0, tau-t)`, no `fill_eps` term. The formulas above now match that code exactly.
 
 Three points that v3 got wrong or omitted:
 
@@ -260,9 +274,9 @@ dm_out[τ] = S · π_OUT[τ]                (<= 0)
 coeff_yOUT[(q,τ)] = dm_out[τ]  for every q      # identical across q by construction
 ```
 
-The `Σ_k` is gone: there are no layers (§2.5), so there is one `π` per slot. The broadcast
-is `expand_slopes_to_candidate`, extracted because this block had been written out four
-times and a fix to one copy left the others generating the old cut.
+One `π` per slot (no layers, §2.5). The broadcast is `expand_slopes_to_candidate`,
+extracted because this block had been written out four times and a fix to one copy left
+the others generating the old cut.
 
 **Intercept — derived, not imposed (S2).**
 
@@ -317,12 +331,37 @@ lower-bound guarantee, the runtime already drops `best_lb` when it is used, and 
 *fall-through* of the legacy pair — so a config that simply omitted both booleans landed on
 it silently and found out an hour later. Refused at load instead.
 
-**Magnanti–Wong is refused with `recourse_resolution: minute`.** `solve_mw_dual` builds the
-dual of the **slot** primal (`α[t] + π[τ] ≤ (τ−t)` over slot arcs); the minute recourse's
-primal has one demand row per arrival **minute**. They are duals of different LPs, so a
-dual optimal for one carries no weak-duality relation to the other and a cut from it can
-overestimate the recourse — D30's failure mode. Nothing guarded this before;
-`configs/phase1/rq5_benders_minute_p56.yaml` escaped it only by setting the flag false.
+**Magnanti–Wong is ported to `recourse_resolution: minute` (B2, handout item, 2026-09-02).**
+Until this port it was refused at load: `solve_mw_dual` builds the dual of the **slot**
+primal (`α[t] + π[τ] ≤ (τ−t)` over slot arcs), while the minute recourse's primal has one
+demand row per arrival **minute** and arc costs `(dep_minute − m)/δ` — duals of different
+LPs, so a dual feasible for the slot LP carries no weak-duality relation to the minute
+recourse, and a cut from it can overestimate — D30's failure mode.
+
+`solve_mw_dual_minute` (`minute_pricer.py`) is the minute recourse's **own** dual, built
+over its own arcs (`_minute_recourse_geometry`, shared with the primal so the two cannot
+diverge): `α[m] + π[τ] ≤ (dep_minute[τ] − m)/δ` per feasible arc, `α[m] ≤ p_slots` per
+arrival minute, `π[τ] ≤ 0` per slot -- the same sign convention as everywhere else in this
+module, and the same Pareto objective at the projected core point `Ȳ` (S3) the slot path
+uses, since that objective is purely a function of `π[τ]` and `Ȳ`, both already slot-indexed
+regardless of resolution.
+
+**The one structural difference the port had to add a guard for.** In the slot LP, every
+`π[τ]` with `τ ≥ 1` is guaranteed a dual-feasibility row by `(t, τ)` structure alone; only
+`τ = 0` can be orphaned (no arc reaches it). In the minute LP, whether `π[τ]` appears in any
+row is **data-dependent** -- any slot too early or too late for any actual arrival to reach
+within `Wmax_minutes` is orphaned, not just slot 0. Left free, such a `π[τ]` (`≤ 0`,
+maximised) risks an unbounded LP whenever its objective coefficient `S·Ȳ[τ] − C[τ]` is
+negative. `solve_mw_dual_minute` fixes any orphaned `π[τ]` to `0.0` rather than leaving it
+free: a shadow price for a capacity row that was never built is not a quantity the LP can
+meaningfully select. Covered by
+`tests/test_minute_mw.test_a_pi_with_no_dual_feasibility_row_is_fixed_to_zero_not_left_unbounded`.
+
+`config.py` no longer refuses `use_magnanti_wong: true` with `recourse_resolution: 'minute'`;
+`use_dual_slopes: true` (plain capacity duals) remains available and is still the right
+choice when a caller wants the non-Pareto ablation baseline (the `dual` row in the fallback
+table above). `configs/phase1/rq5_benders_minute_p56.yaml` is unaffected -- it still sets
+the flag false, and continues to run on the plain dual exactly as before.
 
 **Multi-scenario validity aggregation distinguishes NO_CUT from UNKNOWN.** A scenario whose
 θ early-exit fires produces no cut and carries no mode; reading that absence as `unknown`
@@ -495,6 +534,79 @@ re-measuring.
 
 Unchanged. Gate 1's sign-convention verification is empirical (D13) and now automated:
 `test_no_check_fail_lines` asserts no `[CHECK FAIL]` line appears.
+
+### 2.11 Continuous-time schedule exchange format (B4, D84)
+
+**Why this exists.** D72 made `minute_pricer.price_schedule_given_departure_minutes` accept
+departures at arbitrary minutes -- what a continuous-time model needs, since it is not
+confined to `tau*delta + offset` for any slot `tau` and any placement policy. What stayed
+missing was a documented format for such a schedule to arrive in from the constraint-programming
+/ LBBD line (a separate repository, `20_MobAuto2_CP_LBBD`), and a loader. This section and
+`src/mobauto2_benders/continuous_schedule.py` are that piece -- report Comparison C is now one
+export away, not unspecified work.
+
+**Format.** Schema `mobauto2_continuous_schedule`, version 1. YAML (or any format that parses to
+the same mapping -- the loader only requires `yaml.safe_load`-shaped input):
+
+```yaml
+schema: mobauto2_continuous_schedule
+version: 1
+horizon_minutes: <float>          # the schedule's own horizon, in minutes
+seats: <float>                    # per-departure capacity; homogeneous across vehicles
+vehicles:
+  - id: <string or int, unique>
+    departures:
+      OUT: [<minute>, ...]        # 0 <= minute <= horizon_minutes; NOT required to be
+      RET: [<minute>, ...]        # a multiple of any slot width (D72's whole point)
+    charging_plan:                # optional; [] if the vehicle never charges
+      - {start_minute: <float>, end_minute: <float>}   # end_minute > start_minute
+      ...
+  - id: ...
+    ...
+```
+
+Units are minutes from the horizon start, matching every other minute-level quantity in this
+repository (D50) -- not slots. `OUT`/`RET` are the only valid direction keys (`minute_pricer`'s
+own `OUT`/`RET` constants); an unrecognised key is rejected, not ignored.
+
+**Why `charging_plan` is in the format but not in the pricing path.** A continuous-time
+schedule is not fully specified without it -- a vehicle's departures must be feasible against
+its own charge state, which is the CP/LBBD side's concern, not this repository's. The loader
+parses and validates it (well-formed intervals, `end_minute > start_minute`) and returns it on
+`VehicleSchedule.charging_plan` so a caller has it, but `price_continuous_schedule` does not
+read it: pricing here is passenger-side only (waiting + unmet-demand penalty), matching every
+other function in `minute_pricer.py`. A feasibility check against the energy model, if wanted,
+is separate work against this same loaded structure, not a change to it.
+
+**Loader** (`src/mobauto2_benders/continuous_schedule.py`):
+
+- `load_continuous_schedule(path) -> ContinuousSchedule` -- reads and validates a file.
+- `parse_continuous_schedule(raw: dict) -> ContinuousSchedule` -- validates an
+  already-parsed mapping (what the loader calls internally; also the entry point for a
+  caller that builds the document in memory rather than reading a file).
+- `to_departures_minutes(schedule) -> dict[str, list[float]]` -- flattens every vehicle's
+  departures into the per-direction pool `price_schedule_given_departure_minutes` consumes.
+  **Vehicle identity is discarded here, deliberately** -- pricing only needs how many seats
+  depart when, the same collapse the slot-based `_schedule()` helpers elsewhere in this
+  project already perform.
+- `price_continuous_schedule(schedule, requests, wmax_minutes, p_minutes, lp_solver=...)
+  -> MinutePricingResult` -- flattens and prices in one call.
+
+**Validation is fail-closed** (receitas-basicas): an unknown schema name or version, a missing
+required key, a departure outside `[0, horizon_minutes]`, a duplicate vehicle id, an unknown
+direction key, or a charging interval with `end_minute <= start_minute` all raise `ValueError`
+naming the offending vehicle and field -- none is silently coerced, defaulted, or dropped. A
+dropped departure would look identical to a schedule that legitimately serves fewer passengers,
+and nothing downstream could tell the two apart.
+
+**Round-trip test** (`tests/test_continuous_schedule.py`, fixture
+`tests/fixtures/continuous_schedule_roundtrip.yaml`): a two-vehicle schedule, written in this
+format, is loaded and priced through `price_continuous_schedule`; the result is checked against
+the same schedule's cost computed independently through the existing slot path
+(`price_schedule_at_minutes` on `{"OUT": [1,2,4,6], "RET": [2,3,5,7]}` at `delta=30,
+policy=start`, converted to the identical minutes by construction) -- two different routes to
+the same LP, per R8. Also checked: flattening keeps every departure from both vehicles, the
+charging plan round-trips unchanged, and every validation failure mode above actually raises.
 
 ---
 

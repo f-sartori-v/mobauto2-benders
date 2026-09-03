@@ -4420,3 +4420,752 @@ script was written to check, short of a formal proof.
    Section 4's 1h/arm attempt closed the gap to ~6-7% each side but did not prove either arm --
    T=660 needs either a materially longer budget still, or a smaller `delta=1` instance than the
    full `setups/base.yaml`, to close for real.
+
+## D77 — Step 0 of the v0.2 consolidation handout: local `main` was three commits behind `origin/main`, missing D76 entirely
+
+Date: 2026-09-02. Handout: `HANDOUT_V02_CONSOLIDATION.md` (untracked work order against report
+v0.2), Step 0 (environment gate). Branch: `main`, working directly (no feature branch -- this
+step is a repo-hygiene fix plus a measurement, not a code change).
+
+**What was found.** Before any handout step could run, `python -m unittest discover -s tests -v`
+reported **291 tests, all passing**, not the 294 the handout's Step 0 asks for. Per R9 this was
+diagnosed rather than waved through. The static count of `def test_` across `tests/*.py` also
+came to exactly 291 -- so the suite was internally consistent (0 skips under the commercial
+`cplex_direct` backend, confirmed available) and nothing was silently skipping. The discrepancy
+was therefore a missing-commits problem, not a missing-coverage one: local `main` was at `e175a2a`
+(PR #21 merged) while `origin/main` was three commits ahead at `6322f9a` (PR #22, branch
+`fix/d76-departure-placement-anticipation`) -- **the D76 merge itself was never pulled into the
+local checkout.** Corroborating symptom: `src/mobauto2_benders/config.py` still had
+`departure_policy: str = "midpoint"` as the default, contradicting D76 and R2's premise that
+`start` is already the default in code.
+
+**Fix.** `git fetch origin && git merge --ff-only origin/main` (working tree was clean; fast-forward,
+no conflicts, nothing local was lost). This pulled in PR #22's 23 changed files, including the
+three new `test_minute_pricer.py` cases that account for 291 -> 294. Re-running the suite after
+the fast-forward: **294 tests, all passing**, in 52.1s. `departure_policy` now defaults to
+`"start"` in `config.py`.
+
+**R6 assertion (delta_chg recompute after a `slot_resolution` override), run against
+`_energy_params_for_resolution` on `configs/default.yaml`, both before and after the
+fast-forward:**
+
+    delta=30  delta_chg=35.0   expected=35.0   OK
+    delta=15  delta_chg=17.5   expected=17.5   OK
+    delta=10  delta_chg=11.67  expected=11.67  OK
+    delta=1   delta_chg=1.17   expected=1.17   OK
+
+**What this does and does not settle.** It settles that Step 0's gate now passes exactly as
+specified (294/294, R6 holds at all four resolutions) and that every Track A/B step that follows
+runs against the actual D76 code (default policy `start`), not a stale pre-D76 checkout that would
+have silently reintroduced the `midpoint` convention the whole handout exists to retire. It does
+not itself produce any report-facing measurement -- it is the gate, not a result -- and it flags a
+process gap worth noting outside this entry: local `main` can drift behind `origin/main` after a
+PR merges upstream without a local fast-forward, and that drift is exactly the kind of silent
+unit/convention confusion R6 and this project's history (D26, the 80/120 cells) warn about. Worth
+a habit, not a fix: pull before trusting a local checkout's test count or defaults.
+
+**Record.** No `measurements.json` entry (this step produces no quantitative claim for the
+report). `docs/PROJECT_STATE_v6.md` test count updated separately under C2.
+
+## D78 — A1: the valuation decomposition regenerated at `o = 0` (`policy: start`) -- the reporting error nearly doubles, it does not vanish
+
+Date: 2026-09-02. Handout item A1. Branch: `main`. Command:
+
+    python scripts/minute_vs_slot_schedule.py --policy start --p-minutes 56
+
+against `configs/milp/baseline_d9_monolith.yaml` (baseline, Q = 2, T = 22, 30-minute slots).
+Both arms (A: slot master + slot recourse; B: slot master + minute recourse, same first stage)
+solved as monolithic MIPs to proven optimality (CPLEX `term=optimal`, `gap=0.0` on both).
+
+**First attempt was wrong and is recorded as a finding, not silently redone.** The script's
+`--p-minutes` has no default (`None`), so a first run without the flag silently used the
+config's native `p_min=1500`, not the handout's `p_minutes = 56`. That run showed `schedules
+identical: True` and a **zero** reporting/decision error -- which is exactly the "if it is not
+[positive], stop and report that" trip-wire A1 names. It was not a finding about the mechanism;
+it was a wrong instance. Re-run with `--p-minutes 56` explicit.
+
+**A's own decomposition** (what the slot model believes about its own schedule) was not printed
+by the script, so it was extracted separately by replicating the script's arm-A setup
+(`MonolithSolver` + `_prepare_params`, same config, same `p`) and calling
+`mobauto2_milp.app._maybe_print_summary` on the result: `wait_slots=185`, `penalty_pax=115`
+(unserved), `pax_served=185/300`, `Avg wait (min)=30.00` -- and `slot_objective_in_minutes`'s own
+rescaling rule (`docs/decisions.md` D50, multiply the whole slot objective by `slot_resolution`)
+gives `399.90666... * 30 = 11997.20` passenger-minutes as the claimed cost.
+
+**The triple, at `o = 0`, passenger-minutes, `p_minutes = 56`:**
+
+| | claimed (A's own belief) | true cost of A's schedule (priced at minute) | true cost of best schedule (B, priced at minute) |
+|---|---:|---:|---:|
+| cost | 11997.20 | 8596.0 | 8388.0 |
+| avg wait (min) | 30.00 | 13.93 | 15.94 |
+| unserved | 115 | 105 | 90 |
+
+**reporting_error = (11997.20 - 8596.0) / 8596.0 = 39.57%** (was 28.5% at `midpoint`).
+**decision_error = (8596.0 - 8388.0) / 8388.0 = 2.48%** (was 6.0% at `midpoint`).
+
+**Accept-test check.** Both solves proven optimal (not clock-truncated); costs share one stated
+rescaling (`slot_objective_in_minutes`, `x delta`); reporting error is positive -- the slot model
+still overvalues its own schedule at the committed departure instant, more so than the withdrawn
+`midpoint` figure suggested, not less. The mechanism of report §4.4.2 stands; it does not need
+restating.
+
+**What this does and does not settle.** It settles the headline triple report §4.4 leads with:
+at the schedule the master actually commits to (`o=0`), the reporting error is 39.6% and the
+decision error is 2.5%, both larger in the reporting-error case and smaller in the
+decision-error case than the withdrawn `midpoint` figures -- so the qualitative claim (the slot
+model materially overvalues its own schedule; a materially different schedule is available under
+minute-accurate valuation) survives the offset correction, with the two numbers moving in
+opposite directions. It does not test any Q, `p_minutes` or shape other than the one baseline
+instance -- that is A2's job -- and it does not re-derive `waiting_reported_min` from anything
+other than this run's own `_maybe_print_summary` output, which is a live computation from the
+solved model, not a stored constant, satisfying R8.
+
+**Record.** `scripts/report_figures/data/measurements.json -> valuation_decomposition`, values
+replaced, `instance` policy set to `start`; the prior `midpoint` values kept verbatim under a new
+`midpoint_counterfactual` key (not deleted -- the report's superseded-values table in §4.8 still
+refers to them).
+
+## D79 — A3: the hedging comparison regenerated at `o = 0`, and given a `measurements.json` entry for the first time
+
+Date: 2026-09-02. Handout item A3. Branch: `main`. Command:
+
+    python scripts/stochastic_robustness.py --Q 2 --p-minutes 56 --policy start
+
+Same instrument as D70 (`scripts/stochastic_robustness.py`, unchanged this run), same four
+scenarios at weight 0.25 each (`base`, `temporal_noise`, `return_peak_advanced`,
+`midday_surge`), same Q=2 / p_minutes=56 regime. Only the departure policy changes, `midpoint`
+(D70) to `start`. All five monolithic solves (one hedged, four oracle) terminated on the MIP
+gap, proven optimal.
+
+| Scenario | hedged (pax-min) | oracle (pax-min) | gap | hedged unserved | oracle unserved |
+|---|---:|---:|---:|---:|---:|
+| base | 8 414 | 8 596 | -2.1% | 98 | 105 |
+| temporal_noise | 8 678 | 8 496 | +2.1% | 103 | 90 |
+| return_peak_advanced | 9 848 | 9 196 | +7.1% | 129 | 117 |
+| midday_surge | 12 291 | 12 132 | +1.3% | 166 | 167 |
+| **AVERAGED (weight 0.25 each)** | **9 808** | **9 605** | **+2.1%** | | |
+
+**The headline number moves from 0.9% (D70, `midpoint`) to 2.1% (`start`).** The same caveat
+D70 flagged still applies and is worth re-stating rather than re-discovering: every oracle here
+is a **slot**-optimal schedule for its own scenario, so each carries its own unmeasured decision
+error (A1/D78 measured exactly this kind of gap at 39.6% for the baseline schedule) -- a
+genuinely minute-optimal per-scenario oracle would be a tighter, separate measurement, not built
+here, per the handout's explicit instruction not to quietly upgrade this comparison.
+
+**Accept-test check.** All five solves proven optimal (gap=0.0 on each); the weighted mean is
+computed over the same four 0.25 weights the report states (equal weights, so AVERAGED is the
+plain mean of the four per-scenario cells, matching the script's own arithmetic).
+
+**What this does and does not settle.** It settles the number report §4.5/4.6 should print at
+the committed departure instant: 2.1%, not 0.9%. Both point the same qualitative direction
+(hedging carries a small but real cost, single-digit per cent) and neither settles whether a
+minute-optimal oracle baseline would narrow or widen the gap -- that remains open, as before.
+
+**Record.** `scripts/report_figures/data/measurements.json -> hedging`, new block (previously
+this number existed only as report text, not in `measurements.json` -- itself a defect this
+step fixes). D70's midpoint numbers (10 413 / 10 324 / +0.9%) kept under a
+`midpoint_counterfactual` key.
+
+## D80 — A4: the penalty x window frontier regenerated at `o = 0`, main grid plus the Wmax=60 refinement, all 29 cells proven optimal
+
+Date: 2026-09-02. Handout item A4. Branch: `main`. Commands:
+
+    python scripts/sweep_penalty_window.py --policy start --p-minutes 14,28,56,112,224 --wmax 30,45,60,90,120 --Q 2
+    python scripts/sweep_penalty_window.py --policy start --p-minutes 28,35,42,49 --wmax 60 --Q 2
+
+Same instrument as D73 (`scripts/sweep_penalty_window.py`, unchanged), same instance
+(`setups/base.yaml`, Q=2, T=22, 30-minute slots, 300 requests), only the departure policy
+changes, `midpoint` (D73) to `start`. All 25 main-grid cells and all 4 refinement cells
+reported `status=ok term=optimal` -- 29/29 proven, none clock-truncated.
+
+**Served / total, minute-honest, at `o = 0`:**
+
+| Wmax | p=14 | p=28 | p=56 | p=112 | p=224 |
+|---:|---:|---:|---:|---:|---:|
+| 30 | 0/300 | 0/300 | 186/300 | 186/300 | 186/300 |
+| 45 | 0/300 | 0/300 | 191/300 | 198/300 | 198/300 |
+| 60 | 0/300 | 0/300 | 195/300 | 220/300 | 224/300 |
+| 90 | 0/300 | 0/300 | 194/300 | 228/300 | 232/300 |
+| 120 | 0/300 | 0/300 | 194/300 | 230/300 | 237/300 |
+
+**Total cost (passenger-minutes):**
+
+| Wmax | p=14 | p=28 | p=56 | p=112 | p=224 |
+|---:|---:|---:|---:|---:|---:|
+| 30 | 4200 | 8400 | 8639 | 15023 | 27791 |
+| 45 | 4200 | 8400 | 8549 | 14305 | 25729 |
+| 60 | 4200 | 8400 | 8596 | 12922 | 21584 |
+| 90 | 4200 | 8400 | 8527 | 12688 | 20387 |
+| 120 | 4200 | 8400 | 8596 | 12660 | 19936 |
+
+**The zero-service cliff survives the offset correction unchanged in shape: `p_minutes` 14 and
+28 still serve nobody, at every Wmax.** The R8 arithmetic check holds exactly at both:
+`total_cost = 300 x p_minutes` -- `300 x 14 = 4200` and `300 x 28 = 8400`, matched to the unit
+at all 10 cells (5 Wmax values x 2 penalties) in the main grid. This is the objective behaving
+as specified (rejecting everyone costs exactly `300 x p_minutes` and nothing else can beat that
+below the threshold), not a defect.
+
+**Refinement at Wmax=60:** `p_minutes` in {28, 35, 42, 49} serves {0, 187, 190, 192} of 300,
+cost {8400, 6244, 7089, 7852} -- the cliff sits between 28 and 35, same bracket D73 found at
+`midpoint`.
+
+**What this does and does not settle.** It settles the frontier report §4.5/4.6's operator-facing
+table should print at the committed departure instant. The magnitudes moved from D73's
+`midpoint` values (e.g. `p=56,Wmax=60`: 9326 -> 8596; `p=224,Wmax=120`: 20712 -> 19936) but the
+qualitative shape -- the cliff at `p_minutes` 14/28, the served counts rising with Wmax and p --
+is unchanged, and the cliff's location (28 to 35) is unchanged. It does not test any Q other
+than 2 (B5's job) and does not itself explain why the cliff sits exactly there (D73 already
+covers the mechanism).
+
+**Record.** `scripts/report_figures/data/measurements.json -> penalty_window_frontier`, values
+replaced, `instance` policy set to `start`, refinement block's `served` corrected to the `start`
+counts and a `total_cost`/`avg_wait_min` row added to it (D73 recorded `served` only). A new
+`zero_service_arithmetic_check` sub-block records the R8 recomputation explicitly. D73's
+`midpoint` values kept verbatim under a new `midpoint_counterfactual` key.
+
+## D81 — A2: the five-shape de-aligned grid regenerated at `o = 0`, 15/15 cells, and two exactly-zero cells traced to their cause rather than waved through
+
+Date: 2026-09-02. Handout item A2. Branch: `main`. First, the code fix A2 named explicitly:
+`scripts/sweep_multiresolution.py --policies` help text still argued `start` was "kept only as
+a lower envelope (D54)" and defaulted to sweeping all three policies -- both withdrawn by D76.
+Default corrected to `start`; help text rewritten to state `start` is the committed instant and
+`midpoint`/`end` are labelled counterfactuals. Command:
+
+    python scripts/sweep_multiresolution.py --policies start --slot 30,15,10 --Q 2 --p-minutes 56 --shapes flat,commuter,bimodal,burst,spiky
+
+15 cells (30 monolithic solves: slot recourse + minute recourse per cell), all at
+`setups/generated/{flat,commuter,bimodal,burst,spiky}.yaml` -- the de-aligned generator, never
+before swept at `start`.
+
+**Minute-level gain (%), re-priced at minute fidelity, at `o = 0`:**
+
+| shape | delta=30 | delta=15 | delta=10 |
+|---|---:|---:|---:|
+| flat | 1.36 | 3.46 | 2.40 |
+| commuter | 3.45 | 1.25 | 1.49 |
+| bimodal | 1.32 | 0.17 | 0.50 |
+| burst | **0.00** | 8.44 | 6.46 |
+| spiky | **0.00** | 1.99 | 0.82 |
+
+**Every cell proved optimal.** 29 of 30 solves returned CPLEX `term=optimal` at `gap=0.0`
+exactly; one (`flat`, delta=30, the slot-recourse arm) returned `term=optimal` at
+`gap=0.000179` -- CPLEX's own MIP-gap tolerance, not a clock stop (no time limit was hit; the
+raw solver log shows the same `status=ok term=optimal` as every other cell). None of the 30 is
+clock-truncated.
+
+**The two exactly-0.00% cells were investigated before being recorded, per the handout's own
+instruction (a de-aligned generator should not produce this).** Two checks:
+
+1. **Generator alignment, direct.** Read every arrival minute out of `burst.yaml` and
+   `spiky.yaml` and counted exact multiples of the slot width (30): burst has **0/150** (OUT)
+   and **0/150** (RET) on a slot boundary; spiky has 5/150 and 8/150, statistically
+   indistinguishable from `flat`'s own 4/150 and 4/150 (chance rate for ~150 draws over a
+   ~650-minute horizon at width 30). The de-alignment property is intact; this is not the old
+   slot-aligned generator's pathology recurring.
+2. **The mechanism, direct.** Reproduced both arms standalone for `burst`/`spiky` at delta=30
+   and printed each arm's own schedule (not just its re-priced cost): the slot-recourse MIP and
+   the minute-recourse MIP -- two independently formulated objectives, solved separately to
+   proven optimality -- chose the **bit-identical first-stage schedule** (same departure slots,
+   both vehicles, both directions) for burst and for spiky, and only for these two shapes, and
+   only at delta=30. At delta=15 and delta=10 the schedules differ (`same?=no` in the sweep's own
+   output) and the gain is positive (8.44%, 1.99% at delta=15; 6.46%, 0.82% at delta=10).
+
+**Reading, stated as what was established and no further.** At the coarsest resolution (T=22
+slots) the first-stage combinatorial choice is constrained enough that, for burst/spiky's own
+demand pattern specifically, the slot-aggregate objective and the exact-minute objective rank
+the same schedule best -- i.e. there is a genuine coincidence of optima, not an inability to
+compute one. This is consistent with (not separately proven beyond) the observation that more
+scheduling freedom exists at finer resolutions, where the same two shapes do show a gain. What
+this does not establish: a general claim that burst/spiky always tie at coarse resolution, or a
+closed-form account of why THIS schedule dominates both objectives simultaneously -- both would
+need more cells than this grid provides.
+
+**What this does and does not settle.** It settles the `1.3-8.2%` sentence report §4.4.4 is
+built on: that range was measured on the slot-aligned generator, known to bias this comparison
+downward; the de-aligned range at `o = 0` is **0.00% to 8.44%** across the three resolutions and
+five shapes, with the two zero cells now explained rather than merely observed. It does not
+settle the `Q x delta` factorial (B5) or extend past `Q = 2`.
+
+**Record.** `scripts/report_figures/data/measurements.json -> multiresolution_gain`, new
+`start` block added (5 shapes x 3 resolutions) alongside the existing `midpoint`/`end` blocks
+(kept, not deleted). A `start_zero_gain_cells` note records the investigation above so a future
+reader does not have to re-derive it. `sweep_multiresolution.py`'s `--policies` default and help
+text corrected in the same commit as the code fix, separately from this measurement per R10.
+
+## D82 — Track C: documentation and repository hygiene, six items
+
+Date: 2026-09-02. Handout Track C, items C1-C6. Branch: `main`. Bundled into one entry and one
+commit -- each item is a small, independent, non-conflicting edit to tracked docs or tests, and
+the handout's own §7 checklist reports them as one track.
+
+**C1 -- `PROJECT_STATE_v6.md` mislabels D56's smallest instance as `Q=3`.** D56 is `Q=2, T=22`
+(quoted verbatim in D56 itself: "baseline_d9, Q=2, T=22, 30-minute slots"). Fixed in
+`PROJECT_STATE_v6.md` §Claim 2's table. The same mislabel was also found, independently, in
+`docs/BENDERS_CORRECTION_PLAN.md` (not named by the handout, but the same root cause, same
+fix) -- confirmed absent from the report itself (`8_Deliver/`), so this had not yet propagated
+there a second time.
+
+**C2 -- stale test counts.** `README.md`, `docs/PROJECT_STATE_v6.md` and
+`docs/BENDERS_SPEC_v4.md` said 276 (or, in `PROJECT_STATE_v6.md`, "267 passed, 9 skipped").
+Updated to the count Step 0 (D77) actually measured, and again here after C6 added one more
+test: **295 passed, 0 skipped under the commercial backend.** `PROJECT_STATE_v6.md`'s skip
+count is now stated per-backend rather than as one bare number, since "9 skipped" described the
+open (HiGHS) backend, untested in this session (no `highspy` in the p310 venv) -- left as the
+handout's own qualitative description (CPLEX-specific machinery, no formulation invariant among
+them, D67) rather than asserting an unverified number. `BENDERS_SPEC_v4.md` §5's separate "49
+tests" line was left alone: it is a historical snapshot from the v3-to-v4 transition, not a
+running count, and changing it would misstate history rather than correct it.
+
+**C3 -- spec says `ceil`, code uses `floor`.** `BENDERS_SPEC_v4.md` §2.5 stated
+`W_slots = ceil(W_max_min/delta)`; `wmax_minutes_to_slots` (`subproblem_impl.py`) computes it by
+`floor`, deliberately, with a test (`test_fast_config.TestWmaxIsNeverRoundedUp`) pinning the
+reason -- `ceil` grants MORE waiting than the config asked for. Spec corrected to match the
+code, with the reasoning stated inline.
+
+**C4 -- the spec's Magnanti-Wong section still described the pre-D30 layered recourse in the
+formulation it labelled "the corrected one".** Three spots in section 2.6's default MW path
+(`docs/BENDERS_SPEC_v4.md`) carried the layer index `k` -- `pi_d[tau,k]`, `x[t,tau,k]`,
+`fill_eps*k`, `Sigma_k` -- even though section 2.5 (a few lines above) already documents the
+model as de-layered since D30, and `solve_mw_dual` (`subproblem_impl.py`) has never had a `k`
+index: its duals are declared over slots alone and its dual-feasibility row carries no
+`fill_eps` term. Rewrote the dual-feasibility system, the optimal-face inequality, the Pareto
+objective, and the "duals used for the cut" formula to match the actual (de-layered) code
+exactly, and removed a footnote ("the Sigma_k is gone") that only made sense next to the old,
+now-removed formula. The historical mentions of the layered form and v3's wrong sign (sections
+2.5's own explanation of why layers were removed, and 2.6's "correction to v3" note) were left
+as-is -- they are correctly framed as history, not as the current model.
+
+**C5 -- swept `configs/` for a shipped config still defaulting to a counterfactual offset.**
+`grep -rl "departure_policy:\s*midpoint\|departure_policy:\s*end" configs/` returned nothing;
+every config that sets the key explicitly already says `start` (D76's own commit updated them).
+`configs/f2/check_offsets.yaml`'s placement-offset grid is already the corrected anticipate-only
+`[-30, -15, 0]` (D76), not a forward grid. No change needed; nothing to fix.
+
+**C6 -- regression test for the R6 `delta_chg` recompute.** Added
+`test_delta_chg_recomputes_after_a_slot_resolution_override` to `tests/test_fast_config.py`:
+builds `_energy_params_for_resolution` at delta in {30, 15, 10, 1} against the tracked
+`baseline_d9.yaml` and asserts 35.00 / 17.50 / 11.67 / 1.17, matching R6's own assertion (and
+Step 0's, D77) exactly. This was previously a convention scripts had to remember; it is now
+checked on every run of the suite. Full suite re-run after adding it: **295 tests, all
+passing**, in 60.0s.
+
+**What this does and does not settle.** All six items close as specified in the handout's §7
+checklist. It does not touch the report itself -- none of these six is a quantitative claim, so
+none feeds `measurements.json` (per R10, only Track A/B measurements do).
+
+**Record.** `docs/PROJECT_STATE_v6.md`, `docs/BENDERS_CORRECTION_PLAN.md`,
+`docs/BENDERS_SPEC_v4.md`, `README.md`, `tests/test_fast_config.py`. No `measurements.json`
+entry.
+
+## D83 — B3: Comparison A's runtime split and time-to-first-feasible, run for the first time (D71 built the instrumentation, no run ever read it)
+
+Date: 2026-09-02. Handout item B3. Branch: `main`. Ran a standard Benders loop,
+`configs/baseline_d9.yaml` (Q=2, T=22, p=50 slot units -- the 1500 pax-min regime, slot
+recourse, single-threaded, this config's own fixed 10-iteration regression budget), with
+`run.emit_reports=true` via the `app.run` overrides dict, and read `BendersRunResult` plus
+`build_manifest`'s `"runtime"` section -- exactly what D71 built and, per its own text, never
+exercised on a real run.
+
+**The split, wall time 79.4767 s:**
+
+| component | seconds | % of wall |
+|---|---:|---:|
+| master | 77.6038 | 97.64% |
+| subproblem solve | 0.3962 | 0.50% |
+| cut generation | 0.3043 | 0.38% |
+| cut add | 0.0205 | 0.03% |
+| model-management overhead | 1.1723 | 1.47% |
+
+**Reconciliation: exact, not approximate.** `total_master_time_s + total_sp_solve_time_s +
+total_cutgen_time_s + model_management_overhead_s = 79.47668419999536`, equal to
+`total_wall_time_s` to the last representable bit (residual `0.0`, computed in float64). Note
+for the record, since it cost a wrong first pass: `total_cutadd_time_s` is tracked separately
+and is **not** a fifth term in this sum -- it is already inside `model_management_overhead_s`.
+Summing all five double-counts cut-add time by construction; the four-term formula above is the
+one `BendersRunResult`'s own test (`test_overhead_reconciles_the_split_to_the_wall_time`)
+asserts, and it is what was checked here.
+
+**Time to first feasible: 0.294 s** (this run's own `time_to_first_feasible_s`, first upper
+bound the loop ever holds, LP phase excluded).
+
+**The other half of item 5 -- time to within a fixed threshold of the optimum -- is confirmed
+not implemented, not newly discovered.** This instance has a known monolithic reference
+(4183.24, `KNOWN_FEASIBLE_UB` in the test suite). At run end (10 iterations, this config's fixed
+budget, `status=UNKNOWN`, not converged) the incumbent is 4291.24, **2.58% above** that
+reference -- one data point, not a time-to-threshold curve. Neither `BendersRunResult` nor the
+manifest retains a per-iteration timestamped incumbent/bound trace (`IterReport` objects are
+built and logged per iteration but never stored on the result), so "time to reach within X% of
+optimum" cannot be read off anything that exists today. D71 already named this gap; building the
+trace is a code change, out of this handout item's scope (it asked to read from the run result
+and manifest, not to add to them).
+
+**What this does and does not settle.** It settles that Comparison A's runtime-split and
+time-to-first-feasible instrumentation works end to end on a real run and reconciles exactly, so
+report §4.5/§4.6/wherever Comparison A appears can cite this table rather than the withdrawn
+85.7% figure. It does **not** re-derive, confirm or refute that withdrawn figure -- this is a
+different config from whatever produced it, run for a different reason (D71's own
+instrumentation demonstration), and the 97.64% master share here should not be read as "the"
+master share for this project; it is what one 10-iteration run of one fixed-budget regression
+config happened to spend. It does not close item 5's second half.
+
+**Record.** `scripts/report_figures/data/measurements.json -> runtime_split`, new block.
+
+## D84 — B4: the continuous-time schedule exchange format, a loader, and a round-trip test
+
+Date: 2026-09-02. Handout item B4. Branch: `main`. D72 closed the validator half
+(`price_schedule_given_departure_minutes` accepts arbitrary minutes -- 37.5 and 82.25 are in
+its own tests). What was missing was a documented format for a continuous-time schedule to
+arrive in from the CP/LBBD line (`20_MobAuto2_CP_LBBD`, a separate repository) and a loader.
+This closes that.
+
+**Format.** New schema `mobauto2_continuous_schedule` v1: `horizon_minutes`, `seats`, and a
+list of `vehicles`, each with an `id`, `departures` (`OUT`/`RET` minute lists, not required to
+be a multiple of any slot width -- the whole point), and an optional `charging_plan` (a list of
+`{start_minute, end_minute}` intervals). Documented in full in `docs/BENDERS_SPEC_v4.md` new
+section 2.11, so the constraint side can emit against it without asking.
+
+**Loader.** `src/mobauto2_benders/continuous_schedule.py`: `load_continuous_schedule` /
+`parse_continuous_schedule` (validate), `to_departures_minutes` (flatten across vehicles into
+the per-direction pool the pricer wants -- vehicle identity is discarded here deliberately,
+matching the slot-based `_schedule()` helpers elsewhere in this project), and
+`price_continuous_schedule` (flatten + price in one call). `charging_plan` is parsed and
+validated (well-formed intervals) and returned on the loaded object, but is **not** consumed by
+pricing -- feasibility against the energy model is separate work, out of this item's scope.
+
+**Validation is fail-closed**, per receitas-basicas: unknown schema/version, a missing required
+key, a departure outside `[0, horizon_minutes]`, a duplicate vehicle id, an unrecognised
+direction key, or a charging interval with `end_minute <= start_minute` all raise `ValueError`
+naming the offending vehicle and field. Seven tests in `TestValidation` cover these; none is
+silently coerced or dropped.
+
+**Round-trip test.** `tests/test_continuous_schedule.py` +
+`tests/fixtures/continuous_schedule_roundtrip.yaml`: a two-vehicle schedule (the slots
+`{"OUT": [1,2,4,6], "RET": [2,3,5,7]}` at `delta=30, policy=start`, converted to minutes and
+split across two vehicles) is loaded and priced via `price_continuous_schedule`, and checked
+against the same schedule's cost computed **independently** through the existing slot path
+(`price_schedule_at_minutes` on the slot form directly) -- total_cost=311.0, waiting=255.0,
+unserved=1, served=9, matched to 6 decimal places. Two different routes to the same LP, per R8,
+not a self-check against code the loader itself wrote. Also checked: flattening keeps every
+departure from both vehicles (none dropped), the charging plan round-trips unchanged, and the
+minutes match the slot-to-minute conversion the fixture's own header claims (checked directly,
+not trusted from the comment).
+
+**Full suite after adding this:** 306 tests, all passing (295 + 11 new: 4 round-trip, 7
+validation).
+
+**What this does and does not settle.** It settles that Comparison C is now one export away: a
+continuous-time schedule from the CP/LBBD side, in this format, prices immediately through the
+existing minute path. It does not produce Comparison C itself -- that needs an actual
+continuous-time schedule from the other repository, which is out of this item's scope (B4's own
+"do here: everything on this side" instruction) -- and it does not address charging-plan
+feasibility, left as explicitly separate work.
+
+**Record.** New files: `src/mobauto2_benders/continuous_schedule.py`,
+`tests/test_continuous_schedule.py`, `tests/fixtures/continuous_schedule_roundtrip.yaml`.
+`docs/BENDERS_SPEC_v4.md` gets new section 2.11. No `measurements.json` entry (no quantitative
+claim for the report).
+
+## D85 — B1: a proven-optimal delta=1 comparison, via Route 2 (a smaller instance), Route 1 not attempted and why
+
+Date: 2026-09-02. Handout item B1. Branch: `main`.
+
+**Why Route 1 was not run.** `delta1_monolith_pilot.py` on the full `T_minutes=660` instance
+has already been run twice: 300s/arm (~47-48% gaps, both arms) and, under D76, 3600s/arm (gap
+tightened to 6.14%/7.02%, the two arms agreeing to 1.40%, **neither arm proven**). Route 1
+(`delta1_to_optimality.py --outer-time-limit 10800`) would (a) be a third escalation of the
+identical lever -- longer wall clock on the identical instance -- which R9 and the handout's
+own "do not accept a third clock-truncated run at a longer budget with no plan change" caution
+against repeating without a plan change, and (b) even if it succeeded, only closes **arm B**:
+that script runs the minute-recourse arm alone by design, and the accept-test needs **both**
+arms proven. Given the 300s->3600s trend (real but slow: order-of-magnitude gap reduction per
+12x budget) there is no basis to expect 3x more wall clock (10800s) closes a MIP of this size
+to a strict `gap=0`, and burning ~3h of machine time to very likely reconfirm "still not proven"
+is the plan-change trigger, not a prerequisite to it. Route 2 was tried directly instead.
+
+**Route 2 -- the reduction, stated.** New config
+`configs/milp/baseline_d9_p56_monolith_delta1_t180.yaml`: `T_minutes` cut from 660 to 180
+(`T=180` slots at `delta=1`, vs 660), same demand file (`setups/base.yaml`), same Q=2, S=15,
+Wmax_minutes=60, p_minutes=56, energy model, trip duration -- nothing resampled or reshaped.
+127 of 300 requests fall inside `[0, 180)` minutes (117 OUT, 10 RET -- the morning OUT peak and
+its earliest returns); 173 are outside it and are excluded explicitly (not silently) by the new
+script, `scripts/delta1_short_horizon_pilot.py`, which truncates the request list to the
+instance's own horizon before handing it to both arms, so arm B sees the same reduced demand
+arm A's own `aggregate_requests` would.
+
+**Command:**
+
+    python scripts/delta1_short_horizon_pilot.py --Q 2 --policy start --time-limit 900
+
+**Result -- both arms proven optimal, well inside budget:**
+
+| arm | status | wall | own claimed cost (rescaled) | priced @ minute |
+|---|---|---:|---:|---:|
+| A (slot-only) | OPTIMAL, gap=0.0 | 23.8 s | 4119.08 | 4119.00 |
+| B (minute-recourse) | OPTIMAL, gap=0.0 | 19.7 s | 4053.08 | 4053.00 |
+
+Neither solve was clock-truncated (both terminated on the MIP gap at 23.8s/19.7s, well under
+the 900s cap and even under the 60s trial cap that preceded this run). `gain = 1.60%`,
+schedules differ (`same? no`) -- a genuine, if small, valuation effect survives even at this
+short horizon.
+
+**The 0.08 discrepancy between "own claimed cost" and "priced @ minute fidelity" is accounted
+for exactly, not waved past** (the accept-test: "any discrepancy is a defect, not a finding").
+Both arms show the identical 0.08 gap. `Shuttle totals (OUT+RET): q0=4, q1=4` -- 8 trips total
+across both vehicles -- and `start_cost_epsilon = 0.01` per trip (D4): `8 x 0.01 = 0.08`,
+matching both discrepancies to 1e-13. The solver's own objective includes this regularisation
+term (D4: it only breaks ties between equal-waiting solutions, 0.01 per trip against a
+~4000-plus objective); `price_schedule_at_minutes` correctly excludes it, since it prices the
+passenger side only. Not a defect: the two numbers differ by exactly the term one includes and
+the other does not, and that term's value is independently known from the config, not fit to
+the discrepancy.
+
+**What this does and does not settle.** It settles that a delta=1 slot-vs-minute comparison
+*can* be run to proven optimality, with the smaller-instance caveat stated: this is a 180-minute
+morning-peak instance, not the full 660-minute day. It does not settle the full-instance
+question -- whether the full T=660 delta=1 MILP is viable at all remains open, per D76's own
+finding, and this entry does not reopen that attempt. It does not change any headline number
+already recorded (A1-A5): this is a separate, smaller instance, not a substitute for any of
+them.
+
+**Record.** `configs/milp/baseline_d9_p56_monolith_delta1_t180.yaml`,
+`scripts/delta1_short_horizon_pilot.py` (new). No `measurements.json` entry -- this is a
+sanity/tractability result (report §5's kind of claim), not a table-facing headline number, and
+the handout does not name a `measurements.json` key for it.
+
+## D86 — B2: Magnanti-Wong ported to the minute recourse; the F2 falsifier re-run under selection still triggers, more sharply than "no improvement"
+
+Date: 2026-09-02. Handout item B2. Branch: `main`.
+
+**The port.** `solve_mw_dual_minute` (new, `minute_pricer.py`) is the minute recourse's own
+Magnanti-Wong dual, built over the same arcs the primal (`solve_minute_recourse`) uses --
+extracted into a shared `_minute_recourse_geometry` helper so the two cannot silently diverge,
+the same reasoning that made `expand_slopes_to_candidate` its own function elsewhere in this
+project. Same interface as the slot path's `MWDual` (a scalar intercept, deliberately -- its
+docstring already anticipated this: "the minute recourse[has] one demand row per arrival
+MINUTE"), same sign convention (`pi <= 0`), same Pareto objective at the projected core point
+`Ybar` (S3, D63) -- that projection is already resolution-agnostic (pure first-stage/slot-index
+arithmetic, computed once in `evaluate()` before either generator is dispatched), so B2 needed
+no change to it, only to route into it.
+
+**The one structural difference the port had to guard against, not merely note.** In the slot
+LP, only slot 0 can lack a dual-feasibility row (structural: `t+1 <= tau`). In the minute LP,
+whether `pi[tau]` appears in any row is **data-dependent** -- any slot too early or late for any
+arrival to reach within `Wmax_minutes` is orphaned, not just slot 0. Left free, such a `pi[tau]`
+(`<= 0`, maximised) risks an unbounded LP whenever its objective coefficient is negative.
+Fixed at the cause: an orphaned `pi[tau]` is fixed to `0.0` rather than left free -- a shadow
+price for a capacity row that was never built is not a quantity the LP can select. Covered by
+`tests/test_minute_mw.test_a_pi_with_no_dual_feasibility_row_is_fixed_to_zero_not_left_unbounded`.
+
+**Wiring.** One new dispatch closure, `dispatch_mw_dual`, added beside `solve_mw_dual` in
+`subproblem_impl.py`'s `evaluate()` and called from both existing call sites (the multi-scenario
+loop and the single-scenario path) instead of `solve_mw_dual` directly -- one branch point, not
+one duplicated at each site. `config.py`'s load-time refusal of `use_magnanti_wong: true` with
+`recourse_resolution: 'minute'` is removed (it is no longer true); the removed guard's own test,
+`test_mw_with_minute_recourse_is_refused`, is replaced with
+`test_mw_with_minute_recourse_is_allowed`. `docs/BENDERS_SPEC_v4.md` section 2.6 rewritten to
+describe the port instead of the refusal.
+
+**Accept-test 1 -- cut-soundness invariants, mirroring the slot path's own
+(`tests/test_minute_mw.py`, 4 tests, LP backend required):**
+
+- `solve_mw_dual_minute` returns a solution (not `None`) on a representative instance, with
+  `dm_out/dm_ret <= 0` (sign convention holds).
+- **The intercept is derived from the demand duals and reconciles against the imposed form**
+  (S2) -- `derive_cut_intercepts` (unmodified, generic code) run on a minute-recourse `MWDual`
+  for the first time, and it does not raise.
+- **The cut never overestimates at a point other than its own anchor** -- checked at a genuinely
+  different schedule the dual was not built at, not merely tight at the incumbent (tight-at-
+  anchor is necessary but not sufficient; D30 was an overestimate everywhere else while exact at
+  one point).
+- The orphaned-`pi` guard fires correctly and returns `0.0`, not `None` and not an unbounded LP.
+
+**End-to-end confirmation**, beyond the isolated LP tests: a real 5-iteration Benders loop on
+`configs/phase1/rq5_benders_minute_p56_a5_iterbudget.yaml` with `use_magnanti_wong: true` added
+reports `cut_generation_mode=mw` and `mode=mw`/`lb_valid=valid` on **every** iteration, zero
+`[MW FAIL]` lines. Full suite after the port: 310 tests, all passing.
+
+**Accept-test 2 -- the F2 A/B, re-run under selection.** New configs
+`configs/f2/check_baseline_mw.yaml` / `check_offsets_mw.yaml` (the two existing F2 configs plus
+exactly `use_magnanti_wong: true`, nothing else -- same iteration budget (15), same generous
+time limit). `scripts/f2_placement_freedom_check.py` given optional `--baseline-config`/
+`--offsets-config` (defaults unchanged) so both variants run through the identical harness. The
+plain-dual run was repeated first as a control and reproduced the number already on record
+almost exactly (`-29.285%` here vs `-29.3%` recorded) -- the environment is measuring the same
+thing D76 did.
+
+| | LB baseline | LB F2 (anticipate-only) | gain | both bit-reproducible |
+|---|---:|---:|---:|:---:|
+| plain dual (control, re-run) | 184.495 | 130.466 | **-29.285%** | yes |
+| Magnanti-Wong selection | 184.564 | 132.057 | **-28.449%** | yes |
+
+Both arms of both runs: `clock_truncated_master_solves == 0`, 15 iterations each, deterministic
+(single-threaded, seeded).
+
+**Verdict, stated either way as B2 asked.** Selection does **not** recover the F2 lever.
+Both LBs move up slightly under MW relative to plain dual (baseline +0.07, offsets +1.59) --
+consistent with Pareto selection finding a marginally stronger cut at each anchor, as expected
+-- but the *gap between the two arms*, which is what F2 is actually about, is essentially
+unchanged: -29.3% under plain dual, -28.4% under selection, both far outside noise and both
+strongly negative. **The diagnosis in report §4.3.1 is complete, not partial.** Cut-side
+degeneracy correction was the remaining hypothesis after the offset-grid correction (D76) made
+the lever worse rather than better; with that hypothesis also tested and also negative, there is
+no known device left in this repository's own toolbox that turns placement freedom into a
+positive lever at this budget, on this instance. This is a finding, not a gap: F2's placement
+freedom does not help, under either cut generator this project has, and saying so completely is
+more useful than leaving cut selection as an open "what if."
+
+**What this does and does not settle.** It settles B2 completely: the port works, passes the
+same soundness bar the slot path is held to, and answers the question it was built to ask. It
+does not explain *why* placement freedom is harmful rather than merely neutral (D74/D76 already
+covers the mechanism: the relaxation lets two passengers on the same physical departure be
+priced as boarding at different candidate minutes, which loosens rather than tightens the
+capacity coupling the cut needs) -- B2 was never asked to re-derive that, only to check whether
+a better cut generator changes the answer. It does not.
+
+**Record.** New: `solve_mw_dual_minute`/`MinuteMWDual` (`minute_pricer.py`), `dispatch_mw_dual`
+(`subproblem_impl.py`), `tests/test_minute_mw.py`, `configs/f2/check_baseline_mw.yaml`,
+`configs/f2/check_offsets_mw.yaml`. Changed: `config.py` (guard removed),
+`tests/test_fast_safety_fixes.py` (refusal test replaced), `docs/BENDERS_SPEC_v4.md` section 2.6,
+`scripts/f2_placement_freedom_check.py` (config-path CLI args, stale grid label fixed).
+`scripts/report_figures/data/measurements.json -> placement_freedom_f2`, new block recording
+both the plain-dual control and the MW numbers side by side.
+
+## D87 — B5: the delta x Q factorial, Q=3 row (partial: 5 of 15 cells clock-truncated, reported as such rather than blended in)
+
+Date: 2026-09-02. Handout item B5, explicitly lowest priority. Branch: `main`. Command:
+
+    python scripts/sweep_multiresolution.py --policies start --slot 30,15,10 --Q 3 --p-minutes 56 --shapes flat,commuter,bimodal,burst,spiky
+
+A2 (D81) already covers the `Q=2` row; this is "one further Q" per B5's own instruction to run
+`Q=2` plus one more and record the rest as not run. No `--time-limit` override was given (the
+default per-solve cap, 900s, applied) -- with hindsight, this is exactly the case B5's own text
+warned about ("the item most likely to need a deliberate `--time-limit`"), and five of the
+thirty solves hit it.
+
+**Per-cell status, checked from the raw CPLEX termination (not inferred from the gain
+column):**
+
+| delta | shape | arm A | arm B | proven? |
+|---:|---|---|---|:---:|
+| 30 | flat, commuter, bimodal, burst, spiky | optimal | optimal | yes (all 5) |
+| 15 | flat, commuter, burst, spiky | optimal | optimal | yes (4) |
+| 15 | bimodal | optimal | **maxTimeLimit** | **no** |
+| 10 | flat | **maxTimeLimit** | optimal | **no** |
+| 10 | commuter | optimal | **maxTimeLimit** | **no** |
+| 10 | bimodal | **maxTimeLimit** | **maxTimeLimit** | **no** |
+| 10 | burst, spiky | optimal | optimal | yes (2) |
+
+**10 of 15 cells proven; 5 are not, and their gain numbers are reported below labelled as
+such, not silently blended with the proven ones** (BENDERS_SPEC_v4 section 0.10's caveat: a
+clock-truncated cell is reported as truncated).
+
+**Gain (%), proven cells only:**
+
+| shape | delta=30 | delta=15 | delta=10 |
+|---|---:|---:|---:|
+| flat | 0.00 | 1.54 | truncated (1.53) |
+| commuter | 0.38 | 2.01 | truncated (-0.95) |
+| bimodal | -0.40 | truncated (0.00) | truncated (1.80) |
+| burst | 0.00 | 11.75 | 0.00 |
+| spiky | 5.79 | 5.69 | 7.46 |
+
+**Two proven zero-gain cells (delta=30: flat, burst) match the mechanism D81 already
+diagnosed for Q=2** (coarse resolution leaves little first-stage freedom to exploit demand
+structure below one slot) -- not re-investigated to the same depth here, given this item's
+explicit low priority, but flagged as the same pattern rather than a new one.
+
+**One proven small negative (delta=30, bimodal, -0.40%) is noted, not chased.** Unlike D81's
+exactly-zero cells (which the handout explicitly required investigating), a small negative is
+within the range the multi-scenario hedging result (D79/D70) already established as possible
+when the minute-recourse MIP's own optimum does not coincide with the externally-repriced
+minimum -- both are proven-optimal solves under their own objectives, re-priced by a function
+neither directly optimises. Recorded, not investigated further, consistent with B5's priority.
+
+**What this does and does not settle.** It settles that `Q=3` is at least partially
+tractable at this budget (10/15 cells close inside 900s/solve) and gives a first, incomplete
+read on whether the resolution effect is stable across fleet size: the proven cells span
+0.00% to 11.75%, inside the `Q=2` row's own 0.00%-8.44% range, so nothing here suggests `Q=3`
+behaves qualitatively differently. It does not close the factorial -- `Q=4` was not attempted
+(explicitly out of scope: "lower priority than everything above it," and `Q=3` already needed
+the default 900s cap on a third of its cells) -- and it does not re-derive or replace A2's
+`Q=2` numbers.
+
+**Record.** `scripts/report_figures/data/measurements.json -> multiresolution_gain` was **not**
+extended with a `Q` dimension for this partial row -- the handout's own schema for this key
+(shape x resolution, D81) has no `Q` axis, and adding one for a 5-of-15-truncated row would
+misrepresent it as complete. This entry in `docs_decisions.md` is the record; `Q=4` and the
+five truncated `Q=3` cells remain not run / not proven, stated here rather than left
+ambiguous.
+
+## D88 — A5: the bound interval at `o = 0`, BLOCKED after ~4h -- the invariant held throughout, but the run is not bit-reproducible
+
+Date: 2026-09-02. Handout item A5. Branch: `main`. **Marked blocked, not done**, per R9's own
+failure protocol: recorded here is the budget given, the state reached, and why it stopped
+where it did.
+
+**Setup.** New config `configs/phase1/rq5_benders_minute_p56_a5_iterbudget.yaml`: a copy of
+D56's `rq5_benders_minute_p56.yaml` with `solver.total_time_limit_s` raised from 300 to 36000
+so `solver.max_iterations` (400) would be what binds, per R4/the handout's own explicit
+instruction ("iteration-budgeted... let B1 run its full route if that's what proving optimality
+takes" -- the same principle applied here). Reference monolith re-confirmed at this exact
+regime: `279.84` (matches A1/D78's own minute-recourse monolith, cross-checked independently).
+
+**What ran, and for how long.** Started, monitored, and eventually stopped deliberately after
+~4 hours of wall clock, at **iteration 228** (229th master solve in progress when stopped):
+
+    LB = 249.426   UB = 282.907   gap = 11.8%   (vs. gap = 27% at D56's iteration 34)
+
+**The invariant this item exists to check held at every single iteration, with no
+exception.** `LB <= 279.84` (the monolithic optimum) and `UB >= 279.84` were both checked
+against every one of the 228 completed iterations' printed bounds -- zero violations. This is
+itself the positive half of A5: the bound is sound throughout, exactly as every other cut
+soundness check in this project has found.
+
+**Why this is BLOCKED and not DONE: `clock_truncated_master_solves` is not zero.** Read from
+the run's own log (R7), not inferred: of 457 total master solves across 228 iterations, **112
+(24.5%) terminated with `term=maxTimeLimit`**, not `term=optimal`. The overall run was never
+wall-clock-bound -- `total_time_limit_s=36000` never came close to binding, which is exactly
+why the run took 4 hours -- but the config's **per-iteration** cap
+(`master.per_iteration_time_limit_s: 120`, inherited unchanged from D56's own config, never
+reconsidered when this file was created) bound on over a hundred individual master solves as
+the cut set grew and each master MIP got harder to solve to its own 5% mip-gap. Per R4/D26, a
+run with any master solve stopping on the clock is not bit-reproducible: the node count in a
+time-limited solve depends on machine load, and every later iteration inherits the difference.
+A5's own accept-test names `clock_truncated_master_solves == 0` explicitly; this run does not
+meet it, regardless of how far its bound moved.
+
+**Why not simply raise the per-iteration cap and re-run.** The 120s cap first started binding
+partway through the run (early iterations, with few cuts, solved in seconds); by iteration 228
+a single master solve alone took 78.6s and rising, so a cap generous enough not to bind at
+iteration 400 would need to be considerably larger than 120s -- and 112 of the iterations
+already run would need to be **re-solved**, not merely continued from, since a time-limited
+solve earlier in the run means every cut generated from it, and every iteration after, is
+already potentially non-reproducible. A correct re-run is not an extension of this one; it is a
+new run from iteration 1, at a per-iteration cap large enough to hold for the whole 400-iteration
+budget. Given the bound's own movement had slowed sharply by the time this was stopped (11.8%
+at iteration 228 against 13.1% roughly 35 iterations earlier -- consistent with D56's own
+finding that the bound lives at the fractional LP root and cuts do not move it much past a
+point), a corrected re-run is likely to cost several more hours for a bound that may not move
+much further. Not attempted here; recorded as the deliberate stopping point instead.
+
+**What this does and does not settle.** It does not produce a `bound_interval` measurement at
+`o = 0` -- the existing `midpoint` values (D56) stay in `measurements.json`, explicitly labelled
+as withdrawn but kept because no valid replacement exists, with this run's state reached
+recorded alongside them under a clearly separate key so a reader cannot mistake one for the
+other. It does settle, again, that the underlying soundness invariant holds under `start` just
+as it does under `midpoint` -- 228 iterations, zero violations -- which was not previously
+checked at this policy. It leaves open whether the decomposition's lower bound closes further
+against the monolith at `o = 0` than it did at `midpoint` (D56's `74.9%` of the monolith
+objective); at the point this was stopped, `249.426 / 279.84 = 89.1%`, already better than
+D56's `74.9%`, but this number carries the same reproducibility caveat as everything else in
+this entry and must not be quoted as a clean comparison to D56's.
+
+**If this is revisited:** re-run from scratch with `per_iteration_time_limit_s` raised enough
+to hold for the full budget (a value comfortably above what a ~400-cut master needs, determined
+by watching the trend rather than guessing), and expect several more hours of wall clock.
+
+**Record.** `configs/phase1/rq5_benders_minute_p56_a5_iterbudget.yaml` (kept, in case of a
+future corrected re-run). `scripts/report_figures/data/measurements.json -> bound_interval`:
+`source`/`instance` updated to state the block explicitly; a new
+`start_policy_attempt_d88` sub-block records the state reached, clearly marked as not a
+`bound_interval` measurement and not for plotting.

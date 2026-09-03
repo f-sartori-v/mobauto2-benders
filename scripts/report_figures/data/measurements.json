@@ -5,40 +5,147 @@
     "traced back without opening the plotting code. Editing a number here changes",
     "the figure and nothing else; the scripts hold no numbers of their own."
   ],
+  "placement_freedom_f2": {
+    "source": "docs/docs_decisions.md D86 (2026-09-02), scripts/f2_placement_freedom_check.py, configs/f2/check_{baseline,offsets}[_mw].yaml, 15 iterations/arm, all 4 arms clock_truncated_master_solves == 0",
+    "instance": "Q = 2, T = 22, minute recourse, p_minutes = 56, policy = start, anticipate-only offset grid [-30,-15,0] (D76)",
+    "unit": "lower bound, slot-equivalent units; gain is relative to the baseline arm's LB",
+    "plain_dual": {
+      "lb_baseline": 184.495,
+      "lb_offsets": 130.466,
+      "gain_pct": -29.285
+    },
+    "magnanti_wong": {
+      "lb_baseline": 184.564,
+      "lb_offsets": 132.057,
+      "gain_pct": -28.449
+    },
+    "verdict": "Selection does not recover the F2 lever. Both LBs move up slightly under MW (marginally stronger cuts at each anchor, as expected), but the gap between the two arms -- what F2 is actually about -- is essentially unchanged and remains strongly negative under both cut generators. Report Sec 4.3.1's placement-freedom diagnosis is complete, not partial."
+  },
+  "runtime_split": {
+    "source": "docs/docs_decisions.md D83 (2026-09-02), a standard Benders loop (configs/baseline_d9.yaml) with run.emit_reports=true, reading BendersRunResult / manifest['runtime'] (D71 instrumentation)",
+    "instance": "baseline_d9.yaml, Q = 2, T = 22, p = 50 slot units (1500 pax-min regime), slot recourse, 10 iterations (this config's own fixed regression budget), single-threaded",
+    "note": "supersedes nothing quotable -- the earlier 'master ~85.7% of runtime' figure was already withdrawn (PROJECT_STATE_v6 Sec 3, D71) and is not re-derived or refuted here; this is instrumentation exercised on a real run for the first time, not a like-for-like re-measurement of that withdrawn number.",
+    "unit": "seconds unless stated",
+    "total_wall_time_s": 79.4767,
+    "total_master_time_s": 77.6038,
+    "total_sp_solve_time_s": 0.3962,
+    "total_cutgen_time_s": 0.3043,
+    "total_cutadd_time_s": 0.0205,
+    "model_management_overhead_s": 1.1723,
+    "reconciliation_formula": "total_master_time_s + total_sp_solve_time_s + total_cutgen_time_s + model_management_overhead_s == total_wall_time_s",
+    "reconciliation_residual": 0.0,
+    "cutadd_note": "total_cutadd_time_s is tracked separately and is NOT one of the four terms the reconciliation above sums (it is small, 0.03% of wall time, and already inside model_management_overhead_s) -- matches the exact formula BendersRunResult's own tests assert (test_overhead_reconciles_the_split_to_the_wall_time).",
+    "pct_of_wall": {
+      "master": 97.64,
+      "sp_solve": 0.50,
+      "cutgen": 0.38,
+      "cutadd": 0.03,
+      "overhead": 1.47
+    },
+    "time_to_first_feasible_s": 0.294,
+    "distance_to_known_optimum_at_run_end": {
+      "known_optimum": 4183.24,
+      "run_end_incumbent": 4291.24,
+      "gap_pct": 2.58,
+      "note": "single end-of-run data point, not a time-to-threshold curve. B3's other half (time to within a fixed threshold of the optimum, over the run) is NOT implemented: no per-iteration timestamped incumbent trace exists in BendersRunResult or the manifest, only the final best_lower_bound/best_upper_bound. Restated, not newly discovered -- D71 already named this gap. Building that trace would be a code change out of this handout's scope."
+    }
+  },
   "bound_interval": {
-    "source": "docs/docs_decisions.md D56 (PROJECT_STATE_v6 section 2 mislabels this row as Q=3)",
-    "instance": "Q = 2, T = 22, minute recourse, single-threaded, p_minutes = 56",
+    "source": "docs/docs_decisions.md D56 (PROJECT_STATE_v6 section 2 mislabels this row as Q=3). Handout item A5/D88 attempted to regenerate this at policy=start and left it BLOCKED, not closed -- see D88. These values are the withdrawn midpoint measurement, kept because no valid start-policy replacement exists yet, not because they are current.",
+    "instance": "Q = 2, T = 22, minute recourse, single-threaded, p_minutes = 56, policy = midpoint (WITHDRAWN, D76 -- see D88 for the blocked start-policy attempt)",
     "lower_bound": 219.74,
     "upper_bound": 299.37,
     "optimum": 293.37,
     "iterations": 34,
     "decomposition_seconds": 301.4,
-    "monolith_seconds": 0.8
+    "monolith_seconds": 0.8,
+    "start_policy_attempt_d88": {
+      "status": "blocked, not proven -- clock_truncated_master_solves > 0",
+      "iterations_completed": 228,
+      "lower_bound_reached": 249.426,
+      "upper_bound_reached": 282.907,
+      "gap_pct_reached": 11.8,
+      "monolith_reference": 279.84,
+      "note": "LB never exceeded 279.84 and UB never dropped below it at any of the 228 iterations (the invariant held throughout), but 112 of 457 master solves hit the per-iteration 120s cap inherited unchanged from D56's config -- the run is not bit-reproducible per R4/D26, so these numbers are the state reached, not a bound_interval measurement. Not to be plotted as the headline figure."
+    }
   },
   "valuation_decomposition": {
-    "source": "docs/RESEARCH_NOTE_v2.md section 2.1 (D51, D53)",
-    "instance": "baseline, Q = 2, T = 22, 30-minute slots, p_minutes = 56",
+    "source": "docs/docs_decisions.md D78 (2026-09-02), scripts/minute_vs_slot_schedule.py --policy start --p-minutes 56, both solves proven optimal",
+    "instance": "baseline, Q = 2, T = 22, 30-minute slots, p_minutes = 56, policy = start",
     "unit": "passenger-minutes",
-    "claimed_cost_of_slot_schedule": 11990,
-    "true_cost_of_slot_schedule": 9326,
-    "true_cost_of_best_schedule": 8794,
-    "reporting_error_pct": 28.5,
-    "decision_error_pct": 6.0,
-    "waiting_reported_min": 38.24,
+    "claimed_cost_of_slot_schedule": 11997.2,
+    "true_cost_of_slot_schedule": 8596.0,
+    "true_cost_of_best_schedule": 8388.0,
+    "reporting_error_pct": 39.57,
+    "decision_error_pct": 2.48,
+    "waiting_reported_min": 30.0,
     "waiting_true_min_range": [
-      20.4,
-      23.2
-    ]
+      13.93,
+      15.94
+    ],
+    "unserved_reported": 115,
+    "unserved_true_range": [
+      90,
+      105
+    ],
+    "midpoint_counterfactual": {
+      "note": "Superseded by D76 (the committed departure offset is now policy=start; midpoint is a labelled counterfactual per R2). Kept, not deleted, because the report's superseded-values table (8_Deliver section 4.8) refers to these numbers.",
+      "source": "docs/RESEARCH_NOTE_v2.md section 2.1 (D51, D53)",
+      "instance": "baseline, Q = 2, T = 22, 30-minute slots, p_minutes = 56, policy = midpoint",
+      "unit": "passenger-minutes",
+      "claimed_cost_of_slot_schedule": 11990,
+      "true_cost_of_slot_schedule": 9326,
+      "true_cost_of_best_schedule": 8794,
+      "reporting_error_pct": 28.5,
+      "decision_error_pct": 6.0,
+      "waiting_reported_min": 38.24,
+      "waiting_true_min_range": [
+        20.4,
+        23.2
+      ]
+    }
+  },
+  "hedging": {
+    "source": "docs/docs_decisions.md D79 (2026-09-02), scripts/stochastic_robustness.py --Q 2 --p-minutes 56 --policy start, five monolithic solves all proven optimal",
+    "instance": "Q = 2, p_minutes = 56, policy = start, four scenarios weight 0.25 each",
+    "unit": "passenger-minutes",
+    "scenarios": {
+      "base": {"hedged_cost": 8414, "oracle_cost": 8596, "gap_pct": -2.1, "hedged_unserved": 98, "oracle_unserved": 105},
+      "temporal_noise": {"hedged_cost": 8678, "oracle_cost": 8496, "gap_pct": 2.1, "hedged_unserved": 103, "oracle_unserved": 90},
+      "return_peak_advanced": {"hedged_cost": 9848, "oracle_cost": 9196, "gap_pct": 7.1, "hedged_unserved": 129, "oracle_unserved": 117},
+      "midday_surge": {"hedged_cost": 12291, "oracle_cost": 12132, "gap_pct": 1.3, "hedged_unserved": 166, "oracle_unserved": 167}
+    },
+    "weighted_mean_hedged_cost": 9808,
+    "weighted_mean_oracle_cost": 9605,
+    "weighted_mean_gap_pct": 2.1,
+    "note": "Per-scenario oracle baselines are slot-optimal schedules, so each carries its own unmeasured decision error (see valuation_decomposition); this is not upgraded to a minute-optimal per-scenario baseline here (that would be a separate measurement and D-number).",
+    "midpoint_counterfactual": {
+      "note": "D70 (2026-08-30), superseded by D76 (policy default is now start); kept because it is the number the report currently prints.",
+      "weighted_mean_hedged_cost": 10413,
+      "weighted_mean_oracle_cost": 10324,
+      "weighted_mean_gap_pct": 0.9
+    }
   },
   "multiresolution_gain": {
-    "source": "docs/RESEARCH_NOTE_v2.md section 2.2 (D54, D55)",
-    "instance": "Q = 2, p_minutes = 56, de-aligned generated shapes, every solve proven optimal",
+    "source": "docs/docs_decisions.md D81 (2026-09-02), scripts/sweep_multiresolution.py --policies start --slot 30,15,10 --Q 2 --p-minutes 56 --shapes flat,commuter,bimodal,burst,spiky, 15/15 cells (30/30 monolithic solves) at status=optimal",
+    "instance": "Q = 2, p_minutes = 56, de-aligned generated shapes, policy = start, every solve proven optimal (one solve, flat/delta=30 arm A, converged to CPLEX's own MIP-gap tolerance at gap=0.000179, not clock-truncated)",
     "unit": "per cent",
     "resolutions": [
       30,
       15,
       10
     ],
+    "start": {
+      "flat": [1.36, 3.46, 2.40],
+      "commuter": [3.45, 1.25, 1.49],
+      "bimodal": [1.32, 0.17, 0.50],
+      "burst": [0.00, 8.44, 6.46],
+      "spiky": [0.00, 1.99, 0.82]
+    },
+    "start_zero_gain_cells": {
+      "note": "burst and spiky at delta=30 report exactly 0.00% gain -- flagged for investigation by the handout before recording (a de-aligned generator should not produce this by boundary alignment). Investigated (D81): the generator's alignment property is intact (0/150 burst arrivals and 5/150, 8/150 spiky arrivals land on exact multiples of 30, the latter consistent with flat's own 4/150 chance rate); a direct check confirmed the two monolithic MIPs (slot recourse, minute recourse), independently formulated and solved, chose the BIT-IDENTICAL first-stage schedule (same departure slots for both vehicles, both directions) at delta=30 for these two shapes only, at every finer delta (15, 10) the schedules differ and the gain is positive. Reading: at the coarsest resolution the first-stage combinatorial choice is constrained enough (T=22 slots, Q=2) that the two objectives -- slot-aggregate wait vs exact-minute wait -- happen to rank the same schedule best for burst/spiky's own demand pattern; at finer resolutions there is more scheduling freedom and the two objectives diverge. Not a generator regression.",
+      "cells": ["burst delta=30", "spiky delta=30"]
+    },
     "midpoint": {
       "flat": [
         12.43,
@@ -96,38 +203,77 @@
     "multi_scenario_gain": 3.84
   },
   "penalty_window_frontier": {
-    "source": "docs/docs_decisions.md D73, scripts/sweep_penalty_window.py",
-    "instance": "setups/base.yaml, Q = 2, T = 22, 30-minute slots, midpoint policy, 300 requests",
+    "source": "docs/docs_decisions.md D80 (2026-09-02), scripts/sweep_penalty_window.py --policy start, all 25 + 4 cells proven optimal",
+    "instance": "setups/base.yaml, Q = 2, T = 22, 30-minute slots, policy = start, 300 requests",
     "unit": "passenger-minutes / passengers, every solve proven optimal, minute-honest pricing",
     "p_minutes_grid": [14, 28, 56, 112, 224],
     "wmax_grid": [30, 45, 60, 90, 120],
     "served": {
-      "30":  [0, 0, 171, 171, 171],
-      "45":  [0, 0, 184, 196, 196],
-      "60":  [0, 0, 187, 220, 221],
-      "90":  [0, 0, 188, 227, 233],
-      "120": [0, 0, 187, 229, 238]
+      "30":  [0, 0, 186, 186, 186],
+      "45":  [0, 0, 191, 198, 198],
+      "60":  [0, 0, 195, 220, 224],
+      "90":  [0, 0, 194, 228, 232],
+      "120": [0, 0, 194, 230, 237]
     },
     "avg_wait_min": {
-      "30":  [0.0, 0.0, 13.3, 13.3, 13.3],
-      "45":  [0.0, 0.0, 15.2, 18.1, 18.1],
-      "60":  [0.0, 0.0, 16.0, 20.8, 23.2],
-      "90":  [0.0, 0.0, 15.9, 22.4, 26.5],
-      "120": [0.0, 0.0, 16.0, 23.1, 28.7]
+      "30":  [0.0, 0.0, 12.1, 12.1, 12.1],
+      "45":  [0.0, 0.0, 12.8, 14.6, 14.6],
+      "60":  [0.0, 0.0, 13.9, 18.0, 20.4],
+      "90":  [0.0, 0.0, 13.4, 20.3, 22.2],
+      "120": [0.0, 0.0, 13.7, 21.0, 24.6]
     },
     "total_cost": {
-      "30":  [4200, 8400, 9494, 16718, 31166],
-      "45":  [4200, 8400, 9287, 15189, 26837],
-      "60":  [4200, 8400, 9326, 13525, 22816],
-      "90":  [4200, 8400, 9268, 13260, 21193],
-      "120": [4200, 8400, 9326, 13242, 20712]
+      "30":  [4200, 8400, 8639, 15023, 27791],
+      "45":  [4200, 8400, 8549, 14305, 25729],
+      "60":  [4200, 8400, 8596, 12922, 21584],
+      "90":  [4200, 8400, 8527, 12688, 20387],
+      "120": [4200, 8400, 8596, 12660, 19936]
     },
     "zero_service_threshold": {
       "wmax_minutes": 60,
       "comment": "Refinement sweep at Wmax=60 only, not part of the 5x5 grid above.",
       "p_minutes": [28, 35, 42, 49],
-      "served": [0, 173, 179, 183],
+      "served": [0, 187, 190, 192],
+      "avg_wait_min": [0.0, 12.2, 13.0, 13.3],
+      "total_cost": [8400, 6244, 7089, 7852],
       "bracket": "crosses from zero to positive service between p_minutes=28 and 35"
+    },
+    "zero_service_arithmetic_check": {
+      "comment": "R8 independent recomputation: every zero-service cell must satisfy total_cost == 300 * p_minutes exactly.",
+      "p14": "300*14=4200, matches",
+      "p28": "300*28=8400, matches"
+    },
+    "midpoint_counterfactual": {
+      "note": "D73 (2026-08-31), superseded by D76 (policy default is now start); kept because it is the number the report currently prints.",
+      "source": "docs/docs_decisions.md D73, scripts/sweep_penalty_window.py",
+      "instance": "setups/base.yaml, Q = 2, T = 22, 30-minute slots, midpoint policy, 300 requests",
+      "served": {
+        "30":  [0, 0, 171, 171, 171],
+        "45":  [0, 0, 184, 196, 196],
+        "60":  [0, 0, 187, 220, 221],
+        "90":  [0, 0, 188, 227, 233],
+        "120": [0, 0, 187, 229, 238]
+      },
+      "avg_wait_min": {
+        "30":  [0.0, 0.0, 13.3, 13.3, 13.3],
+        "45":  [0.0, 0.0, 15.2, 18.1, 18.1],
+        "60":  [0.0, 0.0, 16.0, 20.8, 23.2],
+        "90":  [0.0, 0.0, 15.9, 22.4, 26.5],
+        "120": [0.0, 0.0, 16.0, 23.1, 28.7]
+      },
+      "total_cost": {
+        "30":  [4200, 8400, 9494, 16718, 31166],
+        "45":  [4200, 8400, 9287, 15189, 26837],
+        "60":  [4200, 8400, 9326, 13525, 22816],
+        "90":  [4200, 8400, 9268, 13260, 21193],
+        "120": [4200, 8400, 9326, 13242, 20712]
+      },
+      "zero_service_threshold": {
+        "wmax_minutes": 60,
+        "p_minutes": [28, 35, 42, 49],
+        "served": [0, 173, 179, 183],
+        "bracket": "crosses from zero to positive service between p_minutes=28 and 35"
+      }
     }
   }
 }

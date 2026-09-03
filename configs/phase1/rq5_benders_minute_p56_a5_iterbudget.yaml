@@ -1,0 +1,109 @@
+# A5 (HANDOUT_V02_CONSOLIDATION.md) -- the bound_interval measurement (D56), regenerated
+# at policy=start and BUDGETED BY ITERATION, not by wall clock.
+#
+# WHY A SEPARATE FILE, NOT AN EDIT TO rq5_benders_minute_p56.yaml. That file's own header
+# says "WHAT BINDS. Wall clock, deliberately, at 300s ... This is the one place in the
+# repository where a run is SUPPOSED to stop on the clock" -- it answers RQ5 (how far does
+# the decomposition get in a fixed budget), a different question from A5's (what is the
+# true, untruncated LB/UB interval, checked at every iteration, with
+# clock_truncated_master_solves == 0). R4 requires the bound in A5 to be iteration-budgeted:
+# a wall-clock cap makes a reported bound irreproducible, since the nodes a truncated master
+# explores depend on machine load and every later iteration inherits the difference. Editing
+# the RQ5 file in place would silently break the run it was written for; this file exists
+# instead.
+#
+# WHAT CHANGES from rq5_benders_minute_p56.yaml: only `solver.total_time_limit_s`, raised
+# from 300 to an effectively non-binding value so `solver.max_iterations` (400) is what
+# actually binds. `run.seed` (42), single-threaded CPLEX, and every model/subproblem
+# parameter are otherwise identical -- same instance as D56 and as
+# rq5_benders_minute_p56.yaml, so this remains "the same configuration" per A5's instruction.
+
+schema:
+  name: mobauto2_benders_config
+  version: 2
+
+run:
+  name: rq5_benders_minute_p56_a5_iterbudget
+  log_level: INFO
+  log_file: null
+  report_dir: null
+  seed: 42
+
+data:
+  demand_file: setups/base.yaml
+  scenario_files:
+  scenario_weights: null
+  R_out: null
+  R_ret: null
+
+model:
+  time:
+    T_minutes: 660
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 2
+    initial_battery: [150.0, 150.0, 150.0]
+    initial_actions: [IDL, IDL, IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+
+master:
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  recourse_lower_bound: false
+  per_iteration_time_limit_s: 120
+  per_iteration_mipgap: 0.05
+  cplex_options:
+    CPXPARAM_Preprocessing_Symmetry: 5
+    # Single-threaded, matching the monolith arm (R5): a speed/bound comparison in which
+    # one arm gets more cores measures the cores.
+    CPXPARAM_Threads: 1
+  solver_backend: cplex_direct
+  aggregate_cuts_by_tau: true
+  theta_per_scenario: false
+  cut_coeff_threshold: 0.001
+  write_lp_after_cut: false
+
+subproblem:
+  multi_cuts_by_scenario: false
+  use_magnanti_wong: false
+  mw_core_alpha: 0.3
+  use_dual_slopes: true
+  S: 15
+  Wmax_minutes: 60
+  # The policy regime. p in slot units would be 56/30; stating it in minutes is what
+  # keeps it comparable across resolutions (D50, D53).
+  p_minutes: 56.0
+  recourse_resolution: minute
+  departure_policy: start
+  degenerate_cut_probe_top_k: 6
+  degenerate_cut_zero_tol: 1.0e-9
+
+solver:
+  # ITERATION-budgeted per A5/R4: max_iterations is what must bind, not the clock.
+  max_iterations: 400
+  tolerance: 0.001
+  # Effectively unbounded -- large enough that 400 iterations at this instance's observed
+  # per-iteration cost (~10s, D56) cannot hit it. Any master solve that still stops on its
+  # own per-iteration cap (120s) will show up as clock_truncated_master_solves > 0 and be
+  # reported as such, per A5's accept-test.
+  total_time_limit_s: 36000
+  stall_max_no_improve_iters: 0
+  stall_min_abs_improve: 1.0
+  stall_min_rel_improve: 0.002
+  master_solver: cplex
+  subproblem_solver: cplex_direct
+  solver_tee: false
+
+tolerances:
+  eps_bin: 1.0e-5
+  eps_feas: 1.0e-7
+  eps_cut: 1.0e-8
+  eps_hash: 1.0e-6

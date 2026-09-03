@@ -1286,35 +1286,18 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "use_magnanti_wong/use_dual_slopes pair, so omitting both selects it."
         )
 
-    # Magnanti-Wong cannot be used with the minute recourse.
+    # Magnanti-Wong on the minute recourse (B2, handout item, 2026-09-02).
     #
-    # `solve_mw_dual` builds the dual of the SLOT primal: its dual-feasibility rows are
-    # `alpha[t] + pi[tau] <= (tau - t)` over slot arc pairs. The minute recourse's primal
-    # has demand rows per arrival MINUTE and arc costs
-    # `(departure_minute - arrival_minute)/delta`, so the two are duals of different
-    # linear programs. A dual that is feasible for the slot LP carries no weak-duality
-    # relation to the minute recourse, and a cut built from it can OVERESTIMATE -- the
-    # one error that excludes the optimum, and D30's exact failure mode.
-    #
-    # Refused at load rather than repaired at runtime because there is nothing to repair:
-    # the MW auxiliary LP would have to be rebuilt over minute arcs to mean anything, and
-    # that is F2's territory, not a fallback. Nothing previously guarded this;
-    # configs/phase1/rq5_benders_minute_p56.yaml escapes it only by happening to set
-    # use_magnanti_wong: false.
-    if _recourse_resolution == "minute" and bool(
-        sub_raw.get("use_magnanti_wong", False)
-    ):
-        raise ValueError(
-            "subproblem.use_magnanti_wong is true with recourse_resolution='minute'. "
-            "solve_mw_dual is the dual of the SLOT primal -- its rows are "
-            "alpha[t] + pi[tau] <= (tau-t) over slot arcs -- while the minute recourse's "
-            "primal has one demand row per arrival minute. They are duals of different "
-            "LPs, so a dual optimal for one bears no weak-duality relation to the other "
-            "and the cut built from it can overestimate the recourse, which is what "
-            "excludes the optimum (D30). Set use_magnanti_wong: false and "
-            "use_dual_slopes: true to run the minute recourse on plain capacity duals, "
-            "which are valid at minute resolution because they come from that LP."
-        )
+    # Until this port, `use_magnanti_wong: true` with `recourse_resolution: 'minute'`
+    # was refused at load: `solve_mw_dual` built only the dual of the SLOT primal
+    # (`alpha[t] + pi[tau] <= (tau-t)` over slot arcs), which is a different LP from
+    # the minute recourse's own (`alpha[m] + pi[tau] <= (dep_minute-m)/delta` over
+    # minute arcs, one demand row per arrival minute, D51) -- a dual feasible for one
+    # carries no weak-duality relation to the other, and a cut built from it can
+    # OVERESTIMATE, D30's exact failure mode. `solve_mw_dual_minute`
+    # (`minute_pricer.py`) is the minute recourse's OWN dual, built over its own
+    # arcs, so the combination is no longer refused. See
+    # `docs/BENDERS_SPEC_v4.md` section 2.6/2.11 and docs_decisions.md's B2 entry.
     if _has_p_minutes:
         _p_minutes_val = _ensure_float(
             _disallow_expr(sub_raw.get("p_minutes"), "subproblem.p_minutes"),

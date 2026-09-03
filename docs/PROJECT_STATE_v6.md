@@ -52,10 +52,12 @@ contribution is the third, and it needs the first but not the second.
   under it** to two decimals. Agreement across two independent implementations *and* two
   independent solvers rules out a CPLEX-specific artefact.
 - Exactness conditions **E1–E4 are tests, not assumptions**.
-- **267 passed, 9 skipped** (D71 added 4 for the runtime-split instrumentation below; D72
-  added 4 more for the minute-departure validator). The 9 are CPLEX-specific machinery (the
-  branch-and-cut callback, `CPXPARAM_*` name resolution); no formulation invariant is among
-  them.
+- **295 passed, 0 skipped**, under the commercial (CPLEX) backend (D71 added 4 for the
+  runtime-split instrumentation below; D72 added 4 more for the minute-departure validator;
+  D76 added 3 more for the anticipation-only offset grid; D82 added 1 regression test for
+  the delta_chg recompute, R6). Under the open backend (HiGHS) a small number are expected
+  to skip -- CPLEX-specific machinery, the branch-and-cut callback and `CPXPARAM_*` name
+  resolution; no formulation invariant is among them (D67).
 
 *Caveats that must travel with claim 1:* every `mw`-labelled number written before D61
 predates the Magnanti–Wong guard fix; D42's dominance margins are withdrawn and unreplaced
@@ -65,7 +67,7 @@ predates the Magnanti–Wong guard fix; D42's dominance margins are withdrawn an
 
 | Measurement | Decomposition | Direct solve |
 |---|---|---|
-| Q=3, minute recourse (D56) | LB 219.74 / UB 299.37, 27% gap, **301.4 s** | minute monolith **293.37, proven optimal, 0.8 s** |
+| Q=2, T=22, minute recourse (D56) | LB 219.74 / UB 299.37, 27% gap, **301.4 s** | minute monolith **293.37, proven optimal, 0.8 s** |
 | Dantzig–Wolfe root, Q=3–5 (D57/D58) | 61–75% of optimum, 50–208 s | CPLEX's own root: **95–96%, 9–15 s** (D60) |
 | Q=3 slot model | **1148.65**, a 46% internal gap, 1520 s — **69.2% of the optimum** | **optimal 1658.86 in 947 s** (D50) |
 
@@ -75,6 +77,15 @@ lower bound is what is stuck**, at 74.9%. So as a *heuristic* the decomposition 
 good; as a *proof system* on this family it is not competitive with solving the model
 directly. And any future work on the bound must attack the **relaxation**: another family of
 cuts into the same master is aimed at the wrong object.
+
+**D56's row above is at `midpoint`; regenerating it at `o = 0` was attempted (handout v0.2,
+D88, 2026-09-02) and left BLOCKED, not closed, after ~4h.** The soundness invariant held at
+every one of 228 completed iterations (LB never exceeded the monolith optimum, 279.84, UB
+never dropped below it), but 112 of 457 master solves hit a per-iteration wall-clock cap
+inherited unreviewed from D56's own config, so the run is not bit-reproducible (R4/D26)
+regardless of the state it reached (LB 249.43, UB 282.91, 11.8% gap at the point it was
+stopped). Not quoted as a measurement; see D88 for the full evidence and what a corrected
+re-run would need.
 
 The sharpest form, and the most publishable methodological observation here: **the bound
 lives at the fractional LP root, and cuts do not move it because CPLEX's own root cuts had
@@ -94,21 +105,29 @@ new cut machinery, and leaving the decomposition and its bounds intact.*
 Valuation error and decision error are independent and must be reported separately: the
 first misleads whoever reads the output, the second is what the operator loses.
 
-| Quantity | Passenger-minutes |
-|---|---:|
-| what the slot model **claims** its schedule costs | 11 990 |
-| what that schedule **really** costs | 9 326 |
-| what the **best achievable** schedule costs | 8 794 |
+**Regenerated at the committed departure instant `o = 0` (handout v0.2, D78, 2026-09-02).**
+`o = 0` is the master's own committed instant (D76), not a counterfactual; the table below
+supersedes the `midpoint` (`o = δ/2`) figures kept immediately after it for traceability.
 
-Valuation error **+28.5%**; decision error **+6.0%**. On the waiting term alone the
-valuation error is **66–86%** (38.24 min/pax reported against a true 20.4–23.2); the
-objective hides it because at the default penalty it is 93% unmet-demand headcount and only
-6.8% waiting.
+| Quantity | Passenger-minutes (`o = 0`) | (`o = δ/2`, withdrawn) |
+|---|---:|---:|
+| what the slot model **claims** its schedule costs | 11 997.2 | 11 990 |
+| what that schedule **really** costs | 8 596 | 9 326 |
+| what the **best achievable** schedule costs | 8 388 | 8 794 |
 
-Across five de-aligned demand shapes and three grids, decision error is 3–22% under
-`midpoint` and 8–38% under `end`, and **does not vanish as the grid refines** — grid
+Valuation error **+39.6%** (was +28.5%); decision error **+2.5%** (was +6.0%). On the
+waiting term alone the valuation error is **88–115%** (30.0 min/pax reported against a true
+13.9–15.9); the objective hides it because at the default penalty it is 93% unmet-demand
+headcount and only 6.8% waiting.
+
+Across five de-aligned demand shapes and three grids, **at `o = 0` (D81)** decision error is
+**0.00–8.44%**. Two cells (burst, spiky at δ=30) land exactly at 0.00%, investigated and
+traced to a genuine coincidence of optima at the coarsest resolution, not a generator
+alignment defect (confirmed: 0/150 burst arrivals and 5–8/150 spiky arrivals fall on a slot
+boundary, the latter at chance rate). It **does not vanish as the grid refines** — grid
 refinement and minute-level valuation are independent levers, and the trend is **not
-monotone**, so no trend may be read off two columns.
+monotone**, so no trend may be read off two columns. (The `midpoint`/`end` figures below —
+3–22% and 8–38% — are the withdrawn counterfactual range, kept for traceability only.)
 
 **Quote 3.84% as the operational figure.** One schedule serving four scenarios gains 3.84%,
 against 8–50% tailored to one, and is actively worse on one member of the set. Single-scenario
@@ -120,8 +139,14 @@ returns. No projection machinery. Convergence per iteration is indistinguishable
 66.4% at iteration 14), and the subproblem is **under 1% of an iteration**.
 
 **Departure placement is a first-class modelling decision** and moves the measured gain
-between 0% and 49% (D54). `end` is what the demand aggregation implies; `start` assumes the
-bus leaves before the passengers it is collecting have arrived and is not defensible.
+between 0% and 49% (D54, offset-sensitivity sweep, slot-aligned generator).
+**Withdrawn (D76):** `start` (`o=0`) was believed to assume the bus leaves before the
+passengers it is collecting have arrived, and was excluded on that basis. That reasoning was
+wrong: the arc set already guarantees every boarder of a slot-τ departure arrived before slot
+τ opened, so `o=0` is the master's own committed instant and the *other* two conventions
+(`midpoint`, `end`) are the counterfactuals — they grant the schedule a capability the master
+never gave it. `o=0` is now the default in code and the only offset a headline number may be
+quoted at without stating it explicitly.
 
 **The scoping constraint.** The slot model **overstates** cost under all three conventions,
 so the slot optimum is an **upper** bound on the minute-level optimum. Therefore *a
@@ -151,17 +176,20 @@ is the one D69's search covers least well.
 **Residual, and it no longer blocks:** read both DDD papers in full before writing the
 related-work paragraph, and confirm neither confines refinement to the recourse.
 
-### The stochastic-robustness result set is regenerated (D70)
+### The stochastic-robustness result set is regenerated (D70, then D79 at `o = 0`)
 
 A related but separate question, outside this repository until now: what does it cost to run
 **one** schedule against four demand scenarios instead of solving each scenario's own
 deterministic optimum? A conference-era answer to that question exists and is void — it
-predates both the `p_minutes` correction and minute-level valuation. **D70 regenerates it:
-hedging costs 0.9% in passenger-minutes**, at `p_minutes=56`, minute fidelity, weighted equally
-across `base`, `temporal_noise`, `return_peak_advanced` and `midday_surge`. A caveat travels
-with it — the per-scenario "oracle" is itself only slot-optimal, not minute-optimal, so on two
-of the four scenarios the hedged schedule outperforms its own scenario's oracle once both are
-priced honestly. See D70 for the full table and `scripts/stochastic_robustness.py`.
+predates both the `p_minutes` correction and minute-level valuation. **D70 regenerated it at
+`midpoint`: hedging costs 0.9% in passenger-minutes.** **D79 (handout v0.2, 2026-09-02)
+regenerates it again at the committed instant `o = 0`: hedging costs 2.1%**, at
+`p_minutes=56`, minute fidelity, weighted equally across `base`, `temporal_noise`,
+`return_peak_advanced` and `midday_surge`. A caveat travels with it — the per-scenario
+"oracle" is itself only slot-optimal, not minute-optimal, so on **one** of the four scenarios
+(`base`) the hedged schedule outperforms its own scenario's oracle once both are priced
+honestly (two of four at `midpoint`; the count itself moved with the offset). See D79 for the
+full table and `scripts/stochastic_robustness.py`.
 
 ---
 
@@ -224,13 +252,14 @@ The four documents are genuinely absent from this repository — including
 
 ## 5. What is open
 
-One lever, and one reading task (D69 §8: the two DDD papers in full). Everything else on the bound is closed **by
-measurement** and must not be re-attempted: cumulative-prefix symmetry; `b >= L·yRET` (M1);
-branch-and-Benders-cut for the *lower* bound; tightening `per_iteration_mipgap`; the
+One reading task (D69 §8: the two DDD papers in full). Everything else on the bound is closed
+**by measurement** and must not be re-attempted: cumulative-prefix symmetry; `b >= L·yRET`
+(M1); branch-and-Benders-cut for the *lower* bound; tightening `per_iteration_mipgap`; the
 per-iteration time limit as a tuning knob; Dantzig–Wolfe on the vehicle index; window trip
 caps in the master; more master seconds; the down-set recourse cut; the per-vehicle trip cap
-(D68 §3); moving the battery block down (D68 §4); **and now F2 (D74) — do not re-attempt at
-`cut_mode: dual` without first fixing the mechanism below.**
+(D68 §3); moving the battery block down (D68 §4); **and now F2 (D74, closed under both known
+cut generators, D86) — do not re-attempt at `cut_mode: dual` or `cut_mode: mw` without a
+genuinely new mechanism, not a bigger offset grid or a different budget on the same one.**
 
 **F2 — placement freedom in the subproblem, Design 3 only. Implemented and tested; ✅ closed,
 settled negatively (D74).** Fix an offset grid `O ⊂ [0,δ]` once at load, so candidate departure
@@ -266,6 +295,19 @@ narrows the mechanism hypothesis to the half that was never tested here — `cut
 having no Pareto-optimality correction for the degeneracy an offset grid introduces, whatever
 its direction. MW-for-minutes remains the prerequisite, unchanged from before D76 (see
 docs_decisions.md D76 §3).
+
+**MW-for-minutes is now built, and it does not recover the lever either (handout v0.2, D86,
+2026-09-02).** `solve_mw_dual_minute` (`minute_pricer.py`) is the minute recourse's own
+Magnanti–Wong dual, built over its own arcs, passing the same cut-soundness invariants the
+slot path is held to (intercept derived and reconciled, S2; cut never overestimates at a
+point other than its own anchor) and confirmed end-to-end (`cut_generation_mode=mw` on every
+iteration of a real Benders loop, zero `[MW FAIL]`). Re-running F2 under selection: LB moves
+from 184.495 (plain dual) to 184.564 on the baseline arm and from 130.466 to 132.057 on the
+offset arm — both bit-reproducible, gap essentially unchanged (-29.3% plain dual, -28.4%
+under selection). **The diagnosis is complete, not partial: neither cut generator this
+project has turns placement freedom into a positive lever at this budget.** F2 is now closed
+on both known mechanisms; the remaining hypothesis space (a different degeneracy-correction
+device entirely, or a different budget/instance) is not scoped here.
 
 **Stabilisation, level method.** The one lever whose diagnosis matches the observed symptom:
 Benders iterations on a 150-cut master oscillate in **1064–1090 with no trend**, a spread the

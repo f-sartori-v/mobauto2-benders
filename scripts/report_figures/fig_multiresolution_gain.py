@@ -59,20 +59,25 @@ def main() -> int:
     apply_style()
     fig, axes = plt.subplots(1, 2, figsize=(TEXT_WIDTH_IN, 2.7), sharey=True)
 
-    for ax, policy in zip(axes, ("midpoint", "end")):
+    # `start` (o=0) is the committed departure instant (D76) -- the only panel that
+    # prices what the master's schedule actually costs. `midpoint` is kept beside it
+    # as a labelled counterfactual ("what if this departure left mid-slot instead"),
+    # never presented as a second measurement of the same thing.
+    for ax, policy in zip(axes, ("start", "midpoint")):
         table = d[policy]
         width = 0.26
         for j, res in enumerate(resolutions):
             xs = [i + (j - 1) * width for i in range(len(ORDER))]
             ys = [table[shape][j] for shape in ORDER]
             ax.bar(xs, ys, width=width, color=SHADES[j], zorder=2,
-                   label=f"{res} min master" if policy == "end" else None)
-        ax.axhline(d["multi_scenario_gain"], color=ACCENT, lw=1.0, ls=(0, (4, 2)),
-                   zorder=3)
+                   label=f"{res} min master" if policy == "midpoint" else None)
+        if policy != "start":
+            ax.axhline(d["multi_scenario_gain"], color=ACCENT, lw=1.0,
+                       ls=(0, (4, 2)), zorder=3)
         ax.set_xticks(range(len(ORDER)))
         ax.set_xticklabels(ORDER, rotation=30, ha="right")
-        ax.set_title(f"{policy} placement", loc="left", fontsize=8.5,
-                     color="#444444")
+        title = "start (committed instant)" if policy == "start" else "midpoint (counterfactual)"
+        ax.set_title(title, loc="left", fontsize=8.5, color="#444444")
         value_grid(ax)
         ax.set_ylim(0, 55)
 
