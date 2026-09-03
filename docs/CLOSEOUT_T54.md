@@ -263,7 +263,14 @@ exclude_unserved=True`.
    what the acceptance test's p_min=120 arm demonstrates. This is a one-line policy check
    nobody was making.
 
-5. **The optimal-placement instrument needs the opposite eligibility default, and saying
+5. **Shipping `cut_architecture` alongside the legacy booleans in one config is a trap.**
+   The annotated reference sets `multi_cuts_by_scenario`; adding an active
+   `cut_architecture` line to the same file means anyone who copies it and flips the
+   boolean hits a contradiction error they did not cause. The key is documented there
+   but left commented out, with the reason. Found by the config test suite the moment
+   the example was edited, which is the test doing its job.
+
+6. **The optimal-placement instrument needs the opposite eligibility default, and saying
    so is the point.** It *chooses* the departure instant, so there is no slot-aggregation
    ambiguity to guard against; imposing `forbid` there prices "choose the best instant,
    then refuse the passenger it was chosen for". It defaults to `allow`, states why in

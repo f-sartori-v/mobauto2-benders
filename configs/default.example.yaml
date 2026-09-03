@@ -144,9 +144,18 @@ subproblem:
   # Derived from the two booleans below when omitted, so existing configs keep their
   # architecture. Stating it AND contradicting it with the booleans is an error, not a
   # precedence rule. The manifest records which one ran, and no table may mix them.
-  cut_architecture: aggregated
-  # Multi-cuts vs averaged cut across scenarios. Implied by cut_architecture; kept for
-  # configs written before that key existed.
+  #
+  # LEFT COMMENTED OUT ON PURPOSE, and this file is the reason the rule matters. A
+  # config that states BOTH the architecture and the booleans is a config whose two
+  # halves can disagree, and someone copying this file and flipping
+  # `multi_cuts_by_scenario` would then hit a load error they did not cause. Either
+  # uncomment this line and delete both booleans, or leave it and set the booleans --
+  # the architecture is derived and recorded either way.
+  #
+  #   cut_architecture: aggregated        # or: disaggregated
+  #
+  # Multi-cuts vs averaged cut across scenarios. Equivalent to
+  # cut_architecture: aggregated when paired with master.theta_per_scenario: false.
   multi_cuts_by_scenario: false
   # B6 (audit 2.4). Whether a passenger may board a departure leaving in their own
   # arrival slot/minute.
