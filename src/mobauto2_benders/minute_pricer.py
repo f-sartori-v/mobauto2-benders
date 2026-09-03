@@ -83,6 +83,57 @@ RET = "RET"
 DeparturePolicy = Literal["start", "midpoint", "end"]
 
 
+# B6 (audit 2.4). Whether a passenger may board a departure that leaves at the very
+# instant they arrive.
+#
+# THE TWO RECOURSES DID NOT AGREE, AND NOTHING SAID SO. The slot recourse forbids
+# same-slot boarding structurally, through `tau >= t+1` (D7/D8): demand aggregated into
+# slot `t` is reachable no earlier than slot `t+1`. The minute recourse admitted a
+# zero-minute wait, because its only reachability filter was `0 <= dep - m <= Wmax`. At
+# delta = 30 the difference is mostly invisible -- only arrivals landing exactly on a
+# slot boundary are affected. At delta = 1 the two arc sets differ everywhere, which is
+# why the reported 1.40% / 1.60% delta=1 figures compared eligibility CONVENTIONS and
+# solution strategies at the same time and cannot be read as a decomposition result.
+#
+# THE TWO VALUES.
+#   "forbid" -- a boarding needs `dep_minute - arrival >= 1`. Under the `start`
+#               placement policy this reproduces the slot rule EXACTLY, for any delta:
+#               dep(tau) - m >= 1  <=>  tau*delta > m  <=>  tau >= floor(m/delta) + 1
+#                                  <=>  tau >= t + 1.
+#               So a `forbid` minute run and a slot run share an arc set and differ
+#               only in how finely they price the wait -- which is the like-for-like
+#               decomposition comparison.
+#   "allow"   -- a boarding needs `dep_minute - arrival >= 0`. A passenger may step
+#               onto a vehicle leaving at the instant they arrive. Defensible at
+#               minute granularity, where there is no sub-minute ordering to appeal
+#               to; it is simply a different operational claim.
+#
+# `forbid` is the default because it is what the master's own legality rule already
+# commits to, and because it makes the two recourses agree rather than silently
+# differ. Runs produced before this flag existed priced minutes under `allow`; the
+# manifest records the value so those tables are identifiable rather than assumed.
+SameSlotEligibility = Literal["forbid", "allow"]
+
+DEFAULT_SAME_SLOT_ELIGIBILITY: SameSlotEligibility = "forbid"
+
+
+def min_wait_minutes(eligibility: str) -> float:
+    """The smallest admissible ``departure_minute - arrival_minute``.
+
+    Returned as a number rather than branching at each of the five arc builders: an
+    eligibility convention implemented five times is a convention that will drift,
+    and this one already drifted once between the slot and minute recourses.
+    """
+    e = str(eligibility).lower()
+    if e == "forbid":
+        return 1.0
+    if e == "allow":
+        return 0.0
+    raise ValueError(
+        f"same_slot_eligibility must be 'forbid' or 'allow', got {eligibility!r}"
+    )
+
+
 def placement_offset(policy: DeparturePolicy, slot_resolution: float) -> float:
     """Minutes from the start of a slot to the assumed departure instant."""
     delta = float(slot_resolution)
@@ -98,6 +149,34 @@ def placement_offset(policy: DeparturePolicy, slot_resolution: float) -> float:
 
 
 @dataclass(frozen=True)
+class AssignmentRow:
+    """One priced request group: who boarded what, and how long they waited.
+
+    B12 (audit item 3.6). A waiting-time statistic printed without its qualifiers is
+    not a number anyone can reproduce -- the report quoted "13.9-15.9 min" for ONE
+    fixed schedule, a range with no stated source of variation. Every field needed to
+    state the average unambiguously travels on the row itself: scenario, direction,
+    the resolution the assignment was made at, the departure offset, and whether the
+    group boarded at all.
+
+    `passengers` is a count, not a weight. A group is the set of requests sharing an
+    arrival minute; the LP pools them because they are interchangeable.
+    """
+
+    scenario: str
+    direction: str
+    arrival_minute: int
+    departure_minute: float | None
+    departure_slot: int | None
+    passengers: float
+    wait_minutes: float
+    served: bool
+    assignment_resolution: str
+    departure_offset: float
+    same_slot_eligibility: str
+
+
+@dataclass(frozen=True)
 class MinutePricingResult:
     total_cost: float
     waiting_minutes: float
@@ -106,13 +185,66 @@ class MinutePricingResult:
     total_passengers: float
     departures_used: int
     policy: str
+    # B7.1 (audit item 1.3). How many passengers this pricing left unserved while an
+    # ADMISSIBLE departure still had a free seat.
+    #
+    # This is the penalty regime made visible. At delta=30 and p_min=56 the slot
+    # penalty is 56/30 ~ 1.867, so any wait of two slots -- 60 passenger-minutes --
+    # costs more than rejecting the passenger outright. The optimiser is then correct
+    # to reject, and the model is quietly encoding a policy nobody stated: "we would
+    # rather leave you behind than make you wait an hour". That is a defensible
+    # policy. It was not a stated one, and nothing in the output revealed it.
+    #
+    # On the baseline this must be NONZERO. A zero here at p_min=56 with W_max=60
+    # would mean either the count or the pricing is wrong, which is why the test
+    # asserts both directions: nonzero at 56, zero at p_min=120 (where no admissible
+    # wait can cost more than the penalty, so rejection is never preferred).
+    rejected_with_free_seat: float = 0.0
+    same_slot_eligibility: str = "forbid"
+    assignment_rows: tuple = ()
 
     def as_row(self) -> str:
         return (
             f"{self.policy:9s} cost={self.total_cost:12.2f} "
             f"wait_min={self.waiting_minutes:10.1f} "
-            f"unserved={self.unserved_passengers:6.0f}/{self.total_passengers:.0f}"
+            f"unserved={self.unserved_passengers:6.0f}/{self.total_passengers:.0f} "
+            f"rejected_with_free_seat={self.rejected_with_free_seat:.0f}"
         )
+
+    def average_wait(
+        self, denominator: str = "carried", exclude_unserved: bool = True
+    ) -> tuple[float, str]:
+        """B12. Average waiting, with the definition returned beside the number.
+
+        `denominator` is "carried" (served passengers) or "all" (every request in
+        scope). The two differ by exactly the unserved count, and at p_min=56 that is
+        a large fraction of the demand -- so the same schedule yields two very
+        different "average waits", which is how an undefined range appears in a report.
+
+        Returns `(value, definition)`. The definition string is meant to be PRINTED on
+        the same line as the value; a caller that discards it is reproducing the
+        defect.
+        """
+        if denominator not in {"carried", "all"}:
+            raise ValueError(
+                f"denominator must be 'carried' or 'all', got {denominator!r}"
+            )
+        if denominator == "carried":
+            n = float(self.served_passengers)
+        else:
+            n = float(self.total_passengers)
+            if exclude_unserved:
+                # "all requests" with unserved excluded IS the carried denominator.
+                # Naming the combination rather than silently computing a third thing.
+                n = float(self.served_passengers)
+        value = float(self.waiting_minutes) / n if n else 0.0
+        definition = (
+            f"avg_wait_min={value:.3f} denominator={denominator} "
+            f"n={n:.0f} exclude_unserved={bool(exclude_unserved)} "
+            f"policy={self.policy} same_slot_eligibility={self.same_slot_eligibility} "
+            f"assignment_resolution=minute waiting_minutes={self.waiting_minutes:.2f}"
+        )
+        return value, definition
 
 
 def load_request_minutes(path: str | Path) -> dict[str, list[int]]:
@@ -176,20 +308,32 @@ def price_direction_at_minutes(
     wmax_minutes: float,
     p_minutes: float,
     lp_solver: str = "cplex_direct",
-) -> tuple[float, float, float]:
+    same_slot_eligibility: str = DEFAULT_SAME_SLOT_ELIGIBILITY,
+    scenario_label: str = "-",
+    direction_label: str = "-",
+    departure_offset: float = 0.0,
+) -> tuple[float, float, float, float, tuple]:
     """Cheapest way to serve these arrivals with these departures.
 
-    Returns ``(waiting_minutes, unserved_passengers, served_passengers)``.
+    Returns ``(waiting_minutes, unserved, served, rejected_with_free_seat, rows)``.
+
+    The last two are B7.1 and B12: how many passengers were left behind while a seat
+    they could legally have taken was empty, and the per-request assignment those
+    numbers come from. They are returned rather than printed because the caller is the
+    one that knows the scenario and direction labels.
 
     A passenger arriving at minute `m` may board a departure at minute `d` when
-    ``m <= d <= m + wmax_minutes``. Boarding at exactly `m` is allowed: at minute
-    granularity there is no sub-minute ordering to appeal to, and forbidding it would
-    charge a full minute of wait to a passenger who walked onto a waiting vehicle.
+    ``m + w0 <= d <= m + wmax_minutes``, where `w0` is 1 under
+    ``same_slot_eligibility="forbid"`` and 0 under ``"allow"`` -- see
+    `SameSlotEligibility`. The convention used to be hard-coded to "allow" here while
+    the slot recourse hard-coded "forbid", which is the defect B6 exists to close.
     """
     import pyomo.environ as pyo
 
     if not arrival_minutes:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, ()
+
+    w0 = min_wait_minutes(same_slot_eligibility)
 
     # Identical arrival minutes are pooled: the LP only needs one variable per
     # (arrival minute, departure) pair, not per passenger.
@@ -203,7 +347,7 @@ def price_direction_at_minutes(
         (m, j)
         for m in arrivals
         for j in deps
-        if 0.0 <= departure_minutes_list[j] - float(m) <= float(wmax_minutes)
+        if w0 <= departure_minutes_list[j] - float(m) <= float(wmax_minutes)
     ]
 
     mdl = pyo.ConcreteModel()
@@ -252,7 +396,104 @@ def price_direction_at_minutes(
     )
     unserved = sum(float(pyo.value(mdl.u[m])) for m in arrivals)
     served = float(sum(counts.values())) - unserved
-    return float(waiting), float(unserved), float(served)
+
+    # ---- B7.1 / B12: the assignment, and the free-seat diagnostic --------------
+    #
+    # Both are read from the SAME solved LP that produced the numbers above. A
+    # diagnostic recomputed from a second solve, or from the schedule alone, would be
+    # answering a question about a different solution -- this repository has already
+    # printed a per-shuttle table drawn from one solution beneath a headline drawn
+    # from another (tests/README.md).
+    eps = 1e-9
+    load = {j: 0.0 for j in deps}
+    for (m, j) in arcs:
+        load[j] += float(pyo.value(mdl.x[m, j]))
+
+    rows: list[AssignmentRow] = []
+    rejected_with_free_seat = 0.0
+    for m in arrivals:
+        for j in deps:
+            if (m, j) not in arcs:
+                continue
+            pax = float(pyo.value(mdl.x[m, j]))
+            if pax <= eps:
+                continue
+            rows.append(
+                AssignmentRow(
+                    scenario=scenario_label,
+                    direction=direction_label,
+                    arrival_minute=int(m),
+                    departure_minute=float(departure_minutes_list[j]),
+                    departure_slot=None,
+                    passengers=pax,
+                    wait_minutes=float(departure_minutes_list[j]) - float(m),
+                    served=True,
+                    assignment_resolution="minute",
+                    departure_offset=departure_offset,
+                    same_slot_eligibility=str(same_slot_eligibility),
+                )
+            )
+        left = float(pyo.value(mdl.u[m]))
+        if left > eps:
+            rows.append(
+                AssignmentRow(
+                    scenario=scenario_label,
+                    direction=direction_label,
+                    arrival_minute=int(m),
+                    departure_minute=None,
+                    departure_slot=None,
+                    passengers=left,
+                    wait_minutes=0.0,
+                    served=False,
+                    assignment_resolution="minute",
+                    departure_offset=departure_offset,
+                    same_slot_eligibility=str(same_slot_eligibility),
+                )
+            )
+            # Was there anywhere for them to go? An ADMISSIBLE departure -- one this
+            # group has an arc to, so reachability and W_max already hold -- with
+            # spare capacity. If yes, they were left behind because the penalty was
+            # cheaper than the wait, not because the fleet was full.
+            spare = any(
+                (m, j) in arcs and load[j] < float(seats) - eps for j in deps
+            )
+            if spare:
+                rejected_with_free_seat += left
+
+    return (
+        float(waiting),
+        float(unserved),
+        float(served),
+        float(rejected_with_free_seat),
+        tuple(rows),
+    )
+
+
+def _with_departure_slots(
+    rows: tuple, dep_minutes: Sequence[float], dep_slots: Sequence[int]
+) -> list["AssignmentRow"]:
+    """Fill in `departure_slot` on rows priced from a slot-derived departure list.
+
+    The pricing LP knows only minutes -- deliberately, because it also serves the
+    continuous-time schedules that have no slot -- so the slot is attached here, where
+    the mapping from departure index to slot is actually known. Rows for unserved
+    groups keep `departure_slot=None`, which is the truth about them.
+    """
+    from dataclasses import replace
+
+    by_minute: dict[float, int] = {}
+    for j, minute in enumerate(dep_minutes):
+        if j < len(dep_slots):
+            by_minute.setdefault(float(minute), int(dep_slots[j]))
+    out = []
+    for row in rows:
+        if row.departure_minute is None:
+            out.append(row)
+            continue
+        out.append(
+            replace(row, departure_slot=by_minute.get(float(row.departure_minute)))
+        )
+    return out
 
 
 def price_schedule_at_minutes(
@@ -264,6 +505,8 @@ def price_schedule_at_minutes(
     p_minutes: float,
     policy: DeparturePolicy = "start",
     lp_solver: str = "cplex_direct",
+    same_slot_eligibility: str = DEFAULT_SAME_SLOT_ELIGIBILITY,
+    scenario_label: str = "-",
 ) -> MinutePricingResult:
     """Price a whole schedule (both directions) at minute fidelity.
 
@@ -275,22 +518,32 @@ def price_schedule_at_minutes(
     unserved = 0.0
     served = 0.0
     used = 0
+    free_seat = 0.0
+    rows: list[AssignmentRow] = []
+    offset = placement_offset(policy, float(slot_resolution))
+    slot_list = {d: list(departures.get(d, [])) for d in (OUT, RET)}
     for direction in (OUT, RET):
         dep_minutes = departure_minutes(
-            list(departures.get(direction, [])), slot_resolution, policy
+            slot_list[direction], slot_resolution, policy
         )
         used += len(dep_minutes)
-        w, u, s = price_direction_at_minutes(
+        w, u, sv, fs, rws = price_direction_at_minutes(
             list(requests.get(direction, [])),
             dep_minutes,
             seats,
             wmax_minutes,
             p_minutes,
             lp_solver,
+            same_slot_eligibility=same_slot_eligibility,
+            scenario_label=scenario_label,
+            direction_label=direction,
+            departure_offset=offset,
         )
         waiting += w
         unserved += u
-        served += s
+        served += sv
+        free_seat += fs
+        rows.extend(_with_departure_slots(rws, dep_minutes, slot_list[direction]))
     total_pax = served + unserved
     return MinutePricingResult(
         total_cost=waiting + float(p_minutes) * unserved,
@@ -300,6 +553,9 @@ def price_schedule_at_minutes(
         total_passengers=total_pax,
         departures_used=used,
         policy=policy,
+        rejected_with_free_seat=free_seat,
+        same_slot_eligibility=str(same_slot_eligibility),
+        assignment_rows=tuple(rows),
     )
 
 
@@ -310,6 +566,8 @@ def price_schedule_given_departure_minutes(
     wmax_minutes: float,
     p_minutes: float,
     lp_solver: str = "cplex_direct",
+    same_slot_eligibility: str = DEFAULT_SAME_SLOT_ELIGIBILITY,
+    scenario_label: str = "-",
 ) -> MinutePricingResult:
     """Price a schedule whose departures are already minute-valued -- not a slot list.
 
@@ -333,20 +591,31 @@ def price_schedule_given_departure_minutes(
     unserved = 0.0
     served = 0.0
     used = 0
+    free_seat = 0.0
+    rows: list[AssignmentRow] = []
     for direction in (OUT, RET):
         dep_minutes = [float(m) for m in departures_minutes.get(direction, [])]
         used += len(dep_minutes)
-        w, u, s = price_direction_at_minutes(
+        w, u, sv, fs, rws = price_direction_at_minutes(
             list(requests.get(direction, [])),
             dep_minutes,
             seats,
             wmax_minutes,
             p_minutes,
             lp_solver,
+            same_slot_eligibility=same_slot_eligibility,
+            scenario_label=scenario_label,
+            direction_label=direction,
+            # A minute-valued departure has no slot offset to report: it was never
+            # placed inside a slot. Reported as 0.0 and paired with
+            # assignment_resolution="minute", which is the honest description.
+            departure_offset=0.0,
         )
         waiting += w
         unserved += u
-        served += s
+        served += sv
+        free_seat += fs
+        rows.extend(rws)
     total_pax = served + unserved
     return MinutePricingResult(
         total_cost=waiting + float(p_minutes) * unserved,
@@ -356,6 +625,9 @@ def price_schedule_given_departure_minutes(
         total_passengers=total_pax,
         departures_used=used,
         policy="given_minutes",
+        rejected_with_free_seat=free_seat,
+        same_slot_eligibility=str(same_slot_eligibility),
+        assignment_rows=tuple(rows),
     )
 
 
@@ -400,8 +672,26 @@ def price_direction_optimal_placement(
     seats: float,
     wmax_minutes: float,
     p_minutes: float,
+    # OPTIMAL PLACEMENT DEFAULTS TO "allow", AND THAT IS NOT AN OVERSIGHT (B6).
+    #
+    # `forbid` exists because slot-aggregated demand has an UNKNOWN position inside its
+    # slot, so a departure at the slot's own instant cannot be assumed reachable by
+    # everyone counted in it. That reasoning is about the master's tau >= t+1 rule and
+    # it is why the two RECOURSES now share `forbid`.
+    #
+    # This function is not a recourse. It CHOOSES the departure instant, so the instant
+    # is exact and there is no aggregation ambiguity left to protect against: a vehicle
+    # deliberately timed to leave at minute 8 is a vehicle that is there at minute 8.
+    # Imposing `forbid` here would price a counterfactual nobody proposed -- "choose the
+    # best instant, then refuse the passenger it was chosen for".
+    #
+    # The parameter is still here, and the value still travels on the returned
+    # MinutePricingResult, so a study that wants the other convention can ask for it and
+    # any number produced states which one it used. What is NOT acceptable, and what B6
+    # removed, is two code paths silently disagreeing with nothing recording it.
     offsets: Sequence[float] | None = None,
     mip_solver: str = "cplex_direct",
+    same_slot_eligibility: str = "allow",
 ) -> tuple[float, float, float, list[float]]:
     """Cheapest cost when the DEPARTURE INSTANT is chosen, not assumed.
 
@@ -456,6 +746,7 @@ def price_direction_optimal_placement(
     grid = _offset_grid(slot_resolution, offsets)
     deps = list(range(len(departure_slots)))
     ks = list(range(len(grid)))
+    w0 = min_wait_minutes(same_slot_eligibility)
     dep_minute = {
         (j, k): float(departure_slots[j]) * delta + grid[k] for j in deps for k in ks
     }
@@ -465,7 +756,7 @@ def price_direction_optimal_placement(
         for m in arrivals
         for j in deps
         for k in ks
-        if 0.0 <= dep_minute[(j, k)] - float(m) <= float(wmax_minutes)
+        if w0 <= dep_minute[(j, k)] - float(m) <= float(wmax_minutes)
     ]
 
     mdl = pyo.ConcreteModel()
@@ -540,6 +831,9 @@ def price_schedule_optimal_placement(
     p_minutes: float,
     offsets: Sequence[float] | None = None,
     mip_solver: str = "cplex_direct",
+    # "allow": this chooses the departure instant, so there is no slot-aggregation
+    # ambiguity to guard against. See price_direction_optimal_placement.
+    same_slot_eligibility: str = "allow",
 ) -> MinutePricingResult:
     """Price a whole schedule with the departure instant chosen, not assumed.
 
@@ -564,6 +858,7 @@ def price_schedule_optimal_placement(
             p_minutes,
             offsets,
             mip_solver,
+            same_slot_eligibility=same_slot_eligibility,
         )
         waiting += w
         unserved += u
@@ -576,6 +871,7 @@ def price_schedule_optimal_placement(
         total_passengers=served + unserved,
         departures_used=used,
         policy="optimal",
+        same_slot_eligibility=str(same_slot_eligibility),
     )
 
 
@@ -590,6 +886,8 @@ def price_schedule_optimal_placement_with_chain(
     trip_duration_minutes: float,
     offsets: Sequence[float] | None = None,
     mip_solver: str = "cplex_direct",
+    # "allow": see price_direction_optimal_placement.
+    same_slot_eligibility: str = "allow",
 ) -> tuple[MinutePricingResult, dict[tuple[int, int, str], float]]:
     """Optimal placement that a vehicle can actually perform. Returns (result, minutes).
 
@@ -646,6 +944,7 @@ def price_schedule_optimal_placement_with_chain(
                 total_cost=float(p_minutes) * total, waiting_minutes=0.0,
                 unserved_passengers=total, served_passengers=0.0,
                 total_passengers=total, departures_used=0, policy="optimal+chain",
+                same_slot_eligibility=str(same_slot_eligibility),
             ),
             {},
         )
@@ -663,12 +962,13 @@ def price_schedule_optimal_placement_with_chain(
             c[int(m)] = c.get(int(m), 0) + 1
         counts[direction] = c
 
+    w0 = min_wait_minutes(same_slot_eligibility)
     arcs = [
         (m, i, k)
         for i in range(len(trips))
         for k in ks
         for m in sorted(counts[trips[i][2]])
-        if 0.0 <= dep_minute[(i, k)] - float(m) <= float(wmax_minutes)
+        if w0 <= dep_minute[(i, k)] - float(m) <= float(wmax_minutes)
     ]
 
     mdl = pyo.ConcreteModel()
@@ -783,6 +1083,7 @@ def price_schedule_optimal_placement_with_chain(
             total_passengers=total_pax,
             departures_used=len(trips),
             policy="optimal+chain",
+            same_slot_eligibility=str(same_slot_eligibility),
         ),
         chosen,
     )
@@ -815,6 +1116,7 @@ def attach_minute_recourse(
     policy: DeparturePolicy = "start",
     objective_scale: float = 1.0,
     scenarios: Sequence[tuple[dict[str, Sequence[int]], float]] | None = None,
+    same_slot_eligibility: str = DEFAULT_SAME_SLOT_ELIGIBILITY,
 ) -> None:
     """Pin a slot master's `theta` to a MINUTE-level recourse, in place.
 
@@ -866,6 +1168,7 @@ def attach_minute_recourse(
 
     delta = float(slot_resolution)
     offset = placement_offset(policy, delta)
+    w0 = min_wait_minutes(same_slot_eligibility)
     taus = list(model.T)
     dep_minute = {int(t): float(t) * delta + offset for t in taus}
     S_IDX = list(range(len(scen)))
@@ -882,7 +1185,7 @@ def attach_minute_recourse(
             (sx, m, int(t))
             for m in sorted(pools[(sx, d)])
             for t in taus
-            if 0.0 <= dep_minute[int(t)] - float(m) <= float(wmax_minutes)
+            if w0 <= dep_minute[int(t)] - float(m) <= float(wmax_minutes)
         ]
         for sx in S_IDX
         for d in (OUT, RET)
@@ -1041,6 +1344,7 @@ def honest_waiting(
     served_slot: float,
     policies: Iterable[DeparturePolicy] = ("start",),
     lp_solver: str = "cplex_direct",
+    same_slot_eligibility: str = DEFAULT_SAME_SLOT_ELIGIBILITY,
 ) -> HonestWaitingReport:
     """Report the slot model's waiting estimate beside the minute-level truth.
 
@@ -1065,6 +1369,7 @@ def honest_waiting(
                 p_minutes,
                 policy=policy,
                 lp_solver=lp_solver,
+                same_slot_eligibility=same_slot_eligibility,
             )
             for policy in policies
         },
@@ -1084,6 +1389,7 @@ def solve_minute_recourse(
     solver_options: dict | None = None,
     solve_time_limit_s: float | None = None,
     placement_offsets: Sequence[float] | None = None,
+    same_slot_eligibility: str = DEFAULT_SAME_SLOT_ELIGIBILITY,
 ) -> tuple[dict[str, Any], float]:
     """A minute-level recourse LP with the SAME dual interface as the slot one.
 
@@ -1151,6 +1457,7 @@ def solve_minute_recourse(
             f"placement_offsets must lie in [-slot_resolution, slot_resolution] = "
             f"[-{delta}, {delta}], got {offsets!r}"
         )
+    w0 = min_wait_minutes(same_slot_eligibility)
     taus = list(range(int(T)))
     ks = list(range(len(offsets)))
     dep_minute = {(t, k): float(t) * delta + offsets[k] for t in taus for k in ks}
@@ -1169,7 +1476,7 @@ def solve_minute_recourse(
             for m in sorted(pools[d])
             for t in taus
             for k in ks
-            if 0.0 <= dep_minute[(t, k)] - float(m) <= float(wmax_minutes)
+            if w0 <= dep_minute[(t, k)] - float(m) <= float(wmax_minutes)
         ]
         for d in (OUT, RET)
     }

@@ -254,6 +254,11 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
 
     mp.update(_energy_params_for_resolution(cfg, int(time.slot_resolution)))
 
+    # B2. `None` resolves to Q inside the master rather than here, so the two engines
+    # read the same default from one place instead of two.
+    _set_if_not_none(mp, "K_chg", cfg.model.energy.K_chg)
+    mp["charger_occupancy_binary"] = bool(cfg.model.energy.charger_occupancy_binary)
+
     _set_if_not_none(mp, "start_cost_epsilon", costs.start_cost_epsilon)
     _set_if_not_none(mp, "concurrency_penalty", costs.concurrency_penalty)
 
@@ -352,6 +357,7 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     sp["p"] = cfg.subproblem.p
     sp["recourse_resolution"] = cfg.subproblem.recourse_resolution
     sp["departure_policy"] = cfg.subproblem.departure_policy
+    sp["same_slot_eligibility"] = cfg.subproblem.same_slot_eligibility
     _set_if_not_none(sp, "placement_offsets", cfg.subproblem.placement_offsets)
     sp["degenerate_cut_probe_top_k"] = int(cfg.subproblem.degenerate_cut_probe_top_k)
     _set_if_not_none(

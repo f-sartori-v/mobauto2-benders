@@ -85,6 +85,11 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
 
     mp.update(_energy_params_for_resolution(cfg, int(time.slot_resolution)))
 
+    # B2. Same default resolution as the Benders master: None means Q, decided inside
+    # the model so the two engines cannot drift apart on it.
+    _set_if_not_none(mp, "K_chg", cfg.model.energy.K_chg)
+    mp["charger_occupancy_binary"] = bool(cfg.model.energy.charger_occupancy_binary)
+
     _set_if_not_none(mp, "start_cost_epsilon", costs.start_cost_epsilon)
     _set_if_not_none(mp, "concurrency_penalty", costs.concurrency_penalty)
 

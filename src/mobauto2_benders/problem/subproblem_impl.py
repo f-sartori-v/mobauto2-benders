@@ -401,6 +401,16 @@ class ProblemSubproblem(Subproblem):
         else:
             Wmax = int(params.get("Wmax_slots", params.get("Wmax", 0)))
         p_pen = float(params.get("p", 0.0))
+        # B6. Read once and passed to every SPParams built below, including the
+        # finite-difference probes: an eligibility convention that is re-read per
+        # construction site is one that can differ between the cut and the value it
+        # is supposed to be tight against.
+        _same_slot = str(params.get("same_slot_eligibility", "forbid")).lower()
+        if _same_slot not in {"forbid", "allow"}:
+            raise ValueError(
+                "subproblem.same_slot_eligibility must be 'forbid' or 'allow', got "
+                f"{params.get('same_slot_eligibility')!r}"
+            )
         _eps_raw = params.get("eps_cut", None)
         eps_cut = float(_eps_raw) if _eps_raw is not None else 1e-6
         lp_solver = str(params.get("lp_solver", "cplex_direct"))
@@ -983,6 +993,7 @@ class ProblemSubproblem(Subproblem):
                         delta_chg=params.get("delta_chg"),
                         eps_feas=float(params.get("eps_feas", 1e-7)),
                         solve_time_limit_s=params.get("solve_time_limit_s"),
+                        same_slot_eligibility=_same_slot,
                     ),
                     C_out_tau,
                     C_ret_base,
@@ -1021,6 +1032,7 @@ class ProblemSubproblem(Subproblem):
                         delta_chg=params.get("delta_chg"),
                         eps_feas=float(params.get("eps_feas", 1e-7)),
                         solve_time_limit_s=params.get("solve_time_limit_s"),
+                        same_slot_eligibility=_same_slot,
                     ),
                     C_out_base,
                     C_ret_tau,
@@ -1049,11 +1061,18 @@ class ProblemSubproblem(Subproblem):
 
             cuts: list[Cut] = []
             ub_vals: list[float] = []
-            consts: list[float] = []
-            consts_out: list[float] = []
-            consts_ret: list[float] = []
-            coeffs_out_list: list[Dict[tuple[int, int], float]] = []
-            coeffs_ret_list: list[Dict[tuple[int, int], float]] = []
+            # B1 (audit 1.4). Keyed by SCENARIO INDEX, not appended in arrival order.
+            #
+            # These were five parallel lists appended inside the cut loop and then
+            # combined with `zip(weights, consts)`. The loop has a `continue` -- the
+            # per-scenario theta early-exit -- so a scenario that generated no cut left
+            # the lists SHORTER than `weights`, and every subsequent scenario was then
+            # weighted with its predecessor's w_s while the last weight was dropped
+            # entirely. Nothing detected it: the aggregate is still a number, still
+            # roughly the right size, and the per-scenario tightness check runs before
+            # the mix. Keying by `idx_s` makes the pairing structural, and the
+            # reconciliation assertion below makes a wrong pairing fail loudly.
+            cut_pieces: dict[int, dict[str, Any]] = {}
             scenario_diags: list[dict] = []
             scenario_records: list[dict] = []
             agg = {
@@ -1144,6 +1163,7 @@ class ProblemSubproblem(Subproblem):
                     departure_policy=str(
                         params.get("departure_policy", "start")
                     ),
+                    same_slot_eligibility=_same_slot,
                     placement_offsets=params.get("placement_offsets"),
                     request_minutes=_minutes_for(s),
                 )
@@ -1221,6 +1241,18 @@ class ProblemSubproblem(Subproblem):
                 agg["served_total"].append(float(duals.get("served_total", 0.0)))
                 agg["total_demand"].append(float(duals.get("total_demand", 0.0)))
                 agg.setdefault("timing_sp_solve_s", []).append(sp_solve_time)
+
+            # B1. Deterministic scenario order before anything is combined.
+            #
+            # The solve loop appends in enumeration order today, so this is a no-op on
+            # the current code path. It is here because the work order explicitly asks
+            # for it and because the reason is not obvious: floating-point addition is
+            # not associative, so the moment subproblem solves are dispatched
+            # concurrently -- the obvious next optimisation -- the aggregated cut's
+            # coefficients would depend on which solve returned first. A cut that moves
+            # with scheduling makes a run irreproducible in a way no seed can fix, and
+            # the failure is invisible because every ordering gives a valid cut.
+            scenario_records.sort(key=lambda r: int(r["idx"]))
 
             # Aggregate UB
             if ub_aggregation == "mean":
@@ -1620,11 +1652,16 @@ class ProblemSubproblem(Subproblem):
                     dm_ret=dm_ret,
                 )
                 const = const_out + const_ret
-                consts.append(const)
-                coeffs_out_list.append(c_out_map)
-                coeffs_ret_list.append(c_ret_map)
-                consts_out.append(const_out)
-                consts_ret.append(const_ret)
+                cut_pieces[int(idx_s)] = {
+                    "const": float(const),
+                    "const_out": float(const_out),
+                    "const_ret": float(const_ret),
+                    "coeff_yOUT": dict(c_out_map),
+                    "coeff_yRET": dict(c_ret_map),
+                    "recourse": float(ub_val),
+                    "ub_out": float(duals.get("ub_out", 0.0)),
+                    "ub_ret": float(duals.get("ub_ret", 0.0)),
+                }
                 # Evaluate line at incumbent for diagnostics
                 theta_lb_s = (
                     float(const)
@@ -1667,6 +1704,14 @@ class ProblemSubproblem(Subproblem):
                             "recourse_out": float(duals.get("ub_out", 0.0)),
                             "recourse_ret": float(duals.get("ub_ret", 0.0)),
                             "scenario_index": int(idx_s),
+                            "scenario_weight": float(weights[int(idx_s)]),
+                            # B1. Which architecture produced this cut. One cut per
+                            # (scenario, direction) against theta_{s,d} is the
+                            # disaggregated form -- the stronger one, and the one B9
+                            # wants available. A table may not mix the two, so the
+                            # label travels with the cut rather than being inferred
+                            # from a config read at some later point.
+                            "cut_architecture": "disaggregated",
                             "cut_valid_lower_bound": bool(cut_lb_valid),
                         },
                     )
@@ -1828,31 +1873,107 @@ class ProblemSubproblem(Subproblem):
                 agg_cut_mode = f"{agg_cut_mode}+no_cut({_abstained})"
 
             if not multi_cuts:
-                # Weighted average of constants and coefficients
-                const_avg = sum(w * c for w, c in zip(weights, consts))
-                const_out_avg = (
-                    sum(w * c for w, c in zip(weights, consts_out))
-                    if consts_out
-                    else const_avg
+                # B1 -- THE AGGREGATED CUT, written one way and only one way.
+                #
+                #   pi_bar_d[tau] = sum_s w_s * pi_hat_{s,d}[tau]
+                #   a_d           = sum_s w_s * sum_t alpha_hat_{s,d,t} * R_{s,d,t}
+                #   theta_d      >= a_d + sum_tau S * pi_bar_d[tau] * Y_d[tau]
+                #
+                # Dual selection (Magnanti-Wong, or the plain-dual fallback) has already
+                # run PER SCENARIO in the loop above and produced (alpha_hat_s, pi_hat_s)
+                # -- that is `cut_pieces[s]`. Aggregation happens here and only here, and
+                # it reads `weights[s]` by the scenario's own index rather than by
+                # position in a list that a `continue` can shorten.
+                #
+                # Scenarios are visited in sorted index order so the cut cannot move
+                # with solve order: floating-point addition is not associative, and a
+                # cut that depends on which subproblem finished first is not
+                # reproducible even on one machine.
+                _ordered = sorted(cut_pieces)
+                if len(_ordered) != len(scenario_records):
+                    # An aggregated cut is a weighted mean over ALL scenarios. Missing
+                    # one means its weight silently went to the others -- a different
+                    # cut, and not necessarily a valid one.
+                    _missing = sorted(
+                        {int(r["idx"]) for r in scenario_records} - set(_ordered)
+                    )
+                    raise RuntimeError(
+                        "aggregated cut is missing a scenario contribution: no cut was "
+                        f"built for scenario index/indices {_missing}. The aggregated "
+                        "architecture weights every scenario; dropping one renormalises "
+                        "the rest without saying so. Either every scenario contributes, "
+                        "or the run must use the disaggregated architecture "
+                        "(subproblem.cut_architecture: disaggregated)."
+                    )
+                const_avg = sum(weights[i] * cut_pieces[i]["const"] for i in _ordered)
+                const_out_avg = sum(
+                    weights[i] * cut_pieces[i]["const_out"] for i in _ordered
                 )
-                const_ret_avg = (
-                    sum(w * c for w, c in zip(weights, consts_ret))
-                    if consts_ret
-                    else 0.0
+                const_ret_avg = sum(
+                    weights[i] * cut_pieces[i]["const_ret"] for i in _ordered
                 )
-                keys_out = set().union(*[set(d.keys()) for d in coeffs_out_list])
-                keys_ret = set().union(*[set(d.keys()) for d in coeffs_ret_list])
+                keys_out = set().union(
+                    *[set(cut_pieces[i]["coeff_yOUT"]) for i in _ordered]
+                )
+                keys_ret = set().union(
+                    *[set(cut_pieces[i]["coeff_yRET"]) for i in _ordered]
+                )
                 avg_out: Dict[tuple[int, int], float] = {}
                 avg_ret: Dict[tuple[int, int], float] = {}
-                for k in keys_out:
+                for k in sorted(keys_out):
                     avg_out[k] = sum(
-                        weights[i] * coeffs_out_list[i].get(k, 0.0)
-                        for i in range(len(coeffs_out_list))
+                        weights[i] * cut_pieces[i]["coeff_yOUT"].get(k, 0.0)
+                        for i in _ordered
                     )
-                for k in keys_ret:
+                for k in sorted(keys_ret):
                     avg_ret[k] = sum(
-                        weights[i] * coeffs_ret_list[i].get(k, 0.0)
-                        for i in range(len(coeffs_ret_list))
+                        weights[i] * cut_pieces[i]["coeff_yRET"].get(k, 0.0)
+                        for i in _ordered
+                    )
+
+                # RECONCILIATION AT INSERTION TIME (B1). The aggregated cut, evaluated
+                # at the incumbent signature, must equal sum_s w_s Q_d(s, Ybar):
+                #
+                #   | a_d + sum_tau S pi_bar_d[tau] Ybar_d[tau]
+                #         - sum_s w_s Q_d(s, Ybar) |
+                #       <= tau_abs + tau_rel * | sum_s w_s Q_d(s, Ybar) |
+                #
+                # The per-scenario tightness check upstream cannot see this. It verifies
+                # each cut against its OWN scenario, and every way of losing `s` or
+                # `w_s` between the subproblem and insertion -- a mispaired weight, a
+                # dropped scenario, a weight vector that does not sum to one -- survives
+                # it intact and shows up only here.
+                _agg_at_incumbent = (
+                    float(const_avg)
+                    + sum(
+                        float(v)
+                        * _cand_float(candidate, f"yOUT[{int(q)},{int(tau)}]", 0.0)
+                        for (q, tau), v in avg_out.items()
+                    )
+                    + sum(
+                        float(v)
+                        * _cand_float(candidate, f"yRET[{int(q)},{int(tau)}]", 0.0)
+                        for (q, tau), v in avg_ret.items()
+                    )
+                )
+                _weighted_recourse = sum(
+                    weights[i] * cut_pieces[i]["recourse"] for i in _ordered
+                )
+                _tau_abs = max(float(eps_cut), 1e-6)
+                _tau_rel = max(float(eps_cut), 1e-9)
+                _tol = _tau_abs + _tau_rel * abs(_weighted_recourse)
+                if abs(_agg_at_incumbent - _weighted_recourse) > _tol:
+                    raise RuntimeError(
+                        "aggregated multi-scenario cut does not reconcile at the "
+                        f"incumbent: the cut evaluates to {_agg_at_incumbent:.12g} "
+                        "where sum_s w_s Q_d(s, Ybar) is "
+                        f"{_weighted_recourse:.12g} (diff "
+                        f"{_weighted_recourse - _agg_at_incumbent:.3g}, tol {_tol:.3g}). "
+                        "Every per-scenario cut was already checked tight against its "
+                        "OWN scenario, so the defect is in the aggregation: a weight "
+                        "paired with the wrong scenario, a scenario dropped, or weights "
+                        "that do not sum to one (sum="
+                        f"{sum(weights[i] for i in _ordered):.12g})."
                     )
                 cut = Cut(
                     name="opt_cut_avg",
@@ -1863,20 +1984,15 @@ class ProblemSubproblem(Subproblem):
                         "const_ret": const_ret_avg,
                         "coeff_yOUT": avg_out,
                         "coeff_yRET": avg_ret,
+                        "cut_architecture": "aggregated",
+                        "scenario_indices": list(_ordered),
+                        "scenario_weights": [float(weights[i]) for i in _ordered],
                         "recourse_total": float(ub_val_agg),
                         "recourse_out": float(
-                            sum(
-                                weights[i]
-                                * scenario_records[i]["duals"].get("ub_out", 0.0)
-                                for i in range(len(scenario_records))
-                            )
+                            sum(weights[i] * cut_pieces[i]["ub_out"] for i in _ordered)
                         ),
                         "recourse_ret": float(
-                            sum(
-                                weights[i]
-                                * scenario_records[i]["duals"].get("ub_ret", 0.0)
-                                for i in range(len(scenario_records))
-                            )
+                            sum(weights[i] * cut_pieces[i]["ub_ret"] for i in _ordered)
                         ),
                         "cut_generation_mode": agg_cut_mode,
                         "cut_valid_lower_bound": bool(agg_cut_lb_valid),
@@ -1998,6 +2114,7 @@ class ProblemSubproblem(Subproblem):
                 recourse_resolution=str(params.get("recourse_resolution", "slot")),
                 Wmax_minutes=params.get("Wmax_minutes"),
                 departure_policy=str(params.get("departure_policy", "start")),
+                same_slot_eligibility=_same_slot,
                 placement_offsets=params.get("placement_offsets"),
                 request_minutes=_minutes_for(single_demand_source),
             )
@@ -2654,6 +2771,160 @@ class SPParams:
     # model. A grid, when given, should be anticipate-only (O subset [-delta, 0]).
     placement_offsets: list[float] | None = None
     request_minutes: dict | None = None
+    # B6 (audit 2.4). "forbid" reproduces the tau >= t+1 rule this model has always
+    # had; "allow" admits a departure leaving in the arrival's own slot. See
+    # minute_pricer.SameSlotEligibility -- the two recourses must read the SAME value,
+    # which is why it travels on the params rather than being hard-coded in each.
+    same_slot_eligibility: str = "forbid"
+
+
+def slot_wait_cost(t: int, tau: int) -> float:
+    """Waiting charged, in slots, to demand from slot `t` boarding departure `tau`.
+
+    Module level rather than a closure inside `solve_subproblem` because the objective
+    coefficients are part of what the exactness fixtures fingerprint, and because the
+    post-solve accounting reuses it -- a second, drifting copy of a cost function is
+    how a reported waiting figure stops matching the objective that produced it.
+    """
+    return float(max(0, int(tau) - int(t)))
+
+
+def build_slot_recourse_model(
+    P: "SPParams",
+    C_out: Iterable[float],
+    C_ret: Iterable[float],
+    R_out: Iterable[float],
+    R_ret: Iterable[float],
+):
+    """Build the slot recourse LP. No solve, no side effects on `P`.
+
+    EXTRACTED SO THE STRUCTURE CAN BE INSPECTED WITHOUT SOLVING (B4/B5). The
+    exactness conditions are claims about this model's SHAPE -- which rows and
+    variables exist, what the objective coefficients are, which right-hand sides `y`
+    is allowed to touch -- and until now the only way to reach that shape was to run
+    a solve and read the duals back. That is why the fibre-invariance fixture asserted
+    DUAL equality: the duals were the only observable it had. Degenerate LPs have
+    several optimal duals, all giving valid cuts, so the fixture was asserting
+    something the theory does not require and that a solver is free to break.
+
+    `recourse_fingerprint` reads this model directly instead.
+
+    Note what does NOT appear in the signature: nothing about the schedule beyond
+    `C_out`/`C_ret`. That IS condition E2 -- `y` reaches the recourse only as the
+    capacity right-hand side -- expressed as a function boundary rather than as a
+    comment.
+    """
+    m = pyo.ConcreteModel()
+    m.name = "subproblem"
+    Tset = range(P.T)
+
+    C_out = list(C_out)
+    C_ret = list(C_ret)
+    R_out = list(R_out)
+    R_ret = list(R_ret)
+
+    W = P.Wmax_slots
+
+    # Define valid arcs with causality and max-wait: (t + w0) <= tau <= min(T-1, t+W)
+    # Interpretation: demand aggregated in slot t (arrivals during [t*res, (t+1)*res))
+    # can be served by the next slot's departure at the earliest (tau = t+1) under the
+    # "forbid" convention, which is the one this model has always had and still the
+    # default. B6 makes it switchable rather than hard-coded, because the MINUTE
+    # recourse hard-coded the opposite convention and nothing compared the two -- see
+    # minute_pricer.SameSlotEligibility for what that cost the delta=1 comparison.
+    _w0 = 1 if str(getattr(P, "same_slot_eligibility", "forbid")).lower() == "forbid" else 0
+    if str(getattr(P, "same_slot_eligibility", "forbid")).lower() not in {
+        "forbid",
+        "allow",
+    }:
+        raise ValueError(
+            "same_slot_eligibility must be 'forbid' or 'allow', got "
+            f"{P.same_slot_eligibility!r}"
+        )
+    Arcs_list = [
+        (t, tau)
+        for t in Tset
+        for tau in Tset
+        if (t + _w0) <= tau <= min(P.T - 1, t + W)
+    ]
+    m.Arcs = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
+
+    # Arcs carry no layer index.
+    #
+    # This model used to split each departure slot into K_d[tau] "layers", one per
+    # vehicle, so that a per-layer epsilon could encourage packing the first vehicle
+    # before the second. K_d[tau] comes from the master's y, so the LAYERS -- and
+    # therefore the variable set AND the constraint set -- changed with y.
+    #
+    # Benders duality requires y to enter only through the right-hand side. When the
+    # constraint matrix itself moves with y, the dual of one instance is not a
+    # subgradient of the recourse across y, and NO cut generator can be valid on top
+    # of it. Measured before this change: cuts forced theta to 6893 (directional),
+    # 5290 (single theta) and 6087 (plain dual) at a schedule whose true recourse is
+    # 4183.00. The mechanism was pi[tau] summing K layer duals with dm = S*pi, giving
+    # slopes about K times too steep, which over-estimates whenever the evaluated y
+    # has less capacity than the incumbent.
+    #
+    # The layers were redundant in capacity: K layers of min(S, S*K) = S each total
+    # K*S = S*sum_q y_d[q,tau], which is exactly the aggregated right-hand side used
+    # below. K = 0 gives no arcs, matching zero capacity. Only the fill_first_epsilon
+    # tie-break between otherwise identical assignments is lost.
+    m.ArcsOut = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
+    m.ArcsRet = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
+
+    m.x_OUT = pyo.Var(m.ArcsOut, within=pyo.NonNegativeReals)
+    m.x_RET = pyo.Var(m.ArcsRet, within=pyo.NonNegativeReals)
+    m.u_OUT = pyo.Var(Tset, within=pyo.NonNegativeReals)
+    m.u_RET = pyo.Var(Tset, within=pyo.NonNegativeReals)
+
+    m.obj = pyo.Objective(
+        expr=sum(slot_wait_cost(t, tau) * m.x_OUT[t, tau] for (t, tau) in m.ArcsOut)
+        + sum(slot_wait_cost(t, tau) * m.x_RET[t, tau] for (t, tau) in m.ArcsRet)
+        + P.p * (sum(m.u_OUT[t] for t in Tset) + sum(m.u_RET[t] for t in Tset)),
+        sense=pyo.minimize,
+    )
+
+    def cons_dem_OUT(m, t):
+        return (
+            sum(m.x_OUT[t, tau] for tau in Tset if (t, tau) in m.ArcsOut) + m.u_OUT[t]
+            == R_out[t]
+        )
+
+    m.D_out = pyo.Constraint(Tset, rule=cons_dem_OUT)
+
+    def cons_dem_RET(m, t):
+        return (
+            sum(m.x_RET[t, tau] for tau in Tset if (t, tau) in m.ArcsRet) + m.u_RET[t]
+            == R_ret[t]
+        )
+
+    m.D_ret = pyo.Constraint(Tset, rule=cons_dem_RET)
+
+    # One capacity row per departure slot, right-hand side linear in y:
+    #   sum_t x_d[t,tau] <= C_d[tau] = S * sum_q y_d[q,tau]
+    # Fixed structure, so pi_d[tau] is a genuine dual and dm = S*pi a valid subgradient.
+    def cap_out_rule(m, tau):
+        ts = [t for t in Tset if (t, tau) in m.ArcsOut]
+        if not ts:
+            return pyo.Constraint.Skip
+        return sum(m.x_OUT[t, tau] for t in ts) <= float(C_out[tau])
+
+    m.Cap_out = pyo.Constraint(Tset, rule=cap_out_rule)
+
+    def cap_ret_rule(m, tau):
+        ts = [t for t in Tset if (t, tau) in m.ArcsRet]
+        if not ts:
+            return pyo.Constraint.Skip
+        return sum(m.x_RET[t, tau] for t in ts) <= float(C_ret[tau])
+
+    m.Cap_ret = pyo.Constraint(Tset, rule=cap_ret_rule)
+
+    # Dual suffix required to read duals
+    m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
+
+    return m
+
+
 
 
 def solve_subproblem(
@@ -2697,6 +2968,7 @@ def solve_subproblem(
             C_ret=list(C_ret),
             request_minutes=P.request_minutes,
             policy=str(P.departure_policy),
+            same_slot_eligibility=str(P.same_slot_eligibility),
             lp_solver=P.lp_solver,
             solver_options=P.solver_options,
             solve_time_limit_s=P.solve_time_limit_s,
@@ -2704,101 +2976,17 @@ def solve_subproblem(
         )
 
     t_build0 = time.perf_counter()
-    m = pyo.ConcreteModel()
-    m.name = "subproblem"
+    m = build_slot_recourse_model(P, C_out, C_ret, R_out, R_ret)
+    # Locals the builder used to establish in place. Re-derived here rather than
+    # returned alongside the model: they are all one-line functions of `P` and the
+    # arguments, and a builder returning a tuple of loose lists would invite the two
+    # copies to drift.
     Tset = range(P.T)
-
     C_out = list(C_out)
     C_ret = list(C_ret)
     R_out = list(R_out)
     R_ret = list(R_ret)
-
     W = P.Wmax_slots
-
-    # Define valid arcs with causality and max-wait: (t + 1) <= tau <= min(T-1, t+W)
-    # Interpretation: demand aggregated in slot t (arrivals during [t*res, (t+1)*res))
-    # can be served by the next slot's departure at the earliest (tau = t+1).
-    # Same-slot service (tau = t) is disallowed to avoid serving passengers after the slot's departure.
-    Arcs_list = [
-        (t, tau) for t in Tset for tau in Tset if (t + 1) <= tau <= min(P.T - 1, t + W)
-    ]
-    m.Arcs = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
-
-    # Arcs carry no layer index.
-    #
-    # This model used to split each departure slot into K_d[tau] "layers", one per
-    # vehicle, so that a per-layer epsilon could encourage packing the first vehicle
-    # before the second. K_d[tau] comes from the master's y, so the LAYERS -- and
-    # therefore the variable set AND the constraint set -- changed with y.
-    #
-    # Benders duality requires y to enter only through the right-hand side. When the
-    # constraint matrix itself moves with y, the dual of one instance is not a
-    # subgradient of the recourse across y, and NO cut generator can be valid on top
-    # of it. Measured before this change: cuts forced theta to 6893 (directional),
-    # 5290 (single theta) and 6087 (plain dual) at a schedule whose true recourse is
-    # 4183.00. The mechanism was pi[tau] summing K layer duals with dm = S*pi, giving
-    # slopes about K times too steep, which over-estimates whenever the evaluated y
-    # has less capacity than the incumbent.
-    #
-    # The layers were redundant in capacity: K layers of min(S, S*K) = S each total
-    # K*S = S*sum_q y_d[q,tau], which is exactly the aggregated right-hand side used
-    # below. K = 0 gives no arcs, matching zero capacity. Only the fill_first_epsilon
-    # tie-break between otherwise identical assignments is lost.
-    m.ArcsOut = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
-    m.ArcsRet = pyo.Set(initialize=Arcs_list, dimen=2, ordered=False)
-
-    m.x_OUT = pyo.Var(m.ArcsOut, within=pyo.NonNegativeReals)
-    m.x_RET = pyo.Var(m.ArcsRet, within=pyo.NonNegativeReals)
-    m.u_OUT = pyo.Var(Tset, within=pyo.NonNegativeReals)
-    m.u_RET = pyo.Var(Tset, within=pyo.NonNegativeReals)
-
-    def wait_cost(t: int, tau: int) -> float:
-        return float(max(0, tau - t))
-
-    m.obj = pyo.Objective(
-        expr=sum(wait_cost(t, tau) * m.x_OUT[t, tau] for (t, tau) in m.ArcsOut)
-        + sum(wait_cost(t, tau) * m.x_RET[t, tau] for (t, tau) in m.ArcsRet)
-        + P.p * (sum(m.u_OUT[t] for t in Tset) + sum(m.u_RET[t] for t in Tset)),
-        sense=pyo.minimize,
-    )
-
-    def cons_dem_OUT(m, t):
-        return (
-            sum(m.x_OUT[t, tau] for tau in Tset if (t, tau) in m.ArcsOut) + m.u_OUT[t]
-            == R_out[t]
-        )
-
-    m.D_out = pyo.Constraint(Tset, rule=cons_dem_OUT)
-
-    def cons_dem_RET(m, t):
-        return (
-            sum(m.x_RET[t, tau] for tau in Tset if (t, tau) in m.ArcsRet) + m.u_RET[t]
-            == R_ret[t]
-        )
-
-    m.D_ret = pyo.Constraint(Tset, rule=cons_dem_RET)
-
-    # One capacity row per departure slot, right-hand side linear in y:
-    #   sum_t x_d[t,tau] <= C_d[tau] = S * sum_q y_d[q,tau]
-    # Fixed structure, so pi_d[tau] is a genuine dual and dm = S*pi a valid subgradient.
-    def cap_out_rule(m, tau):
-        ts = [t for t in Tset if (t, tau) in m.ArcsOut]
-        if not ts:
-            return pyo.Constraint.Skip
-        return sum(m.x_OUT[t, tau] for t in ts) <= float(C_out[tau])
-
-    m.Cap_out = pyo.Constraint(Tset, rule=cap_out_rule)
-
-    def cap_ret_rule(m, tau):
-        ts = [t for t in Tset if (t, tau) in m.ArcsRet]
-        if not ts:
-            return pyo.Constraint.Skip
-        return sum(m.x_RET[t, tau] for t in ts) <= float(C_ret[tau])
-
-    m.Cap_ret = pyo.Constraint(Tset, rule=cap_ret_rule)
-
-    # Dual suffix required to read duals
-    m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
 
     build_stats = _model_size_stats(m)
     lp_path = None
@@ -2946,7 +3134,7 @@ def solve_subproblem(
     # Component costs (per direction)
     try:
         out_cost_val = sum(
-            wait_cost(t, tau) * float(pyo.value(m.x_OUT[t, tau]))
+            slot_wait_cost(t, tau) * float(pyo.value(m.x_OUT[t, tau]))
             for (t, tau) in m.ArcsOut
         )
         out_cost_val += float(P.p) * sum(float(pyo.value(m.u_OUT[t])) for t in Tset)
@@ -2954,7 +3142,7 @@ def solve_subproblem(
         out_cost_val = 0.0
     try:
         ret_cost_val = sum(
-            wait_cost(t, tau) * float(pyo.value(m.x_RET[t, tau]))
+            slot_wait_cost(t, tau) * float(pyo.value(m.x_RET[t, tau]))
             for (t, tau) in m.ArcsRet
         )
         ret_cost_val += float(P.p) * sum(float(pyo.value(m.u_RET[t])) for t in Tset)

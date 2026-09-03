@@ -153,6 +153,16 @@ def build_manifest(
             "p_minutes": cfg.subproblem.p_minutes,
             "recourse_resolution": cfg.subproblem.recourse_resolution,
             "departure_policy": cfg.subproblem.departure_policy,
+            # B6. Which eligibility convention priced this run. Two runs that differ
+            # only here are two different operational claims, not two estimates of one
+            # number, and the delta=1 comparison was reported without it.
+            "same_slot_eligibility": cfg.subproblem.same_slot_eligibility,
+            # F2: the departure-offset grid o. Named in the shared manifest contract.
+            "placement_offsets": (
+                list(cfg.subproblem.placement_offsets)
+                if cfg.subproblem.placement_offsets
+                else None
+            ),
         },
         "objective_terms": {
             "start_cost_epsilon": cfg.model.costs.start_cost_epsilon,
@@ -168,12 +178,23 @@ def build_manifest(
             "S": cfg.subproblem.S,
             "Emax": cfg.model.energy.Emax,
             "L": cfg.model.energy.L,
+            # B2. None means "as many chargers as vehicles" -- resolved to Q inside
+            # the master, and recorded here as given so a table cannot silently mix a
+            # constrained run with an unconstrained one.
+            "K_chg": cfg.model.energy.K_chg,
+            "charger_occupancy_binary": bool(
+                cfg.model.energy.charger_occupancy_binary
+            ),
             "symmetry_breaking": bool(
                 cfg.master.use_fifo_symmetry or cfg.master.symmetry_breaking
             ),
             "charge_before_idle": cfg.master.charge_before_idle,
             "aggregate_cuts_by_tau": cfg.master.aggregate_cuts_by_tau,
             "theta_per_scenario": cfg.master.theta_per_scenario,
+            # B1. "aggregated" or "disaggregated" -- resolved by config.py, never
+            # inferred here, so the manifest and the engines cannot disagree about
+            # which architecture ran.
+            "cut_architecture": cfg.subproblem.cut_architecture,
         },
         "cut_generation": {
             "use_magnanti_wong": cfg.subproblem.use_magnanti_wong,

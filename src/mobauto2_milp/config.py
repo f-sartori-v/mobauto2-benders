@@ -67,6 +67,17 @@ class EnergySection:
     Emax: float
     L: float
     delta_chg: float | int | str | None = None
+    # B2 (audit 1.8). How many vehicles may draw from the depot's chargers in one
+    # slot. `None` means Q -- every vehicle can charge at once, which is the
+    # assumption every archived result was produced under, and at which the row is
+    # implied by c in [0,1] so those results reproduce exactly. State a number to
+    # make the site's real charger count part of the instance rather than an
+    # accident of the formulation.
+    K_chg: int | None = None
+    # Whether a charger is held for a whole slot (True) or is preemptible within it
+    # (False, the divisible default). These are different physical claims and give
+    # different schedules; the manifest records which one a run used.
+    charger_occupancy_binary: bool = False
 
 
 @dataclass(slots=True)
@@ -565,7 +576,11 @@ def _parse_v3(raw: Mapping[str, Any]) -> RootConfig:
     )
 
     energy_raw = _as_mapping(model_raw.get("energy"), "model.energy")
-    _check_unknown_keys(energy_raw, {"Emax", "L", "delta_chg"}, "model.energy")
+    _check_unknown_keys(
+        energy_raw,
+        {"Emax", "L", "delta_chg", "K_chg", "charger_occupancy_binary"},
+        "model.energy",
+    )
     _require_keys(energy_raw, {"Emax", "L"}, "model.energy")
     energy_section = EnergySection(
         Emax=_ensure_float(_disallow_expr(energy_raw.get("Emax"), "model.energy.Emax"), "model.energy.Emax"),
@@ -574,6 +589,19 @@ def _parse_v3(raw: Mapping[str, Any]) -> RootConfig:
             _ensure_num_or_expr(energy_raw.get("delta_chg"), "model.energy.delta_chg")
             if energy_raw.get("delta_chg") is not None
             else None
+        ),
+        K_chg=(
+            int(
+                _ensure_float(
+                    _disallow_expr(energy_raw.get("K_chg"), "model.energy.K_chg"),
+                    "model.energy.K_chg",
+                )
+            )
+            if energy_raw.get("K_chg") is not None
+            else None
+        ),
+        charger_occupancy_binary=bool(
+            energy_raw.get("charger_occupancy_binary", False)
         ),
     )
 

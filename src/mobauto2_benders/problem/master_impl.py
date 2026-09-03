@@ -785,6 +785,76 @@ class ProblemMaster(MasterProblem):
 
         m.C4_chg_cap = pyo.Constraint(m.Q, m.T, rule=_c4_chg_cap_rule)
 
+        # B3 -- close the final-slot energy leak (audit 1.7).
+        #
+        # C4_bal, C4_chg_link and C4_chg_cap all skip at t = T-1, because the SoC
+        # recursion writes b[q,t+1] and there is no b[q,T]. That left c[q,T-1] free in
+        # [0,1] and gchg[q,T-1] free in [0, +inf): neither appears in any surviving row
+        # nor in the objective, so a reported solution could "charge" in the last slot
+        # with no effect on any state and no cost. The monolith already fixed
+        # gchg[q,T-1] (mobauto2_milp/model.py) and left c[q,T-1] free; the two engines
+        # therefore disagreed on the last slot of every schedule they both solved.
+        #
+        # The report states the second of the two remedies -- fix both to zero rather
+        # than introduce b[q,T] -- so that is what is implemented. It removes no
+        # feasible schedule: the last slot's charging changes no state (there is no
+        # b[q,T] for it to feed) and enters no cost term, so every solution has an
+        # equal-objective twin with c[q,T-1] = gchg[q,T-1] = 0. The baseline objective
+        # is therefore unchanged, which `no_final_slot_charging` asserts.
+        if T >= 2:
+            for q in m.Q:
+                m.c[q, T - 1].fix(0.0)
+                m.gchg[q, T - 1].fix(0.0)
+
+        # B2 -- charger capacity is data, not an implementation detail (audit 1.8).
+        #
+        #     sum_q c[q,t] <= K_chg      for all t
+        #
+        # `K_chg` defaults to Q, at which the row is implied by c in [0,1] and every
+        # archived result reproduces to the last digit. The divisible form assumes
+        # charger time is preemptible within a slot -- two vehicles may each hold a
+        # charger for half the slot. Where the site data say a charger is held whole,
+        # `charger_occupancy_binary` adds z[q,t] in {0,1} with c[q,t] <= z[q,t] and
+        # sum_q z[q,t] <= K_chg, which is the indivisible reading. Which form a run
+        # used is recorded in the manifest; they are not interchangeable and a table
+        # may not mix them.
+        K_chg = self._p("K_chg", None)
+        K_chg = int(Q) if K_chg is None else int(K_chg)
+        if K_chg < 0:
+            raise ValueError(f"K_chg must be non-negative, got {K_chg}")
+        self._K_chg = K_chg
+        self._charger_occupancy_binary = bool(
+            self._p("charger_occupancy_binary", False)
+        )
+        # The divisible row is emitted only when K_chg < Q. At K_chg = Q it is implied
+        # by c in [0,1] and adds nothing but Q*T nonzeros -- and, less obviously, it
+        # would couple named vehicles in every run, which is exactly the E3
+        # separability condition the stage-3 Dantzig-Wolfe reformulation rests on
+        # (DESIGN_DD_v1 E3, tests/test_fast_signature.py). Emitting a redundant row
+        # would retire that condition for no gain. Where the row DOES bind, E3 is
+        # genuinely lost and the reformulation must account for it; that is a fact
+        # about scarce chargers, not about this code.
+        #
+        # The binary form is never implied -- c[q,t] <= z[q,t] with z integral forbids
+        # two vehicles sharing one charger even at K_chg = Q -- so it is always
+        # emitted when asked for.
+        self._charger_capacity_binds = bool(
+            self._charger_occupancy_binary or K_chg < int(Q)
+        )
+        if self._charger_occupancy_binary:
+            m.zchg = pyo.Var(m.Q, m.T, within=pyo.Binary)
+            m.C_chg_occ_link = pyo.Constraint(
+                m.Q, m.T, rule=lambda m, q, t: m.c[q, t] <= m.zchg[q, t]
+            )
+            m.C_chg_capacity = pyo.Constraint(
+                m.T,
+                rule=lambda m, t: sum(m.zchg[q, t] for q in m.Q) <= float(K_chg),
+            )
+        elif K_chg < int(Q):
+            m.C_chg_capacity = pyo.Constraint(
+                m.T, rule=lambda m, t: sum(m.c[q, t] for q in m.Q) <= float(K_chg)
+            )
+
         # An OUT trip must carry enough charge for the outbound leg and the return.
         m.C5 = pyo.Constraint(
             m.Q, m.T, rule=lambda m, q, t: m.b[q, t] >= 2 * L * m.yOUT[q, t]

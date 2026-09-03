@@ -9,7 +9,19 @@ import pyomo.environ as pyo
 from _helpers import CONFIGS, DEFAULT_CONFIG, build_master, constraint_names, master_params
 
 
-class TestSymmetryBreaking(unittest.TestCase):
+class TestM2SymmetryValidity(unittest.TestCase):
+    """M2 (was E4). Fleet homogeneity, reclassified (B4, audit item 1.5).
+
+    This was listed among the "conditions for exactness". It is not one. Benders
+    validity does not depend on the fleet being homogeneous anywhere: the cuts come
+    from recourse duality, which never looks at `binit`. Homogeneity is the validity
+    condition for ONE inequality -- the vehicle-ordering symmetry constraint -- and
+    for nothing else in the model. Without it that constraint can cut off the true
+    optimum; with it removed, a heterogeneous fleet solves correctly.
+
+    So the condition is real, narrow, and named for what it guards: M2, symmetry
+    validity, matching the report's table.
+    """
     """Guards the defect that made the master stop being a relaxation.
 
     Ordering vehicles by cumulative departures at EVERY time prefix removes
@@ -48,6 +60,48 @@ class TestSymmetryBreaking(unittest.TestCase):
         params["initial_actions"] = ["IDL", "CHR"]
         with self.assertRaises(ValueError):
             build_master(params)
+
+    def test_symmetry_refused_heterogeneous(self):
+        """B4. Refused at LOAD for heterogeneous SoC and for heterogeneous LOCATION.
+
+        The two are separate reasons and the test names both. Differing initial
+        battery makes two vehicles non-interchangeable in the energy block; differing
+        initial ACTION additionally puts them in different places -- "RET" starts a
+        vehicle at Massy, everything else at Longvilliers -- so relabelling them
+        changes which trips are even feasible. Ordering by cumulative departures is
+        valid only when relabelling is a symmetry, and neither case is.
+
+        The refusal must happen at load. A run that silently ordered a heterogeneous
+        fleet would report a lower bound above the true optimum, which is the exact
+        failure this repository already paid for once (master bound ~4558 against a
+        known feasible 4228.99).
+        """
+        cases = {
+            "heterogeneous initial SoC": {"binit": [150.0, 90.0]},
+            "heterogeneous initial location": {"initial_actions": ["IDL", "RET"]},
+            "both": {"binit": [150.0, 90.0], "initial_actions": ["IDL", "RET"]},
+        }
+        for label, overrides in cases.items():
+            with self.subTest(case=label):
+                params = master_params()
+                params.update(overrides)
+                params["symmetry_breaking"] = True
+                with self.assertRaises(ValueError) as ctx:
+                    build_master(params)
+                self.assertIn("homogeneous", str(ctx.exception).lower())
+
+    def test_the_refusal_is_not_unconditional(self):
+        """A guard that refuses everything guards nothing.
+
+        The homogeneous fleet must still build, or the test above would pass with a
+        `raise ValueError` at the top of `initialize`.
+        """
+        params = master_params()
+        params["symmetry_breaking"] = True
+        params["binit"] = [150.0, 150.0]
+        params["initial_actions"] = ["IDL", "IDL"]
+        pm = build_master(params)
+        self.assertIn("C_sym_break_tot", constraint_names(pm.m))
 
 
 class TestChargeBeforeIdleFlag(unittest.TestCase):
