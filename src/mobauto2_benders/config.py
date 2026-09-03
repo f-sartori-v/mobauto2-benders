@@ -270,6 +270,13 @@ class SubproblemSection:
     acknowledge_no_lower_bound: bool = False
     use_magnanti_wong: bool = False
     mw_core_alpha: float = 0.3
+    # B14 (audit item 2.8). What certification is attempted for the Magnanti-Wong
+    # core point. "necessary_conditions" checks the conditions
+    # signature.project_core_point enforces on a relaxation of the projected region;
+    # "none" skips it. NEITHER establishes relative interiority of conv(Y) -- no
+    # method here does -- so the cut is described as Magnanti-Wong-INSPIRED either
+    # way. What this key changes is whether the run can say it looked.
+    mw_core_point_certification: str = "necessary_conditions"
     mw_core_eps: float = 1e-3
     use_dual_slopes: bool = False
     S: float = 0.0
@@ -463,6 +470,24 @@ def _validated_objective_mode(raw) -> str:
         raise ValueError(
             "model.costs.objective_mode must be 'weighted_sum' or 'lexicographic', "
             f"got {raw!r}"
+        )
+    return mode
+
+
+def _validated_core_certification(raw) -> str:
+    """B14. One of two named modes, refused on a typo rather than defaulted.
+
+    A misspelling falling back to "necessary_conditions" would make a run report a
+    certification attempt it did not make -- the same class of defect as a manifest
+    naming an objective mode the solve never used.
+    """
+    if raw is None:
+        return "necessary_conditions"
+    mode = str(raw).strip().lower()
+    if mode not in {"none", "necessary_conditions"}:
+        raise ValueError(
+            "subproblem.mw_core_point_certification must be 'none' or "
+            f"'necessary_conditions', got {raw!r}"
         )
     return mode
 
@@ -1229,6 +1254,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "acknowledge_no_lower_bound",
             "use_magnanti_wong",
             "mw_core_alpha",
+            "mw_core_point_certification",
             "mw_core_eps",
             "use_dual_slopes",
             "S",
@@ -1445,6 +1471,9 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         ),
         use_magnanti_wong=_ensure_bool(
             sub_raw.get("use_magnanti_wong", False), "subproblem.use_magnanti_wong"
+        ),
+        mw_core_point_certification=_validated_core_certification(
+            sub_raw.get("mw_core_point_certification")
         ),
         mw_core_alpha=_ensure_float(
             _disallow_expr(

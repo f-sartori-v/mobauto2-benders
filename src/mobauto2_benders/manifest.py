@@ -94,6 +94,29 @@ def _solver_version(solver_name: str) -> str | None:
     return None
 
 
+def _rho_per_hour(cfg) -> float | None:
+    """Charging rate in energy per HOUR, which is the unit the contract states.
+
+    `delta_chg` is per SLOT and therefore moves with `slot_resolution`; two runs at
+    different resolutions with the same physical charger would carry different
+    `delta_chg` and, if that were hashed, different manifest ids for no physical
+    reason. Converting once here keeps the id about the site rather than the grid.
+    """
+    try:
+        from .config import resolve_energy_params
+
+        energy = resolve_energy_params(
+            cfg.model.energy,
+            {"slot_resolution": cfg.model.time.slot_resolution},
+        )
+        delta_chg = energy.get("delta_chg")
+        if delta_chg is None:
+            return None
+        return float(delta_chg) * (60.0 / float(cfg.model.time.slot_resolution))
+    except Exception:
+        return None
+
+
 def build_manifest(
     cfg: Any,
     config_path: Path | None,
@@ -109,7 +132,38 @@ def build_manifest(
         gap = abs(ub - lb) / max(1.0, abs(ub))
     _truncated = getattr(result, "clock_truncated_master_solves", None)
 
+    # The short id the shared contract with Agent CP-LBBD is written in. Computed from
+    # the contract's own field list, in the contract's own order, by one function both
+    # agents call -- an id computed twice from two orderings is two ids.
+    from .results_emitter import (
+        demand_checksum,
+        manifest_fields_from_config,
+        manifest_id,
+    )
+
+    _sources = list(cfg.data.scenario_files or [])
+    if not _sources and cfg.data.demand_file:
+        _sources = [cfg.data.demand_file]
+    _mf = manifest_fields_from_config(
+        cfg,
+        {
+            "demand_checksum": demand_checksum(_sources) if _sources else None,
+            "solver_version": _solver_version(cfg.solver.master_solver),
+            "git_revision": _git_commit(repo_root).get("commit"),
+            "rho": _rho_per_hour(cfg),
+        },
+    )
+    _id = manifest_id(_mf)
+
     return {
+        # B9/contract. The one field a reported table must carry. Two rows sharing it
+        # were produced under the same H, delta, Q, S, Emax, b0, c_trip, rho,
+        # tau_trip, Wmax, p_min, epsilon, kappa, K_chg, o, same_slot_eligibility,
+        # demand, scenario set and weights, objective mode, solver, threads, seed,
+        # budgets and revision. Two rows that do not share it are not comparable, and
+        # results_emitter.Table refuses to render a table that mixes them.
+        "manifest_id": _id,
+        "manifest_fields": _mf,
         "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "code": {
             **_git_commit(repo_root),
@@ -141,6 +195,16 @@ def build_manifest(
         "reproducibility": {
             "clock_truncated_master_solves": _truncated,
             "bit_reproducible": (None if _truncated is None else _truncated == 0),
+            # B10 (audit item 2.3). CENSORED, NOT DISCARDED. The previous protocol
+            # rejected any run containing a clock-truncated master solve, which threw
+            # away a 228-iteration run that had reached an 11.8% interval -- the
+            # observation was destroyed to protect a reproducibility claim that could
+            # simply have been labelled. `censored` is that label. A censored run is
+            # kept, reported with its truncation count, and summarised across
+            # repetitions by median trajectory and performance profile rather than by
+            # a single wall time (results_emitter.median_trajectory /
+            # performance_profile).
+            "censored": (None if _truncated is None else bool(_truncated)),
             "cplex_options": dict(cfg.master.cplex_options or {}),
         },
         # Swept per D2/D3: every table must state the pair it was produced with.
@@ -202,6 +266,15 @@ def build_manifest(
         },
         "cut_generation": {
             "use_magnanti_wong": cfg.subproblem.use_magnanti_wong,
+            # B14. Whether core-point certification was attempted, and under which
+            # method. Relative interiority is never established; see
+            # subproblem_impl.CUT_MODE_DISPLAY_NAME for what may be claimed.
+            "mw_core_point_certification": (
+                cfg.subproblem.mw_core_point_certification
+            ),
+            "mw_core_point_certification_result": diag.get(
+                "mw_core_point_certification"
+            ),
             "use_dual_slopes": cfg.subproblem.use_dual_slopes,
             # What actually produced the cuts, and whether they support a bound.
             "mode_used": diag.get("cut_generation_mode"),

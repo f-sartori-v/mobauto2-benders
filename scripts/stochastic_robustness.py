@@ -1,8 +1,42 @@
-"""Regenerate the stochastic-robustness result set at p_minutes=56, minute-level valuation.
+"""One stochastic schedule against scenario-specific optima, at p_minutes=56.
 
-    python scripts/stochastic_robustness.py [--Q 2] [--p-minutes 56] [--policy midpoint]
+    python scripts/stochastic_robustness.py [--Q 2] [--p-minutes 56] [--policy start]
+                                            [--comparator slot|minute]
 
-THE QUESTION (forward-work item A1, docs/FORWARD_PLAN_v1.md). The conference-era result
+B13 (audit item 3.5) -- WHAT THIS TABLE IS CALLED, AND WHY IT MATTERS.
+
+The default comparator (`--comparator slot`) builds each scenario's own optimum with the
+SLOT recourse and then prices it at minute fidelity. The resulting gap is therefore
+NEITHER of the two things it was reported as:
+
+  * it is not EVPI, because EVPI compares against the optimum under the SAME valuation
+    used for the evaluation, and these comparators were optimised under a different one;
+  * it is not "the cost of hedging", for the same reason -- part of the gap is the
+    comparator's own slot-vs-minute mismatch, not the price of committing to one
+    schedule before the day is known.
+
+The proof that it is neither is already in the old table: in one scenario the HEDGED
+schedule beat its own scenario-specific comparator. A schedule optimised for scenario s
+cannot be beaten on s by a schedule optimised for four scenarios at once -- unless the
+comparator was not optimal for s under the valuation being applied. It was not.
+
+So the table is named for what it is: "one stochastic schedule against scenario-specific
+SLOT-optimal schedules". The number it reports is a real measurement of a real pair of
+schedules; it just does not carry the interpretation that was attached to it.
+
+`--comparator minute` computes the honest version. Each scenario's optimum is solved
+under the SAME minute recourse used for the evaluation (minute_pricer.attach_minute_
+recourse, pinned to theta by equality), so the comparison is like-for-like and VSS and
+EVPI are then defined:
+
+    EVPI = E_s[ Q(x*_s, s) ]  -  E_s[ Q(x*_hedged, s) ]      (both under minute valuation)
+    VSS  = E_s[ Q(x*_mean-value, s) ] - E_s[ Q(x*_hedged, s) ]
+
+This script reports EVPI under `--comparator minute`. VSS needs the mean-value solution
+as a third arm and is not computed here; the table says so rather than labelling the
+EVPI column as if it were both.
+
+THE UNDERLYING QUESTION (forward-work item A1, docs/FORWARD_PLAN_v1.md). The conference-era result
 compared one schedule built to serve four demand scenarios against the four per-scenario
 deterministic optima, and reported that planning under uncertainty spreads departures
 rather than chasing peaks, trading served passengers for waiting regularity. That result
@@ -113,8 +147,73 @@ def _solve(scenario_files: list[str], Q: int | None, p_minutes: float, delta: in
     return solver, result, _schedule(solver.master.m)
 
 
+def _solve_minute(scenario_files: list[str], Q: int | None, p_minutes: float,
+                  delta: int, policy: str, weights: list[float] | None = None):
+    """B13. The scenario's optimum under the SAME minute recourse used to evaluate it.
+
+    This is what makes the comparison like-for-like. `attach_minute_recourse` pins
+    theta to the minute-level recourse by EQUALITY, so the returned schedule is optimal
+    for exactly the valuation the pricing step then applies -- which is the property
+    the slot comparator lacked and the reason its gap was neither EVPI nor a hedging
+    cost.
+
+    `objective_scale = 1/delta` keeps the recourse in slot-equivalent units so the
+    first-stage epsilon and kappa terms keep the relative weight they have in every
+    other run; without it a minute-scale theta would outweigh them by `delta` and
+    quietly break ties differently.
+    """
+    from mobauto2_milp.app import _prepare_params
+    from mobauto2_milp.config import load_config
+    from mobauto2_milp.model import MobautoMilpModel
+    from mobauto2_benders.minute_pricer import (
+        attach_minute_recourse,
+        load_request_minutes,
+    )
+
+    cfg = load_config(BASE_CONFIG)
+    mp, _sp = _prepare_params(cfg, {})
+    mp = dict(mp)
+    mp["slot_resolution"] = delta
+    if Q:
+        mp["Q"] = Q
+    mp.pop("T", None)
+
+    master = MobautoMilpModel(mp)
+    master.initialize()
+    reqs = [load_request_minutes(f) for f in scenario_files]
+    w = weights or [1.0 / len(reqs)] * len(reqs)
+    attach_minute_recourse(
+        master.m,
+        requests=None,
+        slot_resolution=delta,
+        seats=float(cfg.service.S),
+        wmax_minutes=float(cfg.service.Wmax_minutes),
+        p_minutes=float(p_minutes),
+        policy=policy,
+        objective_scale=1.0 / float(delta),
+        scenarios=list(zip(reqs, w)),
+    )
+    res = master.solve()
+    if res.objective is None:
+        raise RuntimeError(
+            f"no incumbent for the minute-recourse arm on {scenario_files}"
+        )
+    return master, res, _schedule(master.m)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument(
+        "--comparator",
+        choices=("slot", "minute"),
+        default="slot",
+        help=(
+            "slot: scenario optima built with the SLOT recourse, priced at minutes -- "
+            "the existing table, whose gap is neither EVPI nor a hedging cost. "
+            "minute: scenario optima built under the SAME minute recourse used to "
+            "evaluate them, which makes EVPI defined (B13)."
+        ),
+    )
     ap.add_argument("--slot", type=int, default=None, help="Slot width in minutes; default from the base config.")
     ap.add_argument("--Q", type=int, default=None, help="Fleet size; default from the base config (2).")
     ap.add_argument("--p-minutes", type=float, default=56.0)
@@ -147,15 +246,27 @@ def main() -> int:
 
     oracle_schedules: dict[str, dict[str, list[int]]] = {}
     for name, f in zip(names, files):
-        print(f"--- solving the oracle schedule for {name} alone ---")
-        _, oracle_result, oracle_schedule = _solve([f], args.Q, p_minutes, delta)
+        print(f"--- solving the scenario-specific schedule for {name} alone "
+              f"({args.comparator} recourse) ---")
+        if args.comparator == "minute":
+            _, oracle_result, oracle_schedule = _solve_minute(
+                [f], args.Q, p_minutes, delta, args.policy
+            )
+        else:
+            _, oracle_result, oracle_schedule = _solve([f], args.Q, p_minutes, delta)
         oracle_schedules[name] = oracle_schedule
         print(f"{name}: {oracle_result.status.name}, "
               f"{len(oracle_schedule['OUT'])} OUT + {len(oracle_schedule['RET'])} RET departures")
     print()
 
-    print(f"{'scenario':22s} | {'hedged cost':>11s} {'oracle cost':>11s} {'gap':>7s} | "
-          f"{'hedged unserv':>13s} {'oracle unserv':>13s}")
+    comparator_name = (
+        "minute-optimal" if args.comparator == "minute" else "slot-optimal"
+    )
+    print(
+        f"One stochastic schedule against scenario-specific {comparator_name} schedules"
+    )
+    print(f"{'scenario':22s} | {'hedged cost':>11s} {comparator_name[:11]:>11s} "
+          f"{'gap':>7s} | {'hedged unserv':>13s} {'cmp unserv':>13s}")
     print("-" * 92)
     hedged_total = oracle_total = 0.0
     for name in names:
@@ -179,6 +290,23 @@ def main() -> int:
     print(f"p_minutes={p_minutes:.0f}, to run ONE schedule across all four scenarios instead of")
     print("re-planning perfectly for whichever day actually happens. Per-scenario cells are")
     print("diagnostic only (docs/RESEARCH_NOTE_v2.md section 3, falsifier 3).")
+    print()
+    if args.comparator == "slot":
+        print("B13: THIS GAP IS NOT EVPI AND NOT THE COST OF HEDGING.")
+        print("The comparators are SLOT-optimal schedules priced at minute fidelity, so")
+        print("part of the gap is their own slot-vs-minute mismatch rather than the price")
+        print("of committing before the day is known. A scenario in which the HEDGED")
+        print("schedule WINS is the proof: a schedule optimised for one day cannot lose on")
+        print("that day to one optimised for four, unless it was not optimal under the")
+        print("valuation being applied. Re-run with --comparator minute for the defined")
+        print("quantity.")
+    else:
+        evpi = oracle_total - hedged_total
+        print("B13: EVPI, defined. Both arms are optimal under the SAME minute recourse")
+        print("that prices them, so the difference is the value of knowing the day in")
+        print(f"advance: EVPI = {abs(evpi):.1f} passenger-minutes "
+              f"({abs(hedging_cost):.1f}% of the perfect-information cost).")
+        print("VSS is NOT computed here: it needs the mean-value solution as a third arm.")
     return 0
 
 

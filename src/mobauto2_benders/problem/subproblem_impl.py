@@ -44,6 +44,46 @@ CUT_MODE_VALID_LOWER_BOUND: Dict[str, bool] = {
 }
 
 
+# B14 (audit item 2.8). What each generator may be CALLED in a table, as opposed to
+# what its enum value is. The enum values are load-bearing -- they key
+# CUT_MODE_VALID_LOWER_BOUND, they appear in archived manifests, and renaming them
+# would make every stored run unreadable -- so the rename lands here, on the claim.
+#
+# "mw" is Magnanti-Wong-INSPIRED. The construction is theirs; the Pareto-optimality
+# theorem is not available, because it requires the core point to lie in the relative
+# interior of conv(Y) and nothing here certifies that (see `core_certification`). The
+# cut is a valid lower bound regardless -- validity comes from dual feasibility, not
+# from the core point -- so nothing about the numbers changes. What changes is that a
+# table may no longer say "Magnanti-Wong cuts" and thereby imply Pareto optimality.
+#
+# The word "richer" is gone from every description here. It named no measurable
+# quantity. A stronger-cut claim needs dominance or violation measured over a sampled
+# set of feasible signatures, which is P2's cut-quality grid, not an adjective.
+CUT_MODE_DISPLAY_NAME = {
+    "mw": "Magnanti-Wong-inspired dual selection (core point not certified)",
+    "mw_dual_fallback": (
+        "plain capacity duals (Magnanti-Wong-inspired selection declined)"
+    ),
+    "dual": "plain capacity duals",
+    "finite_difference": "finite-difference slopes (no lower-bound guarantee)",
+}
+
+
+def cut_mode_display_name(mode: str) -> str:
+    """How a mode may be named in a table. Refuses an unknown mode.
+
+    Refusing rather than falling back to the raw enum value: a table naming a
+    generator nobody registered a claim for is exactly the provenance gap B14 closes.
+    """
+    try:
+        return CUT_MODE_DISPLAY_NAME[str(mode)]
+    except KeyError:
+        raise RuntimeError(
+            f"no display name registered for cut mode {mode!r}. Add one to "
+            "CUT_MODE_DISPLAY_NAME stating what may be claimed for it."
+        ) from None
+
+
 def cut_mode_carries_lower_bound(mode: str) -> bool:
     """Look up a mode's lower-bound guarantee, refusing unknown modes.
 
@@ -655,6 +695,66 @@ class ProblemSubproblem(Subproblem):
             self._vprint(
                 f"[MW CORE] core point arrived all zeros; seeded over T={T} "
                 f"(Q={Q_seed}, trip_slots={trip_seed}) so the selection has a direction."
+            )
+
+        # ---- B14 (audit item 2.8): certify, or say plainly that you did not --------
+        #
+        # Magnanti-Wong's Pareto-optimality claim requires the core point y0 to lie in
+        # the RELATIVE INTERIOR of conv(Y). What this code can check is a set of
+        # NECESSARY conditions on a relaxation of the projected region -- slots the
+        # master fixes to zero, the trip-window cap, non-negativity, and a strictly
+        # positive floor where a departure is possible (signature.project_core_point).
+        # Satisfying them is not a proof of relative interiority, and the difference is
+        # not academic: battery state and per-vehicle occupancy are not represented at
+        # all, so a point can pass every check here and still sit on a face of the true
+        # region, at which point the selection is a valid cut with no Pareto claim.
+        #
+        # So the certification is RECORDED rather than assumed: what was attempted,
+        # what it returned, and -- always -- that relative interiority was NOT
+        # established. The cut stays exactly as it was. What changes is what may be
+        # claimed for it, which is why the label below says "inspired".
+        _cert_mode = str(
+            params.get("mw_core_point_certification", "necessary_conditions")
+        ).lower()
+        if _cert_mode not in {"none", "necessary_conditions"}:
+            raise ValueError(
+                "subproblem.mw_core_point_certification must be 'none' or "
+                f"'necessary_conditions', got {_cert_mode!r}"
+            )
+        core_certification: dict[str, Any] = {
+            "attempted": _cert_mode != "none",
+            "method": _cert_mode,
+            # Never True. No method in this repository establishes relative
+            # interiority of conv(Y), and a field that could only ever read False is
+            # still worth carrying: it is the difference between "we checked and it
+            # failed" and "nobody ever asked".
+            "certified_relative_interior": False,
+            "violations": [],
+        }
+        if _cert_mode == "necessary_conditions":
+            try:
+                from ..signature import core_point_violations
+
+                _Q_cert = int(params.get("Q") or 0)
+                _trip_cert = max(1, int(params.get("trip_slots") or 1))
+                if _Q_cert >= 1:
+                    core_certification["violations"] = core_point_violations(
+                        Ybar_out, Ybar_ret, _Q_cert, _trip_cert
+                    )
+                else:
+                    core_certification["method"] = "necessary_conditions:no_fleet_size"
+            except Exception as exc:  # noqa: BLE001
+                # A certification that failed to run is not a certification that
+                # passed. Recorded as such rather than swallowed.
+                core_certification["method"] = (
+                    f"necessary_conditions:errored:{type(exc).__name__}"
+                )
+        if core_certification["violations"]:
+            self._vprint(
+                "[MW CORE] the core point breaks necessary conditions of the "
+                f"projected region: {core_certification['violations'][:3]}. The cut "
+                "remains a valid lower bound -- validity comes from dual feasibility "
+                "-- but it is not Pareto-optimal with respect to a feasible direction."
             )
 
         def solve_mw_dual(
@@ -1786,7 +1886,12 @@ class ProblemSubproblem(Subproblem):
                         # comparing dominance at the passed vector compares at a direction MW
                         # never saw. Reported because a silent substitution is how that goes
                         # unnoticed for as long as it did.
-                        "mw_core_point_used": {
+                        # B14. What certification was attempted for this core
+                        # point and what it returned. Absent this, "Magnanti-Wong"
+                        # in a table asserted a Pareto claim nothing had checked.
+                        "mw_core_point_certification": dict(core_certification),
+                        "mw_core_point_certification": dict(core_certification),
+                "mw_core_point_used": {
                             "Yout": list(Ybar_out),
                             "Yret": list(Ybar_ret),
                         },
@@ -2451,6 +2556,7 @@ class ProblemSubproblem(Subproblem):
                 # comparing dominance at the passed vector compares at a direction MW
                 # never saw. Reported because a silent substitution is how that goes
                 # unnoticed for as long as it did.
+                "mw_core_point_certification": dict(core_certification),
                 "mw_core_point_used": {
                     "Yout": list(Ybar_out),
                     "Yret": list(Ybar_ret),
