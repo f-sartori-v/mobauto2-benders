@@ -249,7 +249,29 @@ Three limits are easy to confuse:
 
 Any table derived from a run must state `(p, W_max)` **and** `concurrency_penalty`, which
 is active in the objective and absent from the published formulation. The run manifest
-records all three.
+records all three, and now emits a short **`manifest_id`** over the whole contract —
+`H, delta, Q, S, Emax, b0, c_trip, rho, tau_trip, Wmax, p_min, epsilon, kappa, K_chg, o,
+same_slot_eligibility`, plus demand checksum, scenario set and weights, objective mode,
+solver and version, threads, seed, budgets and git revision. `results_emitter.Table`
+refuses to render a table with no manifest id, and refuses one that mixes two.
+
+Note the git revision is part of the id, as the contract specifies, so the id moves on
+every commit. `manifest_fields` is emitted beside it so a reader can see which of the 27
+fields actually differ between two ids.
+
+### Keys added by the T.5.4 close-out
+
+Full annotations are in `configs/default.example.yaml`; the reason each one exists is in
+`docs/CLOSEOUT_T54.md`.
+
+| key | default | what it decides |
+|---|---|---|
+| `subproblem.same_slot_eligibility` | `forbid` | Whether a passenger may board a departure leaving in their own arrival slot/minute. `forbid` is the master's own `tau >= t+1` rule and, under `departure_policy: start`, reproduces its arc set at any resolution. **This changes minute-mode results**: everything produced before it was priced under `allow`. |
+| `subproblem.cut_architecture` | `aggregated` | `aggregated` (one theta, one weighted cut) or `disaggregated` (theta per scenario and direction). Derived from the legacy boolean pair when unset; a mixed setting is refused. |
+| `subproblem.mw_core_point_certification` | `necessary_conditions` | What is checked of the Magnanti-Wong core point. Neither value establishes relative interiority of `conv(Y)`, so the selection is described as Magnanti-Wong-**inspired** either way. |
+| `model.energy.K_chg` | `null` (= Q) | Vehicles that may draw from the depot's chargers in one slot. At the default the row is implied and is not emitted, so archived results reproduce exactly. |
+| `model.energy.charger_occupancy_binary` | `false` | Whether a charger is held for a whole slot (`true`) or is preemptible within it. Different physical claims, not a rounding of one another. |
+| `model.costs.objective_mode` | `weighted_sum` | `lexicographic` maximises served demand first, then minimises waiting, then the `epsilon`/`kappa` terms. Implemented on the **monolith**; the Benders engine refuses it rather than running the weighted sum under its name. |
 
 Other commands:
 
