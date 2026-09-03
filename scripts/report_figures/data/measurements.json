@@ -51,14 +51,23 @@
     }
   },
   "bound_interval": {
-    "source": "docs/docs_decisions.md D56 (PROJECT_STATE_v6 section 2 mislabels this row as Q=3)",
-    "instance": "Q = 2, T = 22, minute recourse, single-threaded, p_minutes = 56",
+    "source": "docs/docs_decisions.md D56 (PROJECT_STATE_v6 section 2 mislabels this row as Q=3). Handout item A5/D88 attempted to regenerate this at policy=start and left it BLOCKED, not closed -- see D88. These values are the withdrawn midpoint measurement, kept because no valid start-policy replacement exists yet, not because they are current.",
+    "instance": "Q = 2, T = 22, minute recourse, single-threaded, p_minutes = 56, policy = midpoint (WITHDRAWN, D76 -- see D88 for the blocked start-policy attempt)",
     "lower_bound": 219.74,
     "upper_bound": 299.37,
     "optimum": 293.37,
     "iterations": 34,
     "decomposition_seconds": 301.4,
-    "monolith_seconds": 0.8
+    "monolith_seconds": 0.8,
+    "start_policy_attempt_d88": {
+      "status": "blocked, not proven -- clock_truncated_master_solves > 0",
+      "iterations_completed": 228,
+      "lower_bound_reached": 249.426,
+      "upper_bound_reached": 282.907,
+      "gap_pct_reached": 11.8,
+      "monolith_reference": 279.84,
+      "note": "LB never exceeded 279.84 and UB never dropped below it at any of the 228 iterations (the invariant held throughout), but 112 of 457 master solves hit the per-iteration 120s cap inherited unchanged from D56's config -- the run is not bit-reproducible per R4/D26, so these numbers are the state reached, not a bound_interval measurement. Not to be plotted as the headline figure."
+    }
   },
   "valuation_decomposition": {
     "source": "docs/docs_decisions.md D78 (2026-09-02), scripts/minute_vs_slot_schedule.py --policy start --p-minutes 56, both solves proven optimal",

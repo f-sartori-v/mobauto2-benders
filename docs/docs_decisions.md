@@ -5096,3 +5096,76 @@ extended with a `Q` dimension for this partial row -- the handout's own schema f
 misrepresent it as complete. This entry in `docs_decisions.md` is the record; `Q=4` and the
 five truncated `Q=3` cells remain not run / not proven, stated here rather than left
 ambiguous.
+
+## D88 — A5: the bound interval at `o = 0`, BLOCKED after ~4h -- the invariant held throughout, but the run is not bit-reproducible
+
+Date: 2026-09-02. Handout item A5. Branch: `main`. **Marked blocked, not done**, per R9's own
+failure protocol: recorded here is the budget given, the state reached, and why it stopped
+where it did.
+
+**Setup.** New config `configs/phase1/rq5_benders_minute_p56_a5_iterbudget.yaml`: a copy of
+D56's `rq5_benders_minute_p56.yaml` with `solver.total_time_limit_s` raised from 300 to 36000
+so `solver.max_iterations` (400) would be what binds, per R4/the handout's own explicit
+instruction ("iteration-budgeted... let B1 run its full route if that's what proving optimality
+takes" -- the same principle applied here). Reference monolith re-confirmed at this exact
+regime: `279.84` (matches A1/D78's own minute-recourse monolith, cross-checked independently).
+
+**What ran, and for how long.** Started, monitored, and eventually stopped deliberately after
+~4 hours of wall clock, at **iteration 228** (229th master solve in progress when stopped):
+
+    LB = 249.426   UB = 282.907   gap = 11.8%   (vs. gap = 27% at D56's iteration 34)
+
+**The invariant this item exists to check held at every single iteration, with no
+exception.** `LB <= 279.84` (the monolithic optimum) and `UB >= 279.84` were both checked
+against every one of the 228 completed iterations' printed bounds -- zero violations. This is
+itself the positive half of A5: the bound is sound throughout, exactly as every other cut
+soundness check in this project has found.
+
+**Why this is BLOCKED and not DONE: `clock_truncated_master_solves` is not zero.** Read from
+the run's own log (R7), not inferred: of 457 total master solves across 228 iterations, **112
+(24.5%) terminated with `term=maxTimeLimit`**, not `term=optimal`. The overall run was never
+wall-clock-bound -- `total_time_limit_s=36000` never came close to binding, which is exactly
+why the run took 4 hours -- but the config's **per-iteration** cap
+(`master.per_iteration_time_limit_s: 120`, inherited unchanged from D56's own config, never
+reconsidered when this file was created) bound on over a hundred individual master solves as
+the cut set grew and each master MIP got harder to solve to its own 5% mip-gap. Per R4/D26, a
+run with any master solve stopping on the clock is not bit-reproducible: the node count in a
+time-limited solve depends on machine load, and every later iteration inherits the difference.
+A5's own accept-test names `clock_truncated_master_solves == 0` explicitly; this run does not
+meet it, regardless of how far its bound moved.
+
+**Why not simply raise the per-iteration cap and re-run.** The 120s cap first started binding
+partway through the run (early iterations, with few cuts, solved in seconds); by iteration 228
+a single master solve alone took 78.6s and rising, so a cap generous enough not to bind at
+iteration 400 would need to be considerably larger than 120s -- and 112 of the iterations
+already run would need to be **re-solved**, not merely continued from, since a time-limited
+solve earlier in the run means every cut generated from it, and every iteration after, is
+already potentially non-reproducible. A correct re-run is not an extension of this one; it is a
+new run from iteration 1, at a per-iteration cap large enough to hold for the whole 400-iteration
+budget. Given the bound's own movement had slowed sharply by the time this was stopped (11.8%
+at iteration 228 against 13.1% roughly 35 iterations earlier -- consistent with D56's own
+finding that the bound lives at the fractional LP root and cuts do not move it much past a
+point), a corrected re-run is likely to cost several more hours for a bound that may not move
+much further. Not attempted here; recorded as the deliberate stopping point instead.
+
+**What this does and does not settle.** It does not produce a `bound_interval` measurement at
+`o = 0` -- the existing `midpoint` values (D56) stay in `measurements.json`, explicitly labelled
+as withdrawn but kept because no valid replacement exists, with this run's state reached
+recorded alongside them under a clearly separate key so a reader cannot mistake one for the
+other. It does settle, again, that the underlying soundness invariant holds under `start` just
+as it does under `midpoint` -- 228 iterations, zero violations -- which was not previously
+checked at this policy. It leaves open whether the decomposition's lower bound closes further
+against the monolith at `o = 0` than it did at `midpoint` (D56's `74.9%` of the monolith
+objective); at the point this was stopped, `249.426 / 279.84 = 89.1%`, already better than
+D56's `74.9%`, but this number carries the same reproducibility caveat as everything else in
+this entry and must not be quoted as a clean comparison to D56's.
+
+**If this is revisited:** re-run from scratch with `per_iteration_time_limit_s` raised enough
+to hold for the full budget (a value comfortably above what a ~400-cut master needs, determined
+by watching the trend rather than guessing), and expect several more hours of wall clock.
+
+**Record.** `configs/phase1/rq5_benders_minute_p56_a5_iterbudget.yaml` (kept, in case of a
+future corrected re-run). `scripts/report_figures/data/measurements.json -> bound_interval`:
+`source`/`instance` updated to state the block explicitly; a new
+`start_policy_attempt_d88` sub-block records the state reached, clearly marked as not a
+`bound_interval` measurement and not for plotting.
