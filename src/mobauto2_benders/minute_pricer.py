@@ -1376,6 +1376,99 @@ def honest_waiting(
     )
 
 
+@dataclass(frozen=True)
+class _MinuteRecourseGeometry:
+    """The arc set, pools and dep-minute map a minute-recourse LP is built from --
+    everything that is a function of `(T, slot_resolution, wmax_minutes, policy,
+    placement_offsets)` and the demand ONLY, never of `y` (E2). Shared between
+    `solve_minute_recourse` (the primal) and `solve_mw_dual_minute` (its
+    Magnanti-Wong dual, B2) so the two cannot silently diverge -- the same failure
+    mode `expand_slopes_to_candidate` was extracted to prevent elsewhere in this
+    project ("this block had been written out four times").
+    """
+
+    delta: float
+    offsets: list[float]
+    taus: list[int]
+    ks: list[int]
+    dep_minute: dict[tuple[int, int], float]
+    pools: dict[str, dict[int, int]]
+    arcs: dict[str, list[tuple[int, int, int]]]
+    by_tau: dict[str, dict[int, list[tuple[int, int, int]]]]
+    by_minute: dict[str, dict[int, list[tuple[int, int, int]]]]
+    # B6. Carried on the geometry, not applied by its consumers.
+    #
+    # This is the field the D86 refactor and B6 had to be merged around, and getting
+    # it wrong is instructive. B6 originally filtered arcs by `w0` INSIDE
+    # `solve_minute_recourse`. Once D86 extracted the arc set so that
+    # `solve_mw_dual_minute` could share it, leaving the filter in the primal would
+    # have given the dual a LARGER arc set than the primal it is supposed to bound --
+    # dual variables for arcs the primal does not have, on an optimal face that is not
+    # the primal's. That is not a weaker cut; it is an invalid one. Both defects that
+    # motivated these two changes are the same defect, and the fix is the same: the
+    # geometry is computed once and both consumers read it.
+    same_slot_eligibility: str = DEFAULT_SAME_SLOT_ELIGIBILITY
+
+    def wait(self, m: int, t: int, k: int) -> float:
+        return (self.dep_minute[(t, k)] - float(m)) / self.delta
+
+
+def _minute_recourse_geometry(
+    T: int,
+    slot_resolution: int,
+    wmax_minutes: float,
+    request_minutes: dict[str, Sequence[int]],
+    policy: DeparturePolicy = "start",
+    placement_offsets: Sequence[float] | None = None,
+    same_slot_eligibility: str = DEFAULT_SAME_SLOT_ELIGIBILITY,
+) -> _MinuteRecourseGeometry:
+    delta = float(slot_resolution)
+    w0 = min_wait_minutes(same_slot_eligibility)
+    offsets = (
+        [float(o) for o in placement_offsets]
+        if placement_offsets
+        else [placement_offset(policy, delta)]
+    )
+    if any(o < -delta or o > delta for o in offsets):
+        raise ValueError(
+            f"placement_offsets must lie in [-slot_resolution, slot_resolution] = "
+            f"[-{delta}, {delta}], got {offsets!r}"
+        )
+    taus = list(range(int(T)))
+    ks = list(range(len(offsets)))
+    dep_minute = {(t, k): float(t) * delta + offsets[k] for t in taus for k in ks}
+
+    pools: dict[str, dict[int, int]] = {}
+    for d in (OUT, RET):
+        counts: dict[int, int] = {}
+        for m in request_minutes.get(d, []):
+            counts[int(m)] = counts.get(int(m), 0) + 1
+        pools[d] = counts
+
+    arcs = {
+        d: [
+            (m, t, k)
+            for m in sorted(pools[d])
+            for t in taus
+            for k in ks
+            if w0 <= dep_minute[(t, k)] - float(m) <= float(wmax_minutes)
+        ]
+        for d in (OUT, RET)
+    }
+    by_tau = {
+        d: {t: [a for a in arcs[d] if a[1] == t] for t in taus} for d in (OUT, RET)
+    }
+    by_minute = {
+        d: {m: [a for a in arcs[d] if a[0] == m] for m in sorted(pools[d])}
+        for d in (OUT, RET)
+    }
+    return _MinuteRecourseGeometry(
+        delta=delta, offsets=offsets, taus=taus, ks=ks, dep_minute=dep_minute,
+        pools=pools, arcs=arcs, by_tau=by_tau, by_minute=by_minute,
+        same_slot_eligibility=str(same_slot_eligibility),
+    )
+
+
 def solve_minute_recourse(
     T: int,
     slot_resolution: int,
@@ -1446,40 +1539,15 @@ def solve_minute_recourse(
     import pyomo.environ as pyo
 
     t_build0 = _time.perf_counter()
-    delta = float(slot_resolution)
-    offsets = (
-        [float(o) for o in placement_offsets]
-        if placement_offsets
-        else [placement_offset(policy, delta)]
+    geo = _minute_recourse_geometry(
+        T, slot_resolution, wmax_minutes, request_minutes, policy, placement_offsets,
+        same_slot_eligibility,
     )
-    if any(o < -delta or o > delta for o in offsets):
-        raise ValueError(
-            f"placement_offsets must lie in [-slot_resolution, slot_resolution] = "
-            f"[-{delta}, {delta}], got {offsets!r}"
-        )
-    w0 = min_wait_minutes(same_slot_eligibility)
-    taus = list(range(int(T)))
-    ks = list(range(len(offsets)))
-    dep_minute = {(t, k): float(t) * delta + offsets[k] for t in taus for k in ks}
-
-    pools: dict[str, dict[int, int]] = {}
-    for d in (OUT, RET):
-        counts: dict[int, int] = {}
-        for m in request_minutes.get(d, []):
-            counts[int(m)] = counts.get(int(m), 0) + 1
-        pools[d] = counts
-
+    delta, offsets, taus, ks, dep_minute, pools, arcs, by_tau, by_minute = (
+        geo.delta, geo.offsets, geo.taus, geo.ks, geo.dep_minute, geo.pools,
+        geo.arcs, geo.by_tau, geo.by_minute,
+    )
     caps = {OUT: list(C_out), RET: list(C_ret)}
-    arcs = {
-        d: [
-            (m, t, k)
-            for m in sorted(pools[d])
-            for t in taus
-            for k in ks
-            if w0 <= dep_minute[(t, k)] - float(m) <= float(wmax_minutes)
-        ]
-        for d in (OUT, RET)
-    }
 
     mdl = pyo.ConcreteModel()
     mdl.name = "subproblem_minutes"
@@ -1491,7 +1559,7 @@ def solve_minute_recourse(
     mdl.u_RET = pyo.Var(sorted(pools[RET]), within=pyo.NonNegativeReals)
 
     def _wait(m: int, t: int, k: int) -> float:
-        return (dep_minute[(t, k)] - float(m)) / delta
+        return geo.wait(m, t, k)
 
     mdl.obj = pyo.Objective(
         expr=sum(_wait(m, t, k) * mdl.x_OUT[m, t, k] for (m, t, k) in arcs[OUT])
@@ -1503,17 +1571,6 @@ def solve_minute_recourse(
         ),
         sense=pyo.minimize,
     )
-
-    by_minute = {
-        d: {m: [a for a in arcs[d] if a[0] == m] for m in sorted(pools[d])}
-        for d in (OUT, RET)
-    }
-    # Grouped by SLOT ONLY, summing over every offset k -- this is the one line that
-    # makes F2 a relaxation of capacity-per-slot rather than a finer-grained model:
-    # the row count and right-hand side below are identical to the single-offset case.
-    by_tau = {
-        d: {t: [a for a in arcs[d] if a[1] == t] for t in taus} for d in (OUT, RET)
-    }
 
     mdl.D_out = pyo.Constraint(
         sorted(pools[OUT]),
@@ -1671,6 +1728,222 @@ def solve_minute_recourse(
     return duals, obj_val
 
 
+@dataclass(frozen=True)
+class MinuteMWDual:
+    """Magnanti-Wong's selected dual for the MINUTE recourse (B2), same shape as
+    `subproblem_impl.MWDual` (dm_d[tau] already scaled by seats, intercept_d a
+    SCALAR -- deliberately, since this LP's demand rows are indexed by arrival
+    minute, not slot; see MWDual's own docstring). Returned as a plain dataclass
+    here rather than importing `MWDual` to avoid a cycle (`subproblem_impl`
+    already imports FROM this module); the caller wraps it into an `MWDual`.
+    """
+
+    dm_out: dict[int, float]
+    dm_ret: dict[int, float]
+    intercept_out: float
+    intercept_ret: float
+    alpha_out: dict[int, float]
+    alpha_ret: dict[int, float]
+
+
+def solve_mw_dual_minute(
+    T: int,
+    slot_resolution: int,
+    wmax_minutes: float,
+    p_slots: float,
+    seats: float,
+    C_out: Sequence[float],
+    C_ret: Sequence[float],
+    request_minutes: dict[str, Sequence[int]],
+    Ybar_out: Sequence[float],
+    Ybar_ret: Sequence[float],
+    ub_base: float,
+    policy: DeparturePolicy = "start",
+    lp_solver: str = "cplex_direct",
+    solver_options: dict | None = None,
+    placement_offsets: Sequence[float] | None = None,
+    # B6. MUST match the primal's. The dual LP is restricted to the primal's optimal
+    # face; a dual built over a different arc set is selecting on the wrong face and
+    # the cut it produces is not a valid lower bound on the primal's recourse.
+    same_slot_eligibility: str = DEFAULT_SAME_SLOT_ELIGIBILITY,
+) -> MinuteMWDual | None:
+    """Magnanti-Wong's Pareto-optimal dual for the minute recourse (B2, handout item).
+
+    Same construction as `subproblem_impl.solve_mw_dual` (S2/S3, D63/D65): a dual
+    LP over the SAME arcs the primal (`solve_minute_recourse`) uses, restricted to
+    its optimal face, selecting the point on that face that best represents the
+    direction toward the projected core point `Ybar` (already computed by the
+    caller via `signature.project_core_point`, S3 -- this function does not
+    re-derive it, matching the slot path's own division of labour).
+
+    THE ONLY STRUCTURAL DIFFERENCE FROM THE SLOT DUAL. There, `alpha[t]` is
+    indexed by SLOT (one demand row per slot) and every `pi[tau]` with `tau >= 1`
+    is guaranteed to appear in some dual-feasibility row, purely from `(t, tau)`
+    structure -- only `tau=0` can be orphaned, and only because no arc can reach
+    it (`t+1 <= tau`). Here `alpha[m]` is indexed by ARRIVAL MINUTE (one demand
+    row per minute, matching the primal, D51), and whether `pi[tau]` appears in
+    any row is DATA-DEPENDENT: any slot too early or too late for any actual
+    arrival to reach within `wmax_minutes` is orphaned, not just `tau=0`. Left
+    free, such a `pi[tau]` (`<= 0`, maximised) is unbounded whenever its objective
+    coefficient `S*Ybar[tau] - C[tau]` is negative -- a real risk this LP fixes at
+    the cause: a `pi[tau]` with no dual-feasibility row is FIXED to `0.0` rather
+    than left free, since a shadow price for a capacity row that was never built
+    is not a quantity this LP can meaningfully select.
+
+    Returns `None` (never raises) on non-optimal termination, a failed load, or a
+    weak-duality violation, mirroring `solve_mw_dual`'s contract exactly, so the
+    caller's existing `mw_dual_fallback` path needs no change to accept this.
+    """
+    import pyomo.environ as pyo
+
+    geo = _minute_recourse_geometry(
+        T, slot_resolution, wmax_minutes, request_minutes, policy, placement_offsets,
+        same_slot_eligibility,
+    )
+    taus, pools, arcs, by_tau = geo.taus, geo.pools, geo.arcs, geo.by_tau
+    caps = {OUT: [float(c) for c in C_out], RET: [float(c) for c in C_ret]}
+    Ybar = {OUT: [float(y) for y in Ybar_out], RET: [float(y) for y in Ybar_ret]}
+
+    md = pyo.ConcreteModel()
+    md.name = "mw_dual_minute"
+
+    # Demand-side duals: free, one per (direction, arrival minute) -- matches the
+    # primal's D_out/D_ret rows exactly (an equality row per minute with demand).
+    md.a_OUT = pyo.Var(sorted(pools[OUT]))
+    md.a_RET = pyo.Var(sorted(pools[RET]))
+    # Capacity-side duals: one per (direction, slot), sign convention as everywhere
+    # else in this module -- a '<=' row in a minimisation gives pi <= 0.
+    md.pi_OUT = pyo.Var(taus, within=pyo.NonPositiveReals)
+    md.pi_RET = pyo.Var(taus, within=pyo.NonPositiveReals)
+
+    # Fix, don't leave free: a pi with no dual-feasibility row is not a
+    # quantity this LP can select, and leaving it free risks an unbounded
+    # direction whenever its (data-dependent) objective coefficient is negative
+    # -- see the docstring above.
+    for t in taus:
+        if not by_tau[OUT][t]:
+            md.pi_OUT[t].fix(0.0)
+        if not by_tau[RET][t]:
+            md.pi_RET[t].fix(0.0)
+
+    def _df_out(m_, m, t, k):
+        return m_.a_OUT[m] + m_.pi_OUT[t] <= geo.wait(m, t, k)
+
+    def _df_ret(m_, m, t, k):
+        return m_.a_RET[m] + m_.pi_RET[t] <= geo.wait(m, t, k)
+
+    md.DF_OUT = pyo.Constraint(arcs[OUT], rule=_df_out)
+    md.DF_RET = pyo.Constraint(arcs[RET], rule=_df_ret)
+    md.A_OUT_CAP = pyo.Constraint(
+        sorted(pools[OUT]), rule=lambda m_, m: m_.a_OUT[m] <= float(p_slots)
+    )
+    md.A_RET_CAP = pyo.Constraint(
+        sorted(pools[RET]), rule=lambda m_, m: m_.a_RET[m] <= float(p_slots)
+    )
+
+    def _dual_obj_expr(m_):
+        term_dem = sum(
+            float(pools[OUT][m]) * m_.a_OUT[m] for m in sorted(pools[OUT])
+        ) + sum(float(pools[RET][m]) * m_.a_RET[m] for m in sorted(pools[RET]))
+        term_cap = sum(caps[OUT][t] * m_.pi_OUT[t] for t in taus) + sum(
+            caps[RET][t] * m_.pi_RET[t] for t in taus
+        )
+        return term_dem + term_cap
+
+    face_tol = max(1e-6, 1e-9 * abs(float(ub_base)))
+    md.OptFace = pyo.Constraint(expr=(_dual_obj_expr(md) >= float(ub_base) - face_tol))
+
+    # Pareto selection at the projected core point Ybar -- identical formula to
+    # the slot path's (S3): maximise sum dm*(Ybar - y_inc), and since
+    # y_inc[tau] = C[tau]/seats, the coefficient is (seats*Ybar[tau] - C[tau]).
+    md.obj = pyo.Objective(
+        expr=(
+            sum(
+                (float(seats) * Ybar[OUT][t] - caps[OUT][t]) * md.pi_OUT[t]
+                for t in taus
+            )
+            + sum(
+                (float(seats) * Ybar[RET][t] - caps[RET][t]) * md.pi_RET[t]
+                for t in taus
+            )
+        ),
+        sense=pyo.maximize,
+    )
+
+    solver = pyo.SolverFactory(lp_solver)
+    for k, v in (solver_options or {}).items():
+        try:
+            solver.options[k] = v
+        except Exception:
+            pass
+    res = solver.solve(md, tee=False, load_solutions=False)
+    term = getattr(res.solver, "termination_condition", None)
+    if term != pyo.TerminationCondition.optimal:
+        return None
+    try:
+        md.solutions.load_from(res)
+    except Exception:
+        return None
+
+    def _v(var) -> tuple[float, bool]:
+        raw = getattr(var, "value", None)
+        return (0.0, False) if raw is None else (float(raw), True)
+
+    pi_out_val: dict[int, float] = {}
+    pi_ret_val: dict[int, float] = {}
+    for t in taus:
+        vo, _ = _v(md.pi_OUT[t])  # fixed vars always report their fixed value
+        vr, _ = _v(md.pi_RET[t])
+        pi_out_val[t] = vo
+        pi_ret_val[t] = vr
+
+    # Every alpha appears in exactly one A_*_CAP row (every minute with demand
+    # gets one), so unlike pi, a missing value here is a load failure, not a
+    # structural zero -- same discipline as the slot path.
+    alpha_out: dict[int, float] = {}
+    alpha_ret: dict[int, float] = {}
+    n_seen = 0
+    for m in sorted(pools[OUT]):
+        v, ok = _v(md.a_OUT[m])
+        if not ok:
+            return None
+        alpha_out[m] = v
+        n_seen += 1
+    for m in sorted(pools[RET]):
+        v, ok = _v(md.a_RET[m])
+        if not ok:
+            return None
+        alpha_ret[m] = v
+        n_seen += 1
+    if n_seen == 0:
+        return None
+
+    dual_obj_val = (
+        sum(float(pools[OUT][m]) * alpha_out[m] for m in sorted(pools[OUT]))
+        + sum(float(pools[RET][m]) * alpha_ret[m] for m in sorted(pools[RET]))
+        + sum(caps[OUT][t] * pi_out_val[t] for t in taus)
+        + sum(caps[RET][t] * pi_ret_val[t] for t in taus)
+    )
+    if dual_obj_val > float(ub_base) + face_tol:
+        # Weak duality violated: a cut from this dual would overestimate the
+        # recourse, D30's exact failure mode. Refuse; the caller falls back to
+        # the plain capacity duals, which remain a valid lower bound.
+        return None
+
+    return MinuteMWDual(
+        dm_out={t: float(seats) * pi_out_val[t] for t in taus},
+        dm_ret={t: float(seats) * pi_ret_val[t] for t in taus},
+        intercept_out=float(
+            sum(float(pools[OUT][m]) * alpha_out[m] for m in sorted(pools[OUT]))
+        ),
+        intercept_ret=float(
+            sum(float(pools[RET][m]) * alpha_ret[m] for m in sorted(pools[RET]))
+        ),
+        alpha_out=alpha_out,
+        alpha_ret=alpha_ret,
+    )
+
+
 __all__ = [
     "AssignmentRow",
     "DEFAULT_SAME_SLOT_ELIGIBILITY",
@@ -1687,4 +1960,6 @@ __all__ = [
     "placement_offset",
     "slot_objective_in_minutes",
     "solve_minute_recourse",
+    "solve_mw_dual_minute",
+    "MinuteMWDual",
 ]

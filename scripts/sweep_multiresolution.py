@@ -62,10 +62,13 @@ def main() -> int:
     ap.add_argument("--Q", default=None, help="One value or a comma-separated list.")
     ap.add_argument("--p-minutes", type=float, default=None)
     ap.add_argument(
-        "--policies", default="start,midpoint,end",
-        help="Comma-separated placement conventions to sweep. `start` assumes the bus "
-             "leaves before the passengers it is collecting have arrived and is kept "
-             "only as a lower envelope (D54); drop it to halve the runtime.",
+        "--policies", default="start",
+        help="Comma-separated placement conventions to sweep. `start` (o=0) is the "
+             "committed departure instant and, since D76, the only offset that prices "
+             "the schedule the master actually commits to; `midpoint`/`end` remain "
+             "computable and are labelled counterfactuals ('what if real dwell and "
+             "boarding push this departure o minutes past its committed instant'), "
+             "never the schedule's reported cost.",
     )
     ap.add_argument("--shapes", default=",".join(SHAPES))
     ap.add_argument(

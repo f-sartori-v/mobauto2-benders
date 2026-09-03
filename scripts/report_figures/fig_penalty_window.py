@@ -84,8 +84,11 @@ def main() -> int:
     axes[0].set_ylabel("served, per cent of demand")
     axes[0].set_ylim(-4, 100)
     axes[1].set_ylabel("average wait among served, minutes")
-    axes[1].set_title("minute-honest pricing throughout", loc="right", fontsize=7.5,
-                       color="#444444")
+    policy = d.get("instance", "").split("policy = ")[-1].split(",")[0] or "start"
+    axes[1].set_title(
+        f"minute-honest pricing throughout, policy = {policy}", loc="right",
+        fontsize=7.5, color="#444444",
+    )
 
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=5, fontsize=7.0,

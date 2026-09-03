@@ -216,7 +216,7 @@ did not move behaviour unintentionally.
 python -m unittest discover -s tests
 ```
 
-276 tests, about a minute (D68, D71, D72). They cover cut soundness invariants, the Phase 5
+295 tests, about a minute (D68, D71, D72, D76, D82). They cover cut soundness invariants, the Phase 5
 exactness gate against the monolith (D62), Magnanti–Wong provenance
 and fallback, symmetry validity, the conditions under which a lower bound may be reported,
 the recourse anchor, the LP phase, configuration combinations that are refused, the

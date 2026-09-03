@@ -63,8 +63,25 @@ def _run(config_path: str, label: str):
 
 
 def main() -> int:
-    baseline = _run("configs/f2/check_baseline.yaml", "baseline (single offset, today's model)")
-    f2 = _run("configs/f2/check_offsets.yaml", "F2 (placement freedom, offsets 0/15/30)")
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--baseline-config", default="configs/f2/check_baseline.yaml",
+        help="Default: the plain-dual baseline arm.",
+    )
+    ap.add_argument(
+        "--offsets-config", default="configs/f2/check_offsets.yaml",
+        help="Default: the plain-dual F2 (placement-freedom) arm.",
+    )
+    args = ap.parse_args()
+
+    baseline = _run(args.baseline_config, "baseline (single offset, today's model)")
+    # D76 corrected the grid to anticipate-only [-30, -15, 0]; the label used to
+    # say "0/15/30" (the withdrawn forward grid) regardless of which grid the
+    # config actually ran -- cosmetic (the run itself always used the config's
+    # own placement_offsets), but worth not repeating.
+    f2 = _run(args.offsets_config, "F2 (placement freedom, anticipate-only grid)")
 
     lb_base = baseline.best_lower_bound
     lb_f2 = f2.best_lower_bound

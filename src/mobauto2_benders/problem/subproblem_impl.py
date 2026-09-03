@@ -1041,6 +1041,75 @@ class ProblemSubproblem(Subproblem):
                 alpha_ret=alpha_ret,
             )
 
+        def dispatch_mw_dual(
+            T_: int,
+            Wmax_slots: int,
+            p_penalty: float,
+            S_cap: float,
+            K_out_use: list[int],
+            K_ret_use: list[int],
+            C_out_vec: list[float],
+            C_ret_vec: list[float],
+            R_out_vec: list[float],
+            R_ret_vec: list[float],
+            Ybar_out_vec: list[float],
+            Ybar_ret_vec: list[float],
+            ub_base: float,
+            lp: str,
+            lp_opts: dict | None,
+            recourse_resolution: str,
+            request_minutes: dict | None,
+            wmax_minutes: float | None,
+            departure_policy: str,
+            placement_offsets: list[float] | None,
+            slot_resolution: int,
+        ) -> MWDual | None:
+            """B2 (handout item): route to the slot or the minute MW dual.
+
+            One dispatch point, not a branch duplicated at each of the two call
+            sites below -- the same reasoning that made `expand_slopes_to_candidate`
+            its own function ("this block had been written out four times").
+            """
+            if str(recourse_resolution).lower() != "minute":
+                return solve_mw_dual(
+                    T_, Wmax_slots, p_penalty, S_cap, K_out_use, K_ret_use,
+                    C_out_vec, C_ret_vec, R_out_vec, R_ret_vec,
+                    Ybar_out_vec, Ybar_ret_vec, ub_base, lp, lp_opts,
+                )
+            if not request_minutes or wmax_minutes is None:
+                self._vprint(
+                    "[MW FAIL] recourse_resolution='minute' but request_minutes or "
+                    "Wmax_minutes is missing; cannot build the minute MW dual."
+                )
+                return None
+            from ..minute_pricer import solve_mw_dual_minute
+
+            mw_min = solve_mw_dual_minute(
+                T_, slot_resolution, float(wmax_minutes), p_penalty, S_cap,
+                C_out_vec, C_ret_vec, request_minutes,
+                Ybar_out_vec, Ybar_ret_vec, ub_base,
+                policy=str(departure_policy), lp_solver=lp, solver_options=lp_opts,
+                placement_offsets=placement_offsets,
+                # B6. The dual is restricted to the PRIMAL's optimal face, so it must
+                # be built over the primal's arc set. `_same_slot` is the same value
+                # `solve_minute_recourse` receives through SPParams.
+                same_slot_eligibility=_same_slot,
+            )
+            if mw_min is None:
+                self._vprint(
+                    "[MW FAIL] solve_mw_dual_minute returned no solution "
+                    f"ub_base={float(ub_base):.10g}"
+                )
+                return None
+            return MWDual(
+                dm_out=mw_min.dm_out,
+                dm_ret=mw_min.dm_ret,
+                intercept_out=mw_min.intercept_out,
+                intercept_ret=mw_min.intercept_ret,
+                alpha_out=mw_min.alpha_out,
+                alpha_ret=mw_min.alpha_ret,
+            )
+
         # Finite-difference coefficient builder: for each tau, solve with +S capacity
         def coeffs_by_fdiff(
             ub_base: float,
@@ -1331,6 +1400,11 @@ class ProblemSubproblem(Subproblem):
                         "duals": duals,
                         "ub_val": float(ub_val),
                         "sp_solve_time": float(sp_solve_time),
+                        # Carried through so the MW dispatch below (B2) can rebuild
+                        # THIS scenario's minute-recourse arcs when
+                        # recourse_resolution=='minute' -- solve_mw_dual needs the
+                        # same per-scenario request minutes solve_subproblem used.
+                        "request_minutes": sp_params.request_minutes,
                     }
                 )
                 agg["objective_value"].append(
@@ -1666,7 +1740,7 @@ class ProblemSubproblem(Subproblem):
                     # regardless. Passed through only for signature compatibility.
                     K_out_mw = list(K_out_lp)
                     K_ret_mw = list(K_ret_lp)
-                    dm_pair = solve_mw_dual(
+                    dm_pair = dispatch_mw_dual(
                         T,
                         Wmax,
                         p_pen,
@@ -1682,6 +1756,14 @@ class ProblemSubproblem(Subproblem):
                         ub_val,
                         lp_solver,
                         solver_options,
+                        recourse_resolution=str(
+                            params.get("recourse_resolution", "slot")
+                        ),
+                        request_minutes=rec.get("request_minutes"),
+                        wmax_minutes=params.get("Wmax_minutes"),
+                        departure_policy=params.get("departure_policy", "start"),
+                        placement_offsets=params.get("placement_offsets"),
+                        slot_resolution=slot_res,
                     )
                     if dm_pair is None:
                         # Fall back to the PLAIN DUAL, not to finite differences (S1).
@@ -2374,7 +2456,7 @@ class ProblemSubproblem(Subproblem):
             cut_mode_used = "dual" if use_dual else "finite_difference"
             proxy_diag: dict[str, Any] = {}
             if mw_enabled:
-                dm_pair = solve_mw_dual(
+                dm_pair = dispatch_mw_dual(
                     T,
                     Wmax,
                     p_pen,
@@ -2391,6 +2473,14 @@ class ProblemSubproblem(Subproblem):
                     ub_val,
                     lp_solver,
                     solver_options,
+                    recourse_resolution=str(
+                        params.get("recourse_resolution", "slot")
+                    ),
+                    request_minutes=sp_params.request_minutes,
+                    wmax_minutes=params.get("Wmax_minutes"),
+                    departure_policy=params.get("departure_policy", "start"),
+                    placement_offsets=params.get("placement_offsets"),
+                    slot_resolution=slot_res,
                 )
                 if dm_pair is None:
                     # Fall back to the PLAIN DUAL, not to finite differences (S1).
