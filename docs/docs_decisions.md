@@ -5029,3 +5029,70 @@ a better cut generator changes the answer. It does not.
 `scripts/f2_placement_freedom_check.py` (config-path CLI args, stale grid label fixed).
 `scripts/report_figures/data/measurements.json -> placement_freedom_f2`, new block recording
 both the plain-dual control and the MW numbers side by side.
+
+## D87 — B5: the delta x Q factorial, Q=3 row (partial: 5 of 15 cells clock-truncated, reported as such rather than blended in)
+
+Date: 2026-09-02. Handout item B5, explicitly lowest priority. Branch: `main`. Command:
+
+    python scripts/sweep_multiresolution.py --policies start --slot 30,15,10 --Q 3 --p-minutes 56 --shapes flat,commuter,bimodal,burst,spiky
+
+A2 (D81) already covers the `Q=2` row; this is "one further Q" per B5's own instruction to run
+`Q=2` plus one more and record the rest as not run. No `--time-limit` override was given (the
+default per-solve cap, 900s, applied) -- with hindsight, this is exactly the case B5's own text
+warned about ("the item most likely to need a deliberate `--time-limit`"), and five of the
+thirty solves hit it.
+
+**Per-cell status, checked from the raw CPLEX termination (not inferred from the gain
+column):**
+
+| delta | shape | arm A | arm B | proven? |
+|---:|---|---|---|:---:|
+| 30 | flat, commuter, bimodal, burst, spiky | optimal | optimal | yes (all 5) |
+| 15 | flat, commuter, burst, spiky | optimal | optimal | yes (4) |
+| 15 | bimodal | optimal | **maxTimeLimit** | **no** |
+| 10 | flat | **maxTimeLimit** | optimal | **no** |
+| 10 | commuter | optimal | **maxTimeLimit** | **no** |
+| 10 | bimodal | **maxTimeLimit** | **maxTimeLimit** | **no** |
+| 10 | burst, spiky | optimal | optimal | yes (2) |
+
+**10 of 15 cells proven; 5 are not, and their gain numbers are reported below labelled as
+such, not silently blended with the proven ones** (BENDERS_SPEC_v4 section 0.10's caveat: a
+clock-truncated cell is reported as truncated).
+
+**Gain (%), proven cells only:**
+
+| shape | delta=30 | delta=15 | delta=10 |
+|---|---:|---:|---:|
+| flat | 0.00 | 1.54 | truncated (1.53) |
+| commuter | 0.38 | 2.01 | truncated (-0.95) |
+| bimodal | -0.40 | truncated (0.00) | truncated (1.80) |
+| burst | 0.00 | 11.75 | 0.00 |
+| spiky | 5.79 | 5.69 | 7.46 |
+
+**Two proven zero-gain cells (delta=30: flat, burst) match the mechanism D81 already
+diagnosed for Q=2** (coarse resolution leaves little first-stage freedom to exploit demand
+structure below one slot) -- not re-investigated to the same depth here, given this item's
+explicit low priority, but flagged as the same pattern rather than a new one.
+
+**One proven small negative (delta=30, bimodal, -0.40%) is noted, not chased.** Unlike D81's
+exactly-zero cells (which the handout explicitly required investigating), a small negative is
+within the range the multi-scenario hedging result (D79/D70) already established as possible
+when the minute-recourse MIP's own optimum does not coincide with the externally-repriced
+minimum -- both are proven-optimal solves under their own objectives, re-priced by a function
+neither directly optimises. Recorded, not investigated further, consistent with B5's priority.
+
+**What this does and does not settle.** It settles that `Q=3` is at least partially
+tractable at this budget (10/15 cells close inside 900s/solve) and gives a first, incomplete
+read on whether the resolution effect is stable across fleet size: the proven cells span
+0.00% to 11.75%, inside the `Q=2` row's own 0.00%-8.44% range, so nothing here suggests `Q=3`
+behaves qualitatively differently. It does not close the factorial -- `Q=4` was not attempted
+(explicitly out of scope: "lower priority than everything above it," and `Q=3` already needed
+the default 900s cap on a third of its cells) -- and it does not re-derive or replace A2's
+`Q=2` numbers.
+
+**Record.** `scripts/report_figures/data/measurements.json -> multiresolution_gain` was **not**
+extended with a `Q` dimension for this partial row -- the handout's own schema for this key
+(shape x resolution, D81) has no `Q` axis, and adding one for a 5-of-15-truncated row would
+misrepresent it as complete. This entry in `docs_decisions.md` is the record; `Q=4` and the
+five truncated `Q=3` cells remain not run / not proven, stated here rather than left
+ambiguous.
