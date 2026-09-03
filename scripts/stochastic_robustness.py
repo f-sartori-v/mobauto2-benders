@@ -119,7 +119,8 @@ def _schedule(model) -> dict[str, list[int]]:
     return out
 
 
-def _solve(scenario_files: list[str], Q: int | None, p_minutes: float, delta: int):
+def _solve(scenario_files: list[str], Q: int | None, p_minutes: float, delta: int,
+           time_limit: float | None = None):
     from mobauto2_milp.app import _prepare_params
     from mobauto2_milp.config import load_config
     from mobauto2_milp.model import MobautoMilpModel
@@ -136,6 +137,8 @@ def _solve(scenario_files: list[str], Q: int | None, p_minutes: float, delta: in
     if Q:
         mp["Q"] = Q
     mp.pop("T", None)
+    if time_limit is not None:
+        mp["solve_time_limit_s"] = float(time_limit)
 
     solver = MonolithSolver(MobautoMilpModel, cfg, mp, sp)
     result = solver.run()
@@ -148,7 +151,8 @@ def _solve(scenario_files: list[str], Q: int | None, p_minutes: float, delta: in
 
 
 def _solve_minute(scenario_files: list[str], Q: int | None, p_minutes: float,
-                  delta: int, policy: str, weights: list[float] | None = None):
+                  delta: int, policy: str, weights: list[float] | None = None,
+                  time_limit: float | None = None):
     """B13. The scenario's optimum under the SAME minute recourse used to evaluate it.
 
     This is what makes the comparison like-for-like. `attach_minute_recourse` pins
@@ -177,6 +181,8 @@ def _solve_minute(scenario_files: list[str], Q: int | None, p_minutes: float,
     if Q:
         mp["Q"] = Q
     mp.pop("T", None)
+    if time_limit is not None:
+        mp["solve_time_limit_s"] = float(time_limit)
 
     master = MobautoMilpModel(mp)
     master.initialize()
@@ -218,6 +224,13 @@ def main() -> int:
     ap.add_argument("--Q", type=int, default=None, help="Fleet size; default from the base config (2).")
     ap.add_argument("--p-minutes", type=float, default=56.0)
     ap.add_argument("--policy", choices=("start", "midpoint", "end"), default="start")
+    ap.add_argument(
+        "--time-limit", type=float, default=None,
+        help="Per-solve ceiling in seconds. Five solves run here, so the config's own "
+             "1800 s is a 2.5 h worst case; cap it explicitly. A solve that stops on "
+             "the clock makes its arm a bound, not an optimum, and the table says so.",
+    )
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
     from mobauto2_benders.minute_pricer import load_request_minutes, price_schedule_at_minutes
@@ -239,7 +252,16 @@ def main() -> int:
     print()
 
     print("--- solving the hedged schedule (one schedule, all four scenarios) ---")
-    _, hedged_result, hedged_schedule = _solve(files, args.Q, p_minutes, delta)
+    # The hedged arm must be built under the SAME recourse as its comparators, or the
+    # gap is again measuring the valuation rather than the hedging (B13).
+    if args.comparator == "minute":
+        _, hedged_result, hedged_schedule = _solve_minute(
+            files, args.Q, p_minutes, delta, args.policy, time_limit=args.time_limit
+        )
+    else:
+        _, hedged_result, hedged_schedule = _solve(
+            files, args.Q, p_minutes, delta, time_limit=args.time_limit
+        )
     print(f"hedged: {hedged_result.status.name}, "
           f"{len(hedged_schedule['OUT'])} OUT + {len(hedged_schedule['RET'])} RET departures")
     print()
@@ -250,10 +272,13 @@ def main() -> int:
               f"({args.comparator} recourse) ---")
         if args.comparator == "minute":
             _, oracle_result, oracle_schedule = _solve_minute(
-                [f], args.Q, p_minutes, delta, args.policy
+                [f], args.Q, p_minutes, delta, args.policy,
+                time_limit=args.time_limit,
             )
         else:
-            _, oracle_result, oracle_schedule = _solve([f], args.Q, p_minutes, delta)
+            _, oracle_result, oracle_schedule = _solve(
+                [f], args.Q, p_minutes, delta, time_limit=args.time_limit
+            )
         oracle_schedules[name] = oracle_schedule
         print(f"{name}: {oracle_result.status.name}, "
               f"{len(oracle_schedule['OUT'])} OUT + {len(oracle_schedule['RET'])} RET departures")
