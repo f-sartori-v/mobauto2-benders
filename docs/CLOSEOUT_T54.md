@@ -121,6 +121,7 @@ Monolith, consolidated regime, Q=2 so `K_chg = 2` and `K_chg = Q` are the same s
 **Charger capacity binds, and it costs 1.52 %.** One charger for two vehicles forces a
 different schedule and a worse objective, so `K_chg` is data the instance was previously
 assuming away rather than an implementation detail — which is the audit's point.
+**Extended across fleet sizes and both instances in §10.**
 
 The divisible and indivisible forms **agree on this instance**. They are not equivalent
 in general — integral occupancy forbids two vehicles sharing a charger even at `K = Q` —
@@ -279,13 +280,171 @@ exclude_unserved=True`.
 
 ---
 
+## 10. Second pass — the items §9 left open
+
+Everything below is new since the close-out was first written, and each run was capped
+so no single cell could decide the session's budget.
+
+### 10.1 Merged with `main`, and the merge had exactly one correct resolution
+
+`main` moved to `5c3411c` while this branch was open, bringing D86: the minute recourse's
+arc set was extracted into `_minute_recourse_geometry` so that the primal
+(`solve_minute_recourse`) and the new `solve_mw_dual_minute` could not drift apart. B6
+had added `same_slot_eligibility`, which *changes* that arc set, inside the primal.
+
+Taking both sides' text — what a conflict resolution naturally produces — would have left
+the primal filtering arcs by `w0` while the shared geometry did not, so the MW dual would
+have been built over a strictly **larger** arc set than the primal it is restricted to:
+dual variables for arcs the primal does not have, selecting on a face that is not the
+primal's optimal face. Not a weaker cut, an **invalid** one, and silent — the MW path
+returns `None` on weak-duality violations and falls back to the plain dual without
+saying why.
+
+The convention therefore moved *into* the geometry. `tests/test_fast_minute_geometry.py`
+pins it both behaviourally (the two conventions give strictly nested arc sets; the extra
+arcs are exactly the zero-wait ones; the grouped views agree with the arc list) and
+structurally (both consumers call the one factory; neither rebuilds arcs itself).
+
+### 10.2 `same_slot_eligibility` stays `forbid`, and that is the cheap choice
+
+The question was whether flipping the default to `allow` would avoid re-running
+everything. It would do the opposite. The flag enters **both** recourses, so `allow` as a
+default changes the **slot** recourse from `τ ≥ t+1` to `τ ≥ t` — which moves 4183.24,
+399.907, the whole soundness suite and all **94** slot-mode configs.
+
+Under `forbid`, what changes is the **7** minute-mode configs, and those were already on
+the re-run list. Two of the three tables that depend on them are regenerated below.
+
+### 10.3 B2 closed — `K_chg` across fleet sizes and both instances
+
+`scripts/charger_capacity_sweep.py`, 45 s per cell,
+`outputs/workorder/charger_sweep.json`. **Proven cells only**: the first draft of the
+trend line mixed proven and clock-truncated cells, which is worse than useless here
+because the truncation is not even in a consistent direction — a truncated *reference*
+makes its own row's delta look smaller, while a truncated *constrained* cell makes it
+look larger.
+
+| instance | proven `K_chg = 1` cost | `K_chg ≥ 2` |
+|---|---|---|
+| baseline (300 req) | Q=2: **+1.52 %**, Q=4: **+5.97 %** | **0.00 %** at every proven cell |
+| target (450 req) | no proven cell at 45 s | **0.00 %** at Q=4, K∈{2,3} |
+
+**The operational answer is the threshold, not the trend: two chargers are enough at
+every fleet size tested, on both instances; one is not.** On the two proven baseline
+points the cost of a single charger *grows* with the fleet (1.52 % → 5.97 %), which is
+the "more vehicles competing for one charger" reading rather than the "bigger fleet has
+more slack" one — but two points are two points, and Q=3 and Q=5 are excluded as
+truncated.
+
+The indivisible (`charger_occupancy_binary`) form agrees with the divisible one wherever
+both are proven. That does not make them equivalent — integral occupancy forbids sharing
+even at `K = Q` — it means this instance's divisible optimum happens to use whole slots.
+
+### 10.4 B13 closed — EVPI is defined, and the impossible cell is gone
+
+Both arms are now solved under the **same** minute recourse that prices them. The hedged
+arm moved too: it was still being built under the slot recourse while its comparators
+were minute-optimal, which is the same mismatch one level up.
+
+| comparator | base | temporal_noise | return_peak_adv | midday_surge | **averaged** |
+|---|---:|---:|---:|---:|---:|
+| slot (as published) | **−2.4 %** | +2.1 % | +7.5 % | +1.2 % | **2.1 %** |
+| minute (honest) | +0.3 % | +2.1 % | +10.3 % | +1.2 % | **3.3 %** |
+
+The **−2.4 %** cell is the audit's own proof, reproduced: a schedule optimised for four
+scenarios cannot beat a schedule optimised for `base` *on* `base` unless the comparator
+was not optimal under the valuation being applied. Under the minute comparator every gap
+is non-negative, as theory requires.
+
+**EVPI = 321.0 passenger-minutes = 3.3 %** of the perfect-information cost. The published
+2.1 % was 1.2 points low *and* contained a mathematically impossible cell.
+
+VSS is still not computed: it needs the mean-value solution as a third arm.
+
+### 10.5 P2 (audit 4.4) — cut-quality diagnostics
+
+`scripts/cut_quality.py`, 10 signatures, half of them fractional because the LP phase
+evaluates the recourse at fractional `y`.
+
+| generator | tightness | efficacy | orthogonality | density | gen s | lower bound? |
+|---|---:|---:|---:|---:|---:|---|
+| `dual` | 6.8e-14 | 5.287 | 0.000 | 0.577 | 0.07 | yes |
+| `mw` | 1.0e-06 | 5.287 | 0.000 | 0.584 | 0.09 | yes |
+| `finite_difference` | 1.1e-14 | 8.914 | 0.192 | 0.573 | 0.87 | **NO** |
+
+**Magnanti–Wong returns a cut parallel to the plain dual at every sampled point** —
+orthogonality 0.000, identical efficacy. This is the measurement B14 asked for in place
+of the word "richer", and on this instance the selection buys nothing measurable. The
+generator that scores *best* on efficacy is the one with no lower-bound guarantee, which
+is exactly why that column is in the table.
+
+Normalised and combinatorial cuts are reported as **not implemented** rather than
+approximated: a "normalised" row produced by rescaling a dual cut would measure the
+rescaling, not the family.
+
+### 10.6 Penalty frontier, regenerated
+
+`scripts/sweep_penalty_window.py`, 60 s per cell, `policy=start`, `forbid`, 25 cells.
+Served of 300, minute-honest:
+
+| `W_max` \ `p_min` | 14 | 28 | 56 | 112 | 224 |
+|---|---:|---:|---:|---:|---:|
+| 30 | 0 | 0 | 185 | 185 | 185 |
+| 45 | 0 | 0 | 190 | 197 | 197 |
+| 60 | 0 | 0 | **194** | 218 | 222 |
+| 90 | 0 | 0 | 193 | 227 | 231 |
+| 120 | 0 | 0 | 193 | 229 | 236 |
+
+**At `p_min` ≤ 28 the model serves nobody.** The penalty is below the cheapest available
+wait, so rejecting every passenger is optimal — B7's mechanism at its limit, and a
+reminder that `p_min` is a policy statement, not a tuning constant. Average wait per
+served passenger at (`W_max`=60, `p_min`=56) is 14.5 min, consistent with §6.
+
+### 10.7 Resolution factorial, regenerated — and the budget shows through
+
+`scripts/sweep_multiresolution.py`, δ ∈ {30,15,10} × Q ∈ {2,3} × {commuter, bimodal,
+spiky}, `policy=start`, 45 s per arm, 18 cells. "Gain" is how much cheaper the
+minute-optimised schedule is, both arms priced at minute fidelity.
+
+| δ | gains observed |
+|---|---|
+| 30 | 0.00 %, 0.00 %, 0.72 %, 1.17 %, **3.08 %**, **3.62 %** |
+| 15 | 0.00 %, 0.01 %, 0.13 %, 0.18 %, 0.73 %, 0.98 % |
+| 10 | **−1.35 %**, **−0.09 %**, 0.00 %, 0.00 %, 0.18 %, 1.08 % |
+
+**Read the negative cells, not past them.** A negative gain is impossible if both arms
+were solved to optimality — the minute-optimal arm minimises exactly the quantity being
+measured, so it cannot lose to the slot-optimal one. Two negative cells at δ=10 are
+therefore the 45 s cap showing itself, not a finding about resolution.
+
+What the table does support: the multi-resolution gain is **largest at the coarsest
+grid** and collapses below 1 % by δ=15, which is the direction the mechanism predicts —
+a finer first-stage grid leaves the minute recourse less to correct. What it does **not**
+support is any claim at δ=10, where the budget is too small to resolve an effect of that
+size. Re-running δ=10 needs a per-cell budget this session did not have.
+
+Two cells at δ=15 also carry a *negative* `served+` (−2, −4): the minute-optimised
+schedule is cheaper while carrying fewer passengers. That is the penalty regime again
+(§5), not an anomaly — at `p_min = 56` shedding a passenger who would wait an hour is a
+cost reduction.
+
+---
+
 ## 9. What is still open
 
 * The like-for-like **optimised** δ=1 comparison (B6 Part 2). Neither arm closes at any
-  budget this work order could spend; the convention effect in §2 is the measurement
-  that stands.
-* Every table in §4's second list.
-* B13's honest EVPI: implemented, unexecuted.
-* All of P2.
+  budget either session could spend; the convention effect in §2 is the measurement
+  that stands. **Still open.**
+* From §4's second list: the **penalty frontier** (§10.6) and the **resolution
+  factorial** (§10.7) are regenerated. The **competitiveness rows** and the **runtime
+  split** are **still open** — both need converged Benders runs, and B10's deterministic-
+  work columns mean they must be re-measured rather than re-formatted.
+* B13's honest EVPI: **done** (§10.4). **VSS still open** — it needs the mean-value
+  solution as a third arm.
+* P2: the **cut-quality grid is done** (§10.5). The **LP-strength grid**, the
+  **temporal-semantics factorial** beyond B6's first cell, and **demand generalisation**
+  (30 independent days × 3 volumes with a train/validation/test split) are **still
+  open**.
+* The δ=10 row of §10.7 needs a larger per-cell budget before it can be read at all.
 * `K^chg` at fleet sizes other than Q=2, and on the 450-passenger instance. The Q=2
   sweep is in §3b; whether the 1.52 % cost grows or shrinks with the fleet is unmeasured.

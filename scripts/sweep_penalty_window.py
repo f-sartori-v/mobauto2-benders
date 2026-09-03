@@ -66,7 +66,8 @@ def _parse_grid(raw: str) -> tuple[float, ...]:
     return tuple(float(x) for x in raw.split(","))
 
 
-def _solve_cell(p_minutes: float, wmax_minutes: float, Q: int | None, delta: int):
+def _solve_cell(p_minutes: float, wmax_minutes: float, Q: int | None, delta: int,
+                time_limit: float | None = None):
     from mobauto2_milp.app import _prepare_params
     from mobauto2_milp.config import load_config
     from mobauto2_milp.model import MobautoMilpModel
@@ -79,6 +80,11 @@ def _solve_cell(p_minutes: float, wmax_minutes: float, Q: int | None, delta: int
     sp["Wmax_minutes"] = float(wmax_minutes)
     sp.pop("Wmax_slots", None)
     mp["slot_resolution"] = delta
+    if time_limit is not None:
+        # 25 cells here, and the config's own ceiling is 1800 s. One slow cell would
+        # otherwise decide the whole sweep's runtime, and a clock-truncated cell is
+        # reported as such rather than silently quoted.
+        mp["solve_time_limit_s"] = float(time_limit)
     sp["slot_resolution"] = delta
     if Q:
         mp["Q"] = Q
@@ -103,6 +109,8 @@ def main() -> int:
     ap.add_argument("--slot", type=int, default=None)
     ap.add_argument("--Q", type=int, default=None)
     ap.add_argument("--policy", choices=("start", "midpoint", "end"), default="start")
+    ap.add_argument("--time-limit", type=float, default=None,
+                    help="Per-cell ceiling in seconds.")
     args = ap.parse_args()
 
     from mobauto2_benders.minute_pricer import load_request_minutes, price_schedule_at_minutes
@@ -130,7 +138,9 @@ def main() -> int:
     for wmax in wmax_grid:
         row_served = []
         for p in p_grid:
-            result, schedule = _solve_cell(p, wmax, args.Q, delta)
+            result, schedule = _solve_cell(
+                p, wmax, args.Q, delta, time_limit=args.time_limit
+            )
             priced = price_schedule_at_minutes(
                 schedule, requests, delta, seats, wmax, p, policy=args.policy
             )
