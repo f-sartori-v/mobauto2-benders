@@ -254,8 +254,34 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
 
     mp.update(_energy_params_for_resolution(cfg, int(time.slot_resolution)))
 
+    # B2. `None` resolves to Q inside the master rather than here, so the two engines
+    # read the same default from one place instead of two.
+    _set_if_not_none(mp, "K_chg", cfg.model.energy.K_chg)
+    mp["charger_occupancy_binary"] = bool(cfg.model.energy.charger_occupancy_binary)
+
     _set_if_not_none(mp, "start_cost_epsilon", costs.start_cost_epsilon)
     _set_if_not_none(mp, "concurrency_penalty", costs.concurrency_penalty)
+    # B7.2. The lexicographic hierarchy is implemented in the MONOLITH only, and this
+    # engine refuses it rather than running the weighted sum under its name.
+    #
+    # The hierarchy needs the served-demand count as a first-stage-visible quantity.
+    # In this decomposition it lives inside the recourse, reachable only through
+    # theta, so "maximise served demand first" would have to be imposed on a proxy
+    # the master cannot see -- and the honest ways to do that (a served-demand cut
+    # family, or a second theta bounding unserved demand alone) are new formulations,
+    # not a flag. Accepting the key and quietly solving the weighted sum would produce
+    # a run whose manifest names a mode it did not use, which is the exact defect the
+    # manifest exists to prevent.
+    mp["objective_mode"] = str(costs.objective_mode)
+    if str(costs.objective_mode).lower() == "lexicographic":
+        raise ValueError(
+            "model.costs.objective_mode: lexicographic is not implemented for the "
+            "Benders engine. Served demand is inside the recourse here and reaches "
+            "the master only through theta, so the hierarchy cannot be imposed "
+            "without a new cut family -- see the note in app._prepare_params. Run the "
+            "lexicographic arm on the monolith (mobauto2-milp), or set "
+            "objective_mode: weighted_sum."
+        )
 
     mp["use_fifo_symmetry"] = bool(cfg.master.use_fifo_symmetry)
     mp["symmetry_breaking"] = bool(cfg.master.symmetry_breaking)
@@ -344,6 +370,9 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     )
     sp["use_magnanti_wong"] = bool(cfg.subproblem.use_magnanti_wong)
     sp["mw_core_alpha"] = float(cfg.subproblem.mw_core_alpha)
+    sp["mw_core_point_certification"] = str(
+        cfg.subproblem.mw_core_point_certification
+    )
     sp["mw_core_eps"] = float(getattr(cfg.subproblem, "mw_core_eps", 1e-3))
     sp["use_dual_slopes"] = bool(cfg.subproblem.use_dual_slopes)
     sp["S"] = cfg.subproblem.S
@@ -352,6 +381,7 @@ def _prepare_params(cfg, overrides: dict | None) -> tuple[dict, dict]:
     sp["p"] = cfg.subproblem.p
     sp["recourse_resolution"] = cfg.subproblem.recourse_resolution
     sp["departure_policy"] = cfg.subproblem.departure_policy
+    sp["same_slot_eligibility"] = cfg.subproblem.same_slot_eligibility
     _set_if_not_none(sp, "placement_offsets", cfg.subproblem.placement_offsets)
     sp["degenerate_cut_probe_top_k"] = int(cfg.subproblem.degenerate_cut_probe_top_k)
     _set_if_not_none(
@@ -555,7 +585,53 @@ def _maybe_print_summary(result: BendersRunResult, sp: dict) -> None:
                 )
             )
             if wait_per_pax_min is not None:
-                print(f"Avg wait (min): {wait_per_pax_min:.6g}")
+                # B12 (audit item 3.6). The qualifiers go on the SAME LINE as the
+                # number. "Avg wait (min): 14.7" is not reproducible -- the report
+                # printed a 13.9-15.9 range for one fixed schedule and nothing said
+                # what varied across its endpoints. Every choice that moves this
+                # figure is now stated where the figure is: which resolution the
+                # assignment was made at, which departure placement, which
+                # eligibility convention, what the denominator counted, and whether
+                # unserved requests were excluded from it.
+                #
+                # The denominator here is CARRIED passengers, so unserved requests are
+                # excluded by construction: an unserved passenger has no wait to
+                # average. At p_min = 56 that exclusion is large -- see
+                # rejected_with_free_seat below -- and quoting the same schedule
+                # against all requests would give a materially different number.
+                print(
+                    "Avg wait: avg_wait_min=%.6g denominator=carried n=%.0f "
+                    "exclude_unserved=True scenario=%s direction=both "
+                    "assignment_resolution=%s departure_policy=%s "
+                    "same_slot_eligibility=%s departure_offset=%s "
+                    "waiting_minutes=%.6g"
+                    % (
+                        wait_per_pax_min,
+                        float(result.pax_served or 0.0),
+                        "aggregate" if sp.get("scenario_files") else "single",
+                        str(sp.get("recourse_resolution", "slot")),
+                        str(sp.get("departure_policy", "start")),
+                        str(sp.get("same_slot_eligibility", "forbid")),
+                        str(sp.get("placement_offsets") or [0.0]),
+                        wait_slots * float(slot_res),
+                    )
+                )
+            # B7.1 (audit item 1.3). Printed with every result, unconditionally.
+            #
+            # A nonzero count is not a defect: at p_min=56 and delta=30 a two-slot
+            # wait costs more than a rejection, so the model is correct to reject and
+            # the policy it encodes is the thing worth seeing. A ZERO here on the
+            # baseline would be the defect, since it would mean either this count or
+            # the pricing is wrong.
+            free_seat = getattr(result, "sp_rejected_with_free_seat", None)
+            if free_seat is not None:
+                p_min_eff = float(sp.get("p", 0.0)) * float(slot_res)
+                w_max_min = sp.get("Wmax_minutes")
+                print(
+                    "rejected_with_free_seat=%.6g  (p_min=%.6g pax-min, W_max=%s min; "
+                    "a wait longer than p_min is dominated by rejection even with a "
+                    "free seat)" % (free_seat, p_min_eff, w_max_min)
+                )
         if result.best_upper_bound is not None:
             print(f"UB_total (best): {float(result.best_upper_bound):.6g}")
     except Exception:

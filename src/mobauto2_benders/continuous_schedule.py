@@ -45,7 +45,13 @@ from typing import Sequence
 
 import yaml
 
-from .minute_pricer import OUT, RET, MinutePricingResult, price_schedule_given_departure_minutes
+from .minute_pricer import (
+    DEFAULT_SAME_SLOT_ELIGIBILITY,
+    OUT,
+    RET,
+    MinutePricingResult,
+    price_schedule_given_departure_minutes,
+)
 
 SCHEMA_NAME = "mobauto2_continuous_schedule"
 SCHEMA_VERSION = 1
@@ -198,12 +204,26 @@ def price_continuous_schedule(
     wmax_minutes: float,
     p_minutes: float,
     lp_solver: str = "cplex_direct",
+    same_slot_eligibility: str = DEFAULT_SAME_SLOT_ELIGIBILITY,
 ) -> MinutePricingResult:
     """Price a loaded continuous-time schedule at minute fidelity. `schedule.seats`
     is used as the per-departure capacity, matching every departure in the file --
     this repository does not (yet) support a heterogeneous fleet with different
-    seat counts per vehicle."""
+    seat counts per vehicle.
+
+    `same_slot_eligibility` (B6) is exposed rather than left at whatever the pricer
+    defaults to, because this is Comparison C's instrument: a CP schedule priced under
+    one convention against a Benders schedule priced under another would attribute the
+    convention difference to the engines. The value travels on the returned
+    MinutePricingResult, so a table cannot fail to state it.
+    """
     departures_minutes = to_departures_minutes(schedule)
     return price_schedule_given_departure_minutes(
-        departures_minutes, requests, schedule.seats, wmax_minutes, p_minutes, lp_solver
+        departures_minutes,
+        requests,
+        schedule.seats,
+        wmax_minutes,
+        p_minutes,
+        lp_solver,
+        same_slot_eligibility=same_slot_eligibility,
     )

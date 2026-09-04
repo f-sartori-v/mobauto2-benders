@@ -41,7 +41,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--mw",
         dest="mw",
         action="store_true",
-        help="Enable Magnanti–Wong (Pareto-optimal) cut selection",
+        help=(
+            "Enable Magnanti-Wong-inspired dual selection. NOT certified "
+            "Pareto-optimal: that requires the core point in the relative interior "
+            "of conv(Y), which nothing here establishes (B14)."
+        ),
     )
     run_p.add_argument(
         "--mw-alpha",

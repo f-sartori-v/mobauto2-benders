@@ -422,10 +422,47 @@ class MobautoMilpModel(_BaseModel):
 
         m.C5 = pyo.Constraint(m.Q, m.T, rule=lambda m, q, t: m.b[q, t] >= 2 * L * m.yOUT[q, t])
 
-        # Avoid uninitialized gchg at the last time period (not used in constraints)
-        for q in m.Q:
-            m.gchg[q, T - 1].fix(0)
-            # Allow charging label at the last slot if desired (battery won't change as gchg[T-1]=0)
+        # B3 -- close the final-slot energy leak (audit 1.7).
+        #
+        # The SoC recursion stops at t = T-2 because it writes b[q,t+1] and there is no
+        # b[q,T]. gchg[q,T-1] was already fixed here; c[q,T-1] was NOT, and the comment
+        # below used to say so approvingly ("allow charging label at the last slot").
+        # A free c[q,T-1] is a charging decision that changes no state and costs
+        # nothing -- it makes the reported schedule's last slot arbitrary, and it made
+        # this engine's last slot disagree with the Benders master's, which left both
+        # free. Both engines now fix both, which removes no feasible schedule (every
+        # solution has an equal-objective twin with the last slot idle) and leaves the
+        # baseline objective unchanged.
+        if T >= 2:
+            for q in m.Q:
+                m.gchg[q, T - 1].fix(0)
+                m.c[q, T - 1].fix(0)
+
+        # B2 -- charger capacity (audit 1.8). See the companion block in
+        # problem/master_impl.py for the reasoning; the two engines must carry the same
+        # row or the monolith stops being a reference for the decomposition.
+        K_chg = self._p("K_chg", None)
+        K_chg = int(Q) if K_chg is None else int(K_chg)
+        if K_chg < 0:
+            raise ValueError(f"K_chg must be non-negative, got {K_chg}")
+        self._K_chg = K_chg
+        self._charger_occupancy_binary = bool(self._p("charger_occupancy_binary", False))
+        # Emitted only where it binds; see the companion block in master_impl.py.
+        self._charger_capacity_binds = bool(
+            self._charger_occupancy_binary or K_chg < int(Q)
+        )
+        if self._charger_occupancy_binary:
+            m.zchg = pyo.Var(m.Q, m.T, within=pyo.Binary)
+            m.C_chg_occ_link = pyo.Constraint(
+                m.Q, m.T, rule=lambda m, q, t: m.c[q, t] <= m.zchg[q, t]
+            )
+            m.C_chg_capacity = pyo.Constraint(
+                m.T, rule=lambda m, t: sum(m.zchg[q, t] for q in m.Q) <= float(K_chg)
+            )
+        elif K_chg < int(Q):
+            m.C_chg_capacity = pyo.Constraint(
+                m.T, rule=lambda m, t: sum(m.c[q, t] for q in m.Q) <= float(K_chg)
+            )
 
         # Container block to store explicit extra cuts incrementally
         m.ExtraCuts = pyo.Block(concrete=True)

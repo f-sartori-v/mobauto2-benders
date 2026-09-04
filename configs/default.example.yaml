@@ -51,6 +51,19 @@ model:
     L: 30
     # Max charge added per slot when charging; expressions allowed here only
     delta_chg: 70 / (60 / slot_resolution)
+    # B2 (audit 1.8). How many vehicles may draw from the depot's chargers in one
+    # slot. null means Q -- every vehicle at once, which is what every archived result
+    # assumed. At that value the row is implied by c in [0,1] and is NOT emitted, so
+    # those results reproduce exactly; it appears only where it binds. Measured at
+    # Q=2, K_chg=1 on the consolidated regime: the schedule changes and the objective
+    # rises 399.907 -> 405.973 (docs/CLOSEOUT_T54.md section 3b).
+    K_chg: null
+    # Whether a charger is held for a WHOLE slot (true) or is preemptible within it
+    # (false). Two different physical claims about the site, not a rounding of one
+    # another: integral occupancy forbids two vehicles sharing a charger even at
+    # K_chg = Q, so the binary form is emitted at every K_chg. The manifest records
+    # which form ran and a table may not mix them.
+    charger_occupancy_binary: false
   costs:
     # Small penalty on starting trips
     # Departure regularisation (D4). At 0.01, 100 extra trips equal one unit of
@@ -70,6 +83,21 @@ model:
     # separate knob from start_cost_epsilon above and must not be conflated with
     # it (D4).
     concurrency_penalty: 0.25
+    # B7.2/B7.3 (audit 1.3). weighted_sum is the DEFAULT, so every archived result
+    # reproduces and start_cost_epsilon / concurrency_penalty keep the meaning they
+    # have always had -- policy weights, not tie-breakers.
+    #
+    # lexicographic states the other policy: maximise served demand first, then
+    # minimise waiting, then the epsilon and kappa terms. It exists because at
+    # p_minutes 56 and slot_resolution 30 the slot penalty is 56/30 ~ 1.867, so a
+    # two-slot wait (cost 2) is strictly worse than rejecting the passenger -- even
+    # with a free seat. `rejected_with_free_seat`, printed with every result, counts
+    # how often that happens; it is 32 on the p56 baseline.
+    #
+    # Implemented on the MONOLITH. The Benders engine refuses the key rather than
+    # running the weighted sum under its name: served demand lives inside its recourse
+    # and reaches the master only through theta.
+    objective_mode: weighted_sum
 
 master:
   # Optional FIFO symmetry-breaking across vehicles
@@ -110,10 +138,46 @@ master:
   recourse_lower_bound: true
 
 subproblem:
-  # Multi-cuts vs averaged cut across scenarios
+  # B1 (audit 1.4). Which multi-scenario cut architecture this run uses.
+  #   aggregated     one theta, one cut carrying pi_bar = sum_s w_s pi_hat_s
+  #   disaggregated  theta_{s,d} and one cut per (scenario, direction) -- stronger
+  # Derived from the two booleans below when omitted, so existing configs keep their
+  # architecture. Stating it AND contradicting it with the booleans is an error, not a
+  # precedence rule. The manifest records which one ran, and no table may mix them.
+  #
+  # LEFT COMMENTED OUT ON PURPOSE, and this file is the reason the rule matters. A
+  # config that states BOTH the architecture and the booleans is a config whose two
+  # halves can disagree, and someone copying this file and flipping
+  # `multi_cuts_by_scenario` would then hit a load error they did not cause. Either
+  # uncomment this line and delete both booleans, or leave it and set the booleans --
+  # the architecture is derived and recorded either way.
+  #
+  #   cut_architecture: aggregated        # or: disaggregated
+  #
+  # Multi-cuts vs averaged cut across scenarios. Equivalent to
+  # cut_architecture: aggregated when paired with master.theta_per_scenario: false.
   multi_cuts_by_scenario: false
-  # Magnanti–Wong selection for Pareto-optimal cuts
+  # B6 (audit 2.4). Whether a passenger may board a departure leaving in their own
+  # arrival slot/minute.
+  #   forbid  needs dep_minute - arrival >= 1. Under departure_policy: start this is
+  #           EXACTLY the master's tau >= t+1 rule, at any resolution -- which is what
+  #           makes a minute run and a slot run comparable.
+  #   allow   needs >= 0. A different operational claim, not a different estimate.
+  # The slot recourse always enforced `forbid`; the minute recourse always assumed
+  # `allow`, and nothing recorded the difference. Measured, the convention alone is
+  # worth 4.1% of the objective at delta=30 and 5.0% at delta=1 -- larger than the
+  # decomposition effects that were reported without it (docs/CLOSEOUT_T54.md section 2).
+  same_slot_eligibility: forbid
+  # Magnanti-Wong-INSPIRED dual selection. NOT certified Pareto-optimal: that requires
+  # the core point in the relative interior of conv(Y), which nothing here establishes
+  # (B14). The cut is a valid lower bound regardless -- validity comes from dual
+  # feasibility, not from the core point.
   use_magnanti_wong: true
+  # B14. What certification is attempted for the core point: `necessary_conditions`
+  # checks the conditions signature.project_core_point enforces on a relaxation of the
+  # projected region, `none` skips it. Neither establishes relative interiority; the
+  # result is recorded in the manifest so a run can say it looked.
+  mw_core_point_certification: necessary_conditions
   # Core-point mixing factor alpha in (0,1]
   mw_core_alpha: 0.3
   # Use dual slopes for cut generation

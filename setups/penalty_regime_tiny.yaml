@@ -1,0 +1,43 @@
+# B7 (audit item 1.3). The smallest instance on which the penalty regime CHOOSES.
+#
+# At slot_resolution 30 and p_minutes 56 the slot penalty is p = 56/30 ~ 1.8667. A
+# passenger who can only be reached by a departure two slots after their arrival costs
+# 2 slot-units of waiting to carry and 1.8667 to reject, so the weighted sum rejects
+# them EVEN THOUGH the vehicle has 15 seats and only 3 passengers to take. The
+# lexicographic mode, which maximises served demand first, carries them.
+#
+# Measured on this file at T=6, Q=1, S=15, Wmax 60 min:
+#   weighted_sum   18/21 carried, 3 rejected with a free seat, theta = 23.6
+#   lexicographic  21/21 carried,  0 rejected with a free seat, theta = 27.0
+#
+# The shape that produces it: 15 OUT arrivals in slot 0 fill the only reachable
+# departure, and 3 more arrive in slot 1 whose earliest reachable second departure is
+# slot 3 -- two slots later, hence dominated by rejection. The RET side is deliberately
+# small and easy, so the discrimination cannot come from anywhere else.
+#
+# Every request is strictly inside the horizon (T_minutes 180), so nothing is
+# discarded and both arms price the same instance (D25).
+
+n: 21
+requests:
+- {dir: OUT, time: 2}
+- {dir: OUT, time: 4}
+- {dir: OUT, time: 6}
+- {dir: OUT, time: 8}
+- {dir: OUT, time: 10}
+- {dir: OUT, time: 12}
+- {dir: OUT, time: 14}
+- {dir: OUT, time: 16}
+- {dir: OUT, time: 18}
+- {dir: OUT, time: 20}
+- {dir: OUT, time: 22}
+- {dir: OUT, time: 24}
+- {dir: OUT, time: 26}
+- {dir: OUT, time: 27}
+- {dir: OUT, time: 28}
+- {dir: OUT, time: 32}
+- {dir: OUT, time: 36}
+- {dir: OUT, time: 40}
+- {dir: RET, time: 65}
+- {dir: RET, time: 70}
+- {dir: RET, time: 75}

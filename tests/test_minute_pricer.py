@@ -53,7 +53,7 @@ class TestPricingArithmetic(unittest.TestCase):
     def test_everyone_boards_the_single_departure(self):
         """Arrivals at 0, 10, 20; departure at 30; seats to spare.
         Waits are 30 + 20 + 10 = 60 passenger-minutes."""
-        w, u, s = price_direction_at_minutes([0, 10, 20], [30.0], 15, 60, P_MIN)
+        w, u, s, _fs, _rows = price_direction_at_minutes([0, 10, 20], [30.0], 15, 60, P_MIN)
         self.assertAlmostEqual(w, 60.0, places=6)
         self.assertEqual(u, 0.0)
         self.assertEqual(s, 3.0)
@@ -61,7 +61,7 @@ class TestPricingArithmetic(unittest.TestCase):
     def test_capacity_forces_the_cheapest_two(self):
         """Two seats for three passengers. Leaving one costs 1500, so it serves two --
         and it keeps the two who wait least: 20 + 10 = 30, plus 1500."""
-        w, u, s = price_direction_at_minutes([0, 10, 20], [30.0], 2, 60, P_MIN)
+        w, u, s, _fs, _rows = price_direction_at_minutes([0, 10, 20], [30.0], 2, 60, P_MIN)
         self.assertAlmostEqual(w, 30.0, places=6)
         self.assertEqual(u, 1.0)
         self.assertEqual(s, 2.0)
@@ -70,18 +70,69 @@ class TestPricingArithmetic(unittest.TestCase):
         """A departure 90 minutes after arrival is out of reach at Wmax 60, so the
         passenger is unserved however much capacity there is. This is the check the
         slot model cannot make -- its window is counted in slots."""
-        w, u, s = price_direction_at_minutes([0], [90.0], 15, 60, P_MIN)
+        w, u, s, _fs, _rows = price_direction_at_minutes([0], [90.0], 15, 60, P_MIN)
         self.assertEqual(u, 1.0)
         self.assertEqual(s, 0.0)
         self.assertAlmostEqual(w, 0.0, places=6)
 
-    def test_boarding_at_the_arrival_minute_is_free_and_allowed(self):
-        w, u, s = price_direction_at_minutes([30], [30.0], 15, 60, P_MIN)
-        self.assertAlmostEqual(w, 0.0, places=6)
-        self.assertEqual(u, 0.0)
+    def test_same_slot_flag(self):
+        """B6. `forbid` and `allow` give different arc sets and different objectives.
+
+        The instance is the minimal one that separates them: a single arrival at
+        minute 30 and a single departure at minute 30. Under `allow` the passenger
+        steps onto the waiting vehicle for zero wait; under `forbid` that arc does not
+        exist, there is nowhere else to go, and the passenger is unserved at cost
+        `p_minutes`.
+
+        This test fails on the pre-B6 code in the only way it can: the convention was
+        hard-coded to `allow` there, so `forbid` was not expressible and the two arms
+        of the comparison were the same run.
+        """
+        w_allow, u_allow, s_allow, _fs, rows_allow = price_direction_at_minutes(
+            [30], [30.0], 15, 60, P_MIN, same_slot_eligibility="allow"
+        )
+        self.assertAlmostEqual(w_allow, 0.0, places=6)
+        self.assertEqual(u_allow, 0.0)
+        self.assertEqual(s_allow, 1.0)
+
+        w_forbid, u_forbid, s_forbid, _fs2, rows_forbid = price_direction_at_minutes(
+            [30], [30.0], 15, 60, P_MIN, same_slot_eligibility="forbid"
+        )
+        self.assertEqual(u_forbid, 1.0)
+        self.assertEqual(s_forbid, 0.0)
+        self.assertAlmostEqual(w_forbid, 0.0, places=6)
+
+        # Different arc sets: one boarding row against one rejection row.
+        self.assertEqual([r.served for r in rows_allow], [True])
+        self.assertEqual([r.served for r in rows_forbid], [False])
+        # Different objectives.
+        self.assertNotAlmostEqual(
+            w_allow + P_MIN * u_allow, w_forbid + P_MIN * u_forbid, places=6
+        )
+
+    def test_forbid_is_the_default(self):
+        """The default must be the master's own tau >= t+1 rule, not the opposite.
+
+        Under `departure_policy="start"`, `dep - m >= 1` is exactly `tau >= t + 1` at
+        any resolution, so a minute run and a slot run share an arc set by default and
+        differ only in how finely they price the wait. That is what makes them
+        comparable, and its absence is why the reported delta=1 figures compared two
+        conventions at once.
+        """
+        default = price_direction_at_minutes([30], [30.0], 15, 60, P_MIN)
+        forbid = price_direction_at_minutes(
+            [30], [30.0], 15, 60, P_MIN, same_slot_eligibility="forbid"
+        )
+        self.assertEqual(default[:4], forbid[:4])
+
+    def test_an_unknown_eligibility_is_refused(self):
+        with self.assertRaises(ValueError):
+            price_direction_at_minutes(
+                [30], [30.0], 15, 60, P_MIN, same_slot_eligibility="sometimes"
+            )
 
     def test_no_departures_means_everyone_is_unserved(self):
-        w, u, s = price_direction_at_minutes([0, 5], [], 15, 60, P_MIN)
+        w, u, s, _fs, _rows = price_direction_at_minutes([0, 5], [], 15, 60, P_MIN)
         self.assertEqual(u, 2.0)
         self.assertEqual(s, 0.0)
 
@@ -99,7 +150,7 @@ class TestPlacementPolicy(unittest.TestCase):
         for policy, expect_served in (("start", 1.0), ("midpoint", 0.0)):
             with self.subTest(policy=policy):
                 deps = departure_minutes([2], 30, policy)
-                _w, u, s = price_direction_at_minutes([0], deps, 15, 60, P_MIN)
+                _w, u, s, _fs, _rows = price_direction_at_minutes([0], deps, 15, 60, P_MIN)
                 self.assertEqual(s, expect_served)
                 self.assertEqual(u, 1.0 - expect_served)
 
@@ -119,7 +170,7 @@ class TestGivenDepartureMinutes(unittest.TestCase):
         minutes. Both paths must agree to the cent: this function is that test's
         LP with the slot-to-minute conversion done by the caller instead of inside
         it, not a different calculation."""
-        w, u, s = price_direction_at_minutes([0, 10, 20], [15.0], 15, 60, P_MIN)
+        w, u, s, _fs, _rows = price_direction_at_minutes([0, 10, 20], [15.0], 15, 60, P_MIN)
         result = price_schedule_given_departure_minutes(
             {"OUT": [15.0], "RET": []},
             {"OUT": [0, 10, 20], "RET": []},
@@ -516,7 +567,14 @@ class TestOptimalPlacement(unittest.TestCase):
         enumerate every assignment of instants to departures, price each one with the
         independent fixed-minutes pricer, and take the minimum. The grid is passed
         explicitly to both sides so this is a check of the MIP against the definition,
-        not an accidental check against whatever the default grid happens to be."""
+        not an accidental check against whatever the default grid happens to be.
+
+        `same_slot_eligibility` is passed explicitly for the same reason the grid is.
+        The optimal-placement MIP chooses the departure instant, so it prices under
+        "allow" (see price_direction_optimal_placement); the fixed-minutes pricer
+        defaults to "forbid", which is the recourse convention. Comparing them without
+        saying so would be comparing two conventions and calling the difference a MIP
+        bug -- which is B6's defect in miniature."""
         import itertools
 
         delta, S, wmax, p_min, sched, reqs = self._case()
@@ -528,8 +586,13 @@ class TestOptimalPlacement(unittest.TestCase):
             dep_minutes = [
                 float(t) * float(delta) + off for t, off in zip(slots, combo)
             ]
-            w, u, _s = price_direction_at_minutes(
-                reqs["OUT"], dep_minutes, S, wmax, p_min
+            w, u, _s, _fs, _rows = price_direction_at_minutes(
+                reqs["OUT"],
+                dep_minutes,
+                S,
+                wmax,
+                p_min,
+                same_slot_eligibility="allow",
             )
             best = min(best, w + p_min * u)
 

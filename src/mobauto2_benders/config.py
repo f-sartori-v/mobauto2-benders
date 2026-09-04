@@ -69,12 +69,34 @@ class EnergySection:
     Emax: float
     L: float
     delta_chg: float | int | str | None = None
+    # B2 (audit 1.8). How many vehicles may draw from the depot's chargers in one
+    # slot. `None` means Q -- every vehicle can charge at once, which is the
+    # assumption every archived result was produced under, and at which the row is
+    # implied by c in [0,1] so those results reproduce exactly. State a number to
+    # make the site's real charger count part of the instance rather than an
+    # accident of the formulation.
+    K_chg: int | None = None
+    # Whether a charger is held for a whole slot (True) or is preemptible within it
+    # (False, the divisible default). These are different physical claims and give
+    # different schedules; the manifest records which one a run used.
+    charger_occupancy_binary: bool = False
 
 
 @dataclass(slots=True)
 class CostSection:
     start_cost_epsilon: float = 0.0
     concurrency_penalty: float = 0.0
+    # B7.2/B7.3 (audit item 1.3). "weighted_sum" is the DEFAULT, so every archived
+    # result reproduces and epsilon/kappa keep the meaning they have always had --
+    # policy weights, not tie-breakers; the audit is explicit that kappa=0.25 is large
+    # enough to select schedules.
+    #
+    # "lexicographic" states the other policy: maximise served demand first, then
+    # minimise waiting, then the epsilon and kappa terms. Under the weighted sum at
+    # p_min=56 and delta=30 a two-slot wait is strictly worse than a rejection, so
+    # some admissible waits are dominated by leaving the passenger behind. That is a
+    # real policy choice and it must be selectable rather than implied by arithmetic.
+    objective_mode: str = "weighted_sum"
 
 
 @dataclass(slots=True)
@@ -205,6 +227,23 @@ class MasterSection:
 
 @dataclass(slots=True)
 class SubproblemSection:
+    # B1 (audit 1.4). Which multi-scenario cut architecture a run uses. Two are
+    # implemented and they are NOT interchangeable:
+    #
+    #   "aggregated"    one theta, one cut carrying pi_bar = sum_s w_s pi_hat_s and
+    #                   a = sum_s w_s sum_t alpha_hat_{s,t} R_{s,t}. What the report
+    #                   states, and the default.
+    #   "disaggregated" theta_{s,d} and one cut per (scenario, direction). The
+    #                   stronger formulation -- it never aggregates away a scenario's
+    #                   own subgradient -- and the one B9 wants for the strength
+    #                   comparison.
+    #
+    # Resolved from the two legacy booleans below when it is not stated, so every
+    # existing config keeps its architecture. Stating it AND contradicting it with the
+    # booleans is an error rather than a precedence rule: the two ways of asking for an
+    # architecture disagreeing silently is exactly the shape of defect this key exists
+    # to remove.
+    cut_architecture: str | None = None
     multi_cuts_by_scenario: bool = True
     # Which generator builds the cut. One key with three values, replacing two booleans
     # that could not express three mutually exclusive modes (S1b).
@@ -231,6 +270,13 @@ class SubproblemSection:
     acknowledge_no_lower_bound: bool = False
     use_magnanti_wong: bool = False
     mw_core_alpha: float = 0.3
+    # B14 (audit item 2.8). What certification is attempted for the Magnanti-Wong
+    # core point. "necessary_conditions" checks the conditions
+    # signature.project_core_point enforces on a relaxation of the projected region;
+    # "none" skips it. NEITHER establishes relative interiority of conv(Y) -- no
+    # method here does -- so the cut is described as Magnanti-Wong-INSPIRED either
+    # way. What this key changes is whether the run can say it looked.
+    mw_core_point_certification: str = "necessary_conditions"
     mw_core_eps: float = 1e-3
     use_dual_slopes: bool = False
     S: float = 0.0
@@ -263,6 +309,13 @@ class SubproblemSection:
     # does (D76) -- see minute_pricer.py's `DeparturePolicy` comment. "midpoint"/"end"
     # remain available as explicit counterfactuals, not as competing estimates.
     departure_policy: str = "start"
+    # B6 (audit 2.4). Whether a passenger may board a departure leaving in their own
+    # arrival slot/minute. "forbid" is the tau >= t+1 rule the slot recourse has always
+    # enforced and, under departure_policy="start", it reproduces that arc set exactly
+    # at ANY resolution -- which is what makes a minute run and a slot run comparable.
+    # The minute recourse used to hard-code the opposite; see
+    # minute_pricer.SameSlotEligibility. Every table must state which one it used.
+    same_slot_eligibility: str = "forbid"
     # F2 (docs/PROJECT_STATE_v6.md section 5, D76): a fixed offset grid O subset
     # [-delta, delta], chosen once at load, letting the minute recourse treat a departure
     # as reachable at any minute in O rather than only at departure_policy's single
@@ -401,6 +454,42 @@ def _as_mapping(value: Any, where: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{where} must be a mapping")
     return value
+
+
+def _validated_objective_mode(raw) -> str:
+    """B7.2. One of two named modes, refused rather than defaulted on a typo.
+
+    A misspelled mode silently falling back to the weighted sum is exactly the shape
+    of defect the manifest exists to prevent: the run would report an objective mode
+    it did not use.
+    """
+    if raw is None:
+        return "weighted_sum"
+    mode = str(raw).strip().lower()
+    if mode not in {"weighted_sum", "lexicographic"}:
+        raise ValueError(
+            "model.costs.objective_mode must be 'weighted_sum' or 'lexicographic', "
+            f"got {raw!r}"
+        )
+    return mode
+
+
+def _validated_core_certification(raw) -> str:
+    """B14. One of two named modes, refused on a typo rather than defaulted.
+
+    A misspelling falling back to "necessary_conditions" would make a run report a
+    certification attempt it did not make -- the same class of defect as a manifest
+    naming an objective mode the solve never used.
+    """
+    if raw is None:
+        return "necessary_conditions"
+    mode = str(raw).strip().lower()
+    if mode not in {"none", "necessary_conditions"}:
+        raise ValueError(
+            "subproblem.mw_core_point_certification must be 'none' or "
+            f"'necessary_conditions', got {raw!r}"
+        )
+    return mode
 
 
 def _check_unknown_keys(data: Mapping[str, Any], allowed: set[str], where: str) -> None:
@@ -875,7 +964,11 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
     )
 
     energy_raw = _as_mapping(model_raw.get("energy"), "model.energy")
-    _check_unknown_keys(energy_raw, {"Emax", "L", "delta_chg"}, "model.energy")
+    _check_unknown_keys(
+        energy_raw,
+        {"Emax", "L", "delta_chg", "K_chg", "charger_occupancy_binary"},
+        "model.energy",
+    )
     _require_keys(energy_raw, {"Emax", "L"}, "model.energy")
     energy_section = EnergySection(
         Emax=_ensure_float(
@@ -890,11 +983,26 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             if energy_raw.get("delta_chg") is not None
             else None
         ),
+        K_chg=(
+            int(
+                _ensure_float(
+                    _disallow_expr(energy_raw.get("K_chg"), "model.energy.K_chg"),
+                    "model.energy.K_chg",
+                )
+            )
+            if energy_raw.get("K_chg") is not None
+            else None
+        ),
+        charger_occupancy_binary=bool(
+            energy_raw.get("charger_occupancy_binary", False)
+        ),
     )
 
     costs_raw = _as_mapping(model_raw.get("costs"), "model.costs")
     _check_unknown_keys(
-        costs_raw, {"start_cost_epsilon", "concurrency_penalty"}, "model.costs"
+        costs_raw,
+        {"start_cost_epsilon", "concurrency_penalty", "objective_mode"},
+        "model.costs",
     )
     cost_section = CostSection(
         start_cost_epsilon=(
@@ -919,6 +1027,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             if costs_raw.get("concurrency_penalty") is not None
             else 0.0
         ),
+        objective_mode=_validated_objective_mode(costs_raw.get("objective_mode")),
     )
 
     master_raw = _as_mapping(data.get("master"), "master")
@@ -1139,11 +1248,13 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
     _check_unknown_keys(
         sub_raw,
         {
+            "cut_architecture",
             "multi_cuts_by_scenario",
             "cut_mode",
             "acknowledge_no_lower_bound",
             "use_magnanti_wong",
             "mw_core_alpha",
+            "mw_core_point_certification",
             "mw_core_eps",
             "use_dual_slopes",
             "S",
@@ -1153,6 +1264,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "p_minutes",
             "recourse_resolution",
             "departure_policy",
+            "same_slot_eligibility",
             "placement_offsets",
             "degenerate_cut_probe_top_k",
             "degenerate_cut_probe_top_k_out",
@@ -1196,6 +1308,14 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         raise ValueError(
             f"subproblem.departure_policy must be 'start', 'midpoint' or 'end', got "
             f"{_departure_policy!r}"
+        )
+    _same_slot_eligibility = str(
+        sub_raw.get("same_slot_eligibility", "forbid")
+    ).strip().lower()
+    if _same_slot_eligibility not in {"forbid", "allow"}:
+        raise ValueError(
+            f"subproblem.same_slot_eligibility must be 'forbid' or 'allow', got "
+            f"{_same_slot_eligibility!r}"
         )
     if _recourse_resolution == "minute" and "Wmax_minutes" not in sub_raw:
         raise ValueError(
@@ -1318,6 +1438,11 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             _disallow_expr(sub_raw.get("p"), "subproblem.p"), "subproblem.p"
         )
     sub_section = SubproblemSection(
+        cut_architecture=(
+            str(sub_raw.get("cut_architecture")).strip().lower()
+            if sub_raw.get("cut_architecture") is not None
+            else None
+        ),
         multi_cuts_by_scenario=_ensure_bool(
             sub_raw.get("multi_cuts_by_scenario", True),
             "subproblem.multi_cuts_by_scenario",
@@ -1329,6 +1454,9 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         ),
         use_magnanti_wong=_ensure_bool(
             sub_raw.get("use_magnanti_wong", False), "subproblem.use_magnanti_wong"
+        ),
+        mw_core_point_certification=_validated_core_certification(
+            sub_raw.get("mw_core_point_certification")
         ),
         mw_core_alpha=_ensure_float(
             _disallow_expr(
@@ -1366,6 +1494,7 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
         p_minutes=_p_minutes_val,
         recourse_resolution=_recourse_resolution,
         departure_policy=_departure_policy,
+        same_slot_eligibility=_same_slot_eligibility,
         placement_offsets=_placement_offsets,
         degenerate_cut_probe_top_k=_ensure_int(
             _disallow_expr(
@@ -1557,6 +1686,76 @@ def _parse_v2(raw: Mapping[str, Any]) -> RootConfig:
             "master.theta_per_scenario: true, or "
             "subproblem.multi_cuts_by_scenario: false."
         )
+
+    # ---------------------------------------------------------------- B1
+    # Resolve `subproblem.cut_architecture` into the two booleans the engines read,
+    # or derive it from them when it was not stated.
+    #
+    # The architecture used to be expressible only as a PAIR of booleans in two
+    # different config sections, with no name for either combination and nothing
+    # recording which one produced a table. The audit's item 1.4 is downstream of
+    # that: a run could not say what its cuts were, so the report described one
+    # architecture while the code ran another.
+    #
+    # Precedence is deliberately absent. Stating the architecture and then
+    # contradicting it with a boolean is an error, not something resolved quietly in
+    # favour of one of them.
+    _ARCHITECTURES = {
+        "aggregated": (False, False),
+        "disaggregated": (True, True),
+    }
+    _arch = sub_section.cut_architecture
+    _legacy_pair = (
+        bool(sub_section.multi_cuts_by_scenario),
+        bool(master_section.theta_per_scenario),
+    )
+    _explicit_legacy = {
+        k
+        for k, present in (
+            ("subproblem.multi_cuts_by_scenario", "multi_cuts_by_scenario" in sub_raw),
+            ("master.theta_per_scenario", "theta_per_scenario" in master_raw),
+        )
+        if present
+    }
+    if _arch is not None:
+        if _arch not in _ARCHITECTURES:
+            raise ValueError(
+                "subproblem.cut_architecture must be 'aggregated' or 'disaggregated', "
+                f"got {_arch!r}"
+            )
+        _want = _ARCHITECTURES[_arch]
+        if _explicit_legacy and _legacy_pair != _want:
+            raise ValueError(
+                f"subproblem.cut_architecture: {_arch} contradicts "
+                + ", ".join(sorted(_explicit_legacy))
+                + f". The architecture implies (multi_cuts_by_scenario, "
+                f"theta_per_scenario) = {_want}, the config states {_legacy_pair}. "
+                "Drop the booleans and keep the architecture, or drop the "
+                "architecture and keep the booleans -- not both."
+            )
+        sub_section.multi_cuts_by_scenario, master_section.theta_per_scenario = _want
+    elif not _has_scenarios:
+        # A single-demand run has nothing to aggregate over, so the two architectures
+        # are the same object and the booleans below say nothing about it. Naming it
+        # here keeps every manifest carrying the field, without inventing a
+        # distinction the run does not have.
+        sub_section.cut_architecture = "single_scenario"
+    else:
+        # No architecture stated. Derive it, so the manifest can still name one.
+        for name, pair in _ARCHITECTURES.items():
+            if _legacy_pair == pair:
+                sub_section.cut_architecture = name
+                break
+        else:
+            raise ValueError(
+                "subproblem.multi_cuts_by_scenario="
+                f"{_legacy_pair[0]} with master.theta_per_scenario={_legacy_pair[1]} "
+                "is neither the aggregated nor the disaggregated architecture. One cut "
+                "per scenario needs one theta per scenario, and a single theta needs a "
+                "single aggregated cut; the two halves of a mixed setting bound "
+                "different quantities. State subproblem.cut_architecture as "
+                "'aggregated' or 'disaggregated' instead."
+            )
 
     model_section = ModelSection(
         time=time_section,

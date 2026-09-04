@@ -1,0 +1,70 @@
+# B7 (audit item 1.3) -- the LEXICOGRAPHIC arm of the penalty-regime pair.
+#
+# Paired with configs/milp/penalty_regime_weighted_sum.yaml, which differs in exactly
+# one key: model.costs.objective_mode. Everything else -- instance, horizon, fleet,
+# energy, penalty, window, solver options -- is identical, so the difference between
+# the two runs is the objective hierarchy and nothing else.
+#
+# What the pair demonstrates, measured: at p_minutes 56 and slot_resolution 30 the slot
+# penalty is 56/30 ~ 1.8667, so carrying a passenger who must wait two slots costs 2
+# and rejecting them costs 1.8667. The weighted-sum arm therefore leaves 3 of 21
+# passengers behind with 12 free seats on a reachable departure; this arm, which
+# maximises served demand before it minimises waiting, carries all 21.
+#
+# See setups/penalty_regime_tiny.yaml for why the instance has that shape.
+
+schema:
+  name: mobauto2_milp_config
+  version: 3
+
+run:
+  name: penalty_regime_lexicographic
+  log_level: INFO
+  seed: 42
+
+data:
+  scenario_files: [setups/penalty_regime_tiny.yaml]
+
+model:
+  time:
+    T_minutes: 180
+    slot_resolution: 30
+    trip_duration_minutes: 30
+  fleet:
+    Q: 1
+    initial_battery: [150.0]
+    initial_actions: [IDL]
+  energy:
+    Emax: 150
+    L: 30
+    delta_chg: 70 / (60 / slot_resolution)
+  costs:
+    start_cost_epsilon: 0.01
+    concurrency_penalty: 0.25
+    objective_mode: lexicographic
+
+milp:
+  # At Q=1 there is no symmetry to break, so these are inert here rather than
+  # load-bearing. Left matching the Benders arms so the two models differ in the
+  # decomposition and in nothing else.
+  use_fifo_symmetry: true
+  symmetry_breaking: true
+  use_mip_start: true
+  # Must terminate on the gap, not the clock: a clock-truncated MIP is
+  # machine-dependent (D26) and a reference produced that way is a different number on
+  # every machine. At this size it closes in well under a second.
+  solve_time_limit_s: 120
+  mipgap: 1.0e-9
+  solver_backend: cplex
+  cplex_options:
+    CPXPARAM_MIP_Strategy_Symmetry: 5
+    CPXPARAM_Threads: 1
+
+service:
+  S: 15
+  Wmax_minutes: 60
+  p_minutes: 56.0
+  fill_first_epsilon: 0.0
+
+solver:
+  solver_tee: false

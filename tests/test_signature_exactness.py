@@ -3,14 +3,38 @@
 E1 -- the recourse depends on `y` only through the signature `Y_d[tau] = sum_q y_d[q,tau]`.
 E2 -- `y` enters the subproblem in the right-hand side only.
 
-Both are true today and nothing asserted either. E2 is D30 restated as a standing
-condition rather than a historical fix: when the subproblem's constraint SET moved with
-`y`, no cut generator on top of it could be valid, and the defect went six months unseen
-while every run reported healthy provenance.
+Both are true today. E2 is D30 restated as a standing condition rather than a historical
+fix: when the subproblem's constraint SET moved with `y`, no cut generator on top of it
+could be valid, and the defect went six months unseen while every run reported healthy
+provenance.
 
-Everything in DESIGN_DD_v1 -- the fibre argument, the window trip caps, the
-Dantzig-Wolfe reformulation -- rests on these two. If either fails, the design is void,
-not merely weakened.
+WHAT B4 CHANGED, AND WHY (audit item 1.5). This file used to assert, under E1, that two
+schedules sharing a signature return the same DUAL VECTOR. That requirement is wrong and
+has been deleted. A degenerate LP has several optimal dual solutions; each is dual
+feasible, so each yields a VALID Benders cut, and which one comes back is a fact about
+the solver's pivoting rather than about the model. Asserting equality there tested the
+solver and would have sent someone hunting a formulation bug on a correct
+implementation. Dual agreement is now LOGGED as a diagnostic -- it is genuinely useful,
+because a run whose cut depends on pivoting is not bit-reproducible -- and never
+asserted.
+
+What replaced it is what E1 actually requires: two schedules with the same signature
+build a byte-identical LP. Identical recourse matrix fingerprint, identical variable and
+constraint sets, identical objective coefficients, identical non-capacity right-hand
+sides, and identical optimal VALUE. See `mobauto2_benders/recourse_fingerprint.py`.
+
+TWO CONDITIONS THAT ARE NOT HERE ANY MORE, AND WHY. E3 (separability by vehicle) and E4
+(fleet homogeneity) were listed as "conditions for exactness". Neither is required for
+Benders validity, and calling them that misstated what a failure of either would mean:
+
+  * E3 is a COMPUTATIONAL property. It licenses the stage-3 Dantzig-Wolfe
+    reformulation. If it fails, that reformulation is unavailable; the cuts stay
+    valid and the decomposition stays exact. Renamed M1 -- master equivalence with
+    the monolith -- and tested in tests/test_fast_signature.py.
+  * E4 is the validity condition for the vehicle-ordering symmetry constraint ALONE.
+    Without a homogeneous fleet that one inequality can cut off the optimum; nothing
+    else in the model cares. Renamed M2 -- symmetry validity -- and tested in
+    tests/test_fast_model.py, which also refuses the constraint at load.
 
 Run just these:
     python -m unittest tests.test_signature_exactness -v
@@ -56,6 +80,34 @@ def _evaluate(sp_params: dict, cand: dict):
     res = ProblemSubproblem(params).evaluate(dict(cand))
     cut = (res.cuts or [res.cut])[0]
     return res, cut.metadata
+
+
+def _build_model(sp_params: dict, cand: dict):
+    """Build (do not solve) the slot recourse LP for one candidate.
+
+    Reads the candidate exactly as `ProblemSubproblem.evaluate` does -- through the
+    signature and nothing else -- so what is fingerprinted is the LP the production
+    path would have solved.
+    """
+    from mobauto2_benders.recourse_fingerprint import slot_recourse_model_for
+    from mobauto2_benders.problem.subproblem_impl import (
+        aggregate_requests,
+        load_demand_doc,
+        wmax_minutes_to_slots,
+    )
+
+    params = dict(sp_params)
+    T = int(params["T"])
+    slot_res = int(params.get("slot_resolution", 1))
+    if "Wmax_slots" not in params or params.get("Wmax_slots") is None:
+        params["Wmax_slots"] = wmax_minutes_to_slots(
+            float(params["Wmax_minutes"]), slot_res
+        )
+    R_out, R_ret = aggregate_requests(
+        load_demand_doc(Path(str(params["demand_file"]))), T, slot_res
+    )
+    Y_out, Y_ret = candidate_signature(cand, T)
+    return slot_recourse_model_for(params, Y_out, Y_ret, R_out, R_ret)
 
 
 def _slopes_by_tau(meta: dict, key: str) -> dict[int, float]:
@@ -106,6 +158,10 @@ class TestE1RecourseDependsOnlyOnTheSignature(unittest.TestCase):
         cls.res_a, cls.meta_a = _evaluate(cls.sp, cls.cand_a)
         cls.res_b, cls.meta_b = _evaluate(cls.sp, cls.cand_b)
 
+    def _model_for(self, cand: dict):
+        """The recourse LP this candidate produces, built but never solved."""
+        return _build_model(self.sp, cand)
+
     def test_the_two_candidates_really_do_differ(self):
         """Guard against a test that compares a schedule with itself."""
         differing = [k for k in self.cand_a if self.cand_a[k] != self.cand_b[k]]
@@ -127,21 +183,92 @@ class TestE1RecourseDependsOnlyOnTheSignature(unittest.TestCase):
             float(self.res_a.upper_bound), float(self.res_b.upper_bound), places=6
         )
 
-    def test_the_duals_agree_too_not_only_the_values(self):
-        """Value equality alone is too weak.
+    def test_fibre_value_invariance(self):
+        """B4. The fibre test, asserting what E1 actually requires.
 
-        Two different optimal duals give the same recourse value and two DIFFERENT
-        cuts. The master's per-slot aggregation would then be picking one arbitrarily
-        depending on which member of the fibre the master happened to hand over, and
-        a run would not be reproducible for a reason nothing reports.
+        Two schedules with the same signature must build the SAME LP: same
+        fingerprint, same variables, same rows, same objective coefficients, same
+        non-capacity right-hand sides -- and therefore the same optimal value. The
+        capacity right-hand side is deliberately excluded from the fingerprint and
+        checked separately below: it is the one channel `y` is allowed to use, and
+        excluding it is what makes the fingerprint an assertion rather than a
+        tautology.
+
+        This replaces the old dual-equality assertion. See the module docstring.
+        """
+        from mobauto2_benders.recourse_fingerprint import (
+            capacity_rhs,
+            recourse_fingerprint,
+            structural_description,
+        )
+
+        m_a = self._model_for(self.cand_a)
+        m_b = self._model_for(self.cand_b)
+
+        desc_a = structural_description(m_a)
+        desc_b = structural_description(m_b)
+
+        self.assertEqual(
+            desc_a["variables"],
+            desc_b["variables"],
+            "the two members of the fibre built different variable sets",
+        )
+        self.assertEqual(
+            sorted(desc_a["rows"]),
+            sorted(desc_b["rows"]),
+            "the two members of the fibre built different constraint sets -- `y` is "
+            "entering the constraint MATRIX, which is exactly the D30 failure",
+        )
+        self.assertEqual(
+            desc_a["objective"],
+            desc_b["objective"],
+            "the objective coefficients moved with the schedule",
+        )
+        for name in desc_a["rows"]:
+            with self.subTest(row=name):
+                self.assertEqual(
+                    desc_a["rows"][name],
+                    desc_b["rows"][name],
+                    f"row {name} differs between two schedules with one signature",
+                )
+        self.assertEqual(
+            recourse_fingerprint(m_a),
+            recourse_fingerprint(m_b),
+            "recourse matrix fingerprints differ across the fibre",
+        )
+        # The half that IS allowed to move -- and here must not, because these two
+        # schedules share a signature and the capacity vector is S times it.
+        self.assertEqual(capacity_rhs(m_a), capacity_rhs(m_b))
+        # And the value, which is the observable the cut is built from.
+        self.assertAlmostEqual(
+            float(self.res_a.upper_bound), float(self.res_b.upper_bound), places=6
+        )
+
+    def test_dual_agreement_is_reported_but_not_required(self):
+        """B4. The demoted assertion, kept as a diagnostic.
+
+        Degenerate LPs have several optimal duals and every one gives a valid cut, so
+        a difference here is NOT a defect. It is worth knowing about: a run whose cut
+        depends on which optimal dual the solver landed on is not bit-reproducible,
+        and the manifest's `bit_reproducible` field is the place that matters. So the
+        comparison still runs and still prints; it just cannot fail the suite.
         """
         for key in ("coeff_yOUT", "coeff_yRET"):
-            with self.subTest(key=key):
-                a = _slopes_by_tau(self.meta_a, key)
-                b = _slopes_by_tau(self.meta_b, key)
-                self.assertEqual(set(a), set(b))
-                for tau in a:
-                    self.assertAlmostEqual(a[tau], b[tau], places=9)
+            a = _slopes_by_tau(self.meta_a, key)
+            b = _slopes_by_tau(self.meta_b, key)
+            differing = sorted(
+                tau
+                for tau in set(a) | set(b)
+                if abs(a.get(tau, 0.0) - b.get(tau, 0.0)) > 1e-9
+            )
+            if differing:
+                print(
+                    f"[E1 DIAGNOSTIC] {key}: two members of the fibre returned "
+                    f"different optimal duals at tau={differing}. Both cuts are "
+                    "valid; the run is not bit-reproducible in its cut coefficients."
+                )
+        # Asserting nothing on purpose. The assertion this replaced was wrong.
+        self.assertTrue(True)
 
     def test_the_cut_constants_agree(self):
         self.assertAlmostEqual(

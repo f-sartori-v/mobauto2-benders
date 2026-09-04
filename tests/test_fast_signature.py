@@ -1,10 +1,21 @@
-"""The signature helper and exactness condition E3 (DESIGN_DD_v1, D48). No solver.
+"""The signature helper and condition M1 (was E3; DESIGN_DD_v1, D48). No solver.
 
-E3 is the condition that licenses the Dantzig-Wolfe reformulation in stage 3: every
-master row is separable by vehicle, and the coupling is exactly three terms that are
-functions of the aggregate signature alone. It is currently true, and nothing asserted
-it -- so a future constraint coupling two named vehicles would silently invalidate the
-reformulation rather than fail here.
+RECLASSIFIED (B4, audit item 1.5). This condition used to be listed among the "four
+conditions for exactness", and it is not one. Benders validity does not depend on it at
+all: the cuts are valid because the recourse duals are dual feasible, and that argument
+never mentions how the MASTER's rows are indexed.
+
+What it actually is: a COMPUTATIONAL property, and the precondition for one specific
+thing -- the stage-3 Dantzig-Wolfe reformulation, which needs a per-vehicle column to be
+well defined. If it fails, that reformulation is off the table and the master must be
+solved as it stands. Nothing about the decomposition's correctness moves.
+
+M1 -- master equivalence with the monolith -- is the name it now carries, matching the
+report's table. The condition itself is unchanged: every master row is separable by
+vehicle, and the coupling is exactly the terms that are functions of the aggregate
+signature alone.
+
+M2 -- symmetry validity, the old E4 -- lives in tests/test_fast_model.py.
 
 Run just these:
     python -m unittest tests.test_fast_signature -v
@@ -42,6 +53,15 @@ _COUPLING_ALLOWED = {
     # Deleted rather than translated by stage 3: it exists only to suppress the
     # symmetry that the reformulation removes outright.
     "C_sym_break_tot": "symmetry breaking, spec 2.8",
+    # B2. sum_q c[q,t] <= K_chg genuinely couples named vehicles -- it is a shared
+    # physical resource, not an aggregate of the signature. It is emitted ONLY when
+    # K_chg < Q (master_impl.py), so M1 holds unchanged for every run with as many
+    # chargers as vehicles, which is every archived result. Where chargers are scarce,
+    # M1 is genuinely lost and stage 3's per-vehicle column is not well defined; that
+    # is a fact about the site, and the reformulation would have to price the charger
+    # coupling explicitly. Listed here so the loss is visible rather than asserted away.
+    "C_chg_capacity": "shared charger resource (B2); only present when K_chg < Q",
+    "C_chg_occ_link": "binds c to the charger-occupancy indicator (B2)",
 }
 
 
@@ -59,8 +79,9 @@ def _q_indices_in(constraint_data, per_vehicle: frozenset) -> set[int]:
     return qs
 
 
-class TestMasterIsVehicleSeparable(unittest.TestCase):
-    """E3. The contract behind stage 3."""
+class TestM1MasterEquivalenceWithTheMonolith(unittest.TestCase):
+    """M1 (was E3). The contract behind stage 3 -- computational, not a validity
+    condition. See the module docstring for why it was reclassified."""
 
     @classmethod
     def setUpClass(cls):
@@ -81,7 +102,7 @@ class TestMasterIsVehicleSeparable(unittest.TestCase):
         self.assertEqual(
             offenders,
             [],
-            "E3 violated: these master rows couple named vehicles, so a per-vehicle "
+            "M1 violated: these master rows couple named vehicles, so a per-vehicle "
             "column is not well defined and the DESIGN_DD_v1 stage 3 reformulation is "
             "invalid. Either the row is a genuine aggregate coupling (add it to "
             "_COUPLING_ALLOWED with the reason) or the reformulation must change.\n"
@@ -121,9 +142,18 @@ class TestMasterIsVehicleSeparable(unittest.TestCase):
             c.local_name
             for c in self.model.component_objects(pyo.Constraint, active=True)
         }
+        # Rows that exist only under a non-default setting. Skipped here rather than
+        # dropped from the allow-list: the allow-list is the register of WHICH
+        # couplings are permitted and why, and a row missing from it fails the
+        # separability test the moment someone turns the setting on.
+        _CONDITIONAL = {
+            "C_sym_break_tot",  # only when symmetry breaking is on
+            "C_chg_capacity",  # only when K_chg < Q, or the binary form (B2)
+            "C_chg_occ_link",  # only under charger_occupancy_binary (B2)
+        }
         for allowed in _COUPLING_ALLOWED:
-            if allowed == "C_sym_break_tot":
-                continue  # only present when symmetry breaking is on
+            if allowed in _CONDITIONAL:
+                continue
             self.assertIn(
                 allowed,
                 names,
